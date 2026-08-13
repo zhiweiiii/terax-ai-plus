@@ -1,4 +1,5 @@
 export { SpaceSwitcher } from "./SpaceSwitcher";
+export { GroupSwitcher } from "./GroupSwitcher";
 export { SpaceAvatar } from "./SpaceAvatar";
 export { useSpaces } from "./lib/useSpaces";
 export { useSpacesBoot } from "./lib/useSpacesBoot";

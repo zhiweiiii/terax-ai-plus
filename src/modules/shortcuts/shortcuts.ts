@@ -80,116 +80,116 @@ export type Shortcut = {
 export const SHORTCUTS: Shortcut[] = [
   {
     id: "commandPalette.open",
-    label: "Open command palette",
+    label: "打开命令面板",
     group: "General",
     defaultBindings: [{ [MOD_PROP]: true, key: "p" }],
   },
   {
     id: "commandPalette.content",
-    label: "Find in files",
+    label: "在文件中查找",
     group: "General",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "p" }],
   },
   {
     id: "settings.open",
-    label: "Open settings",
+    label: "打开设置",
     group: "General",
     defaultBindings: [{ [MOD_PROP]: true, key: "," }],
   },
   {
     id: "tab.new",
-    label: "New tab",
+    label: "新建标签页",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, key: "t" }],
   },
   {
     id: "tab.newBlock",
-    label: "New Blocks terminal",
+    label: "新建 Blocks 终端",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "t" }],
   },
   {
     id: "tab.newPrivate",
-    label: "New private terminal",
+    label: "新建隐私终端",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, key: "r" }],
   },
   {
     id: "tab.newPreview",
-    label: "New web preview",
+    label: "新建网页预览",
     group: "Tabs",
     // Cmd/Ctrl+P now opens the command palette, so web preview moves here.
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "o" }],
   },
   {
     id: "tab.newEditor",
-    label: "New editor tab",
+    label: "新建编辑器标签页",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, key: "e" }],
   },
   {
     id: "tab.close",
-    label: "Close tab or pane",
+    label: "关闭标签页或窗格",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, key: "w" }],
   },
   {
     id: "pane.splitRight",
-    label: "Split pane right",
+    label: "向右拆分窗格",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, key: "d" }],
   },
   {
     id: "pane.splitDown",
-    label: "Split pane down",
+    label: "向下拆分窗格",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "d" }],
   },
   {
     id: "pane.focusNext",
-    label: "Focus next pane",
+    label: "聚焦下一个窗格",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, key: "]" }],
   },
   {
     id: "pane.focusPrev",
-    label: "Focus previous pane",
+    label: "聚焦上一个窗格",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, key: "[" }],
   },
   {
     id: "pane.swapLeft",
-    label: "Swap pane left",
+    label: "窗格左移",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, alt: true, key: "ArrowLeft" }],
   },
   {
     id: "pane.swapRight",
-    label: "Swap pane right",
+    label: "窗格右移",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, alt: true, key: "ArrowRight" }],
   },
   {
     id: "pane.swapUp",
-    label: "Swap pane up",
+    label: "窗格上移",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, alt: true, key: "ArrowUp" }],
   },
   {
     id: "pane.swapDown",
-    label: "Swap pane down",
+    label: "窗格下移",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, alt: true, key: "ArrowDown" }],
   },
   {
     id: "pane.source",
-    label: "Toggle source panel",
+    label: "切换源代码面板",
     group: "Panes",
     defaultBindings: [{ [MOD_PROP]: true, key: "g" }],
   },
   {
     id: "terminal.clear",
-    label: "Clear terminal",
+    label: "清空终端",
     group: "Terminal",
     // macOS Terminal's ⌘K (clear scrollback, keep the prompt). Default only on
     // macOS — on other platforms Ctrl+K is readline's kill-line, so we leave it
@@ -198,89 +198,89 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "terminal.toggleInput",
-    label: "Toggle Shell / AI input",
+    label: "切换 Shell / AI 输入",
     group: "Terminal",
     defaultBindings: [{ [MOD_PROP]: true, key: "u" }],
   },
   {
     id: "blocks.prev",
-    label: "Previous command block",
+    label: "上一个命令块",
     group: "Terminal",
     defaultBindings: [{ [MOD_PROP]: true, key: "ArrowUp" }],
     allowRepeat: true,
   },
   {
     id: "blocks.next",
-    label: "Next command block",
+    label: "下一个命令块",
     group: "Terminal",
     defaultBindings: [{ [MOD_PROP]: true, key: "ArrowDown" }],
     allowRepeat: true,
   },
   {
     id: "tab.next",
-    label: "Next tab",
+    label: "下一个标签页",
     group: "Tabs",
     defaultBindings: [{ ctrl: true, key: "Tab" }],
     allowRepeat: true,
   },
   {
     id: "tab.prev",
-    label: "Previous tab",
+    label: "上一个标签页",
     group: "Tabs",
     defaultBindings: [{ ctrl: true, shift: true, key: "Tab" }],
     allowRepeat: true,
   },
   {
     id: "tab.selectByIndex",
-    label: "Jump to tab 1–9",
+    label: "跳转到标签页 1-9",
     group: "Tabs",
     defaultBindings: [{ [MOD_PROP]: true, key: "1" }],
   },
   {
     id: "space.next",
-    label: "Next space",
+    label: "下一个工作区",
     group: "Spaces",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "]" }],
   },
   {
     id: "space.prev",
-    label: "Previous space",
+    label: "上一个工作区",
     group: "Spaces",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "[" }],
   },
   {
     id: "space.overview",
-    label: "Open spaces",
+    label: "打开工作区列表",
     group: "Spaces",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "s" }],
   },
   {
     id: "explorer.search",
-    label: "Search files",
+    label: "搜索文件",
     group: "Search",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "f" }],
   },
   {
     id: "search.focus",
-    label: "Find in tab",
+    label: "在标签页内查找",
     group: "Search",
     defaultBindings: [{ [MOD_PROP]: true, key: "f" }],
   },
   {
     id: "ai.toggle",
-    label: "Toggle AI agent",
+    label: "切换 AI 智能体",
     group: "AI",
     defaultBindings: [{ [MOD_PROP]: true, key: "i" }],
   },
   {
     id: "ai.toggleMini",
-    label: "Toggle AI chat window",
+    label: "切换 AI 对话窗口",
     group: "AI",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "i" }],
   },
   {
     id: "ai.askSelection",
-    label: "Ask AI about selection",
+    label: "把选中内容发给 Claude Code",
     group: "AI",
     // Keep Mod+L available to the shell for clear-screen, including when
     // terminal text is selected and this shortcut is otherwise eligible.
@@ -288,13 +288,13 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "agent.focusAttention",
-    label: "Jump to agent needing attention",
+    label: "跳转到需要处理的智能体",
     group: "AI",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "a" }],
   },
   {
     id: "sidebar.toggle",
-    label: "Toggle file explorer",
+    label: "切换文件浏览器",
     group: "View",
     // Plain Mod+B toggles the sidebar everywhere EXCEPT a focused terminal,
     // where it's handed to the shell / Claude Code (its "run in background"
@@ -306,13 +306,13 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "explorer.focus",
-    label: "Toggle file explorer focus",
+    label: "切换文件浏览器焦点",
     group: "View",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "e" }],
   },
   {
     id: "view.zoomIn",
-    label: "Zoom in",
+    label: "放大",
     group: "View",
     defaultBindings: [
       { [MOD_PROP]: true, key: "=" },
@@ -322,7 +322,7 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "view.zoomOut",
-    label: "Zoom out",
+    label: "缩小",
     group: "View",
     defaultBindings: [
       { [MOD_PROP]: true, key: "-" },
@@ -332,13 +332,13 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "view.zoomReset",
-    label: "Reset zoom",
+    label: "重置缩放",
     group: "View",
     defaultBindings: [{ [MOD_PROP]: true, key: "0" }],
   },
   {
     id: "view.zenMode",
-    label: "Toggle zen mode",
+    label: "切换禅模式",
     group: "View",
     defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "'" }],
   },
@@ -349,25 +349,25 @@ export const SHORTCUTS: Shortcut[] = [
   // Also excluded from the customization UI in ShortcutsSection.
   {
     id: "editor.undo",
-    label: "Undo",
+    label: "撤销",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "z" }],
   },
   {
     id: "editor.redo",
-    label: "Redo",
+    label: "重做",
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "y" }],
   },
   {
     id: "editor.aiComplete",
-    label: "Trigger AI completion",
+    label: "触发 AI 补全",
     group: "Editor",
     defaultBindings: [{ alt: true, key: "\\" }],
   },
   {
     id: "editor.codeComplete",
-    label: "Trigger code completion",
+    label: "触发代码补全",
     group: "Editor",
     defaultBindings: [{ ctrl: true, key: " " }],
   },
@@ -383,6 +383,19 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "AI",
   "Editor",
 ];
+
+// Group ids stay English so they keep working as stable keys; only display text is localized.
+export const SHORTCUT_GROUP_LABELS: Record<ShortcutGroup, string> = {
+  General: "通用",
+  Tabs: "标签页",
+  Spaces: "工作区",
+  Panes: "窗格",
+  Terminal: "终端",
+  Search: "搜索",
+  AI: "AI",
+  View: "视图",
+  Editor: "编辑器",
+};
 
 /**
  * Matching logic: checks if a KeyboardEvent matches a KeyBinding.

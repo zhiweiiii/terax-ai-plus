@@ -14,6 +14,7 @@ import {
   readTerminalClipboard,
   writeTerminalClipboard,
 } from "./terminalClipboard";
+import { clipboardAttachmentText } from "./clipboardAttachments";
 import { pasteIntoTerminal } from "./terminalPaste";
 import { terminalReadlineSequence } from "./keymap";
 import { createTerminalLinkHandler } from "./terminalLinks";
@@ -294,9 +295,12 @@ function createSlot(): Slot {
     if (isTerminalPaste(event)) {
       if (event.type === "keydown") {
         const targetLeafId = slot.currentLeafId;
-        void readTerminalClipboard().then((text) => {
+        void (async () => {
+          // An image on the clipboard becomes a file path; otherwise paste text.
+          const attachment = await clipboardAttachmentText();
+          const text = attachment ?? (await readTerminalClipboard());
           if (text && slot.currentLeafId === targetLeafId) slot.term.paste(text);
-        });
+        })();
       }
       event.preventDefault();
       return false;
@@ -1067,11 +1071,13 @@ function isTerminalCopy(e: KeyboardEvent): boolean {
   );
 }
 
+// Ctrl+Shift+V (the terminal convention) and plain Ctrl+V both paste. Ctrl+V
+// would otherwise reach the shell as a literal ^V, which no one wants on
+// Windows/Linux where it is the universal paste chord.
 function isTerminalPaste(e: KeyboardEvent): boolean {
   return (
     !IS_MAC &&
     e.ctrlKey &&
-    e.shiftKey &&
     !e.altKey &&
     !e.metaKey &&
     (e.code === "KeyV" || e.key === "v" || e.key === "V")

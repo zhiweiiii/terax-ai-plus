@@ -55,11 +55,11 @@ export type CommandPaletteActionContext = {
   askAiSelection: () => void;
   openSettings: () => void;
   openKeyboardShortcuts: () => void;
-  spaces: { id: string; name: string }[];
-  activeSpaceId: string | null;
-  openSpacesOverview: () => void;
-  newSpace: () => void;
-  switchSpace: (id: string) => void;
+  spaces?: { id: string; name: string }[];
+  activeSpaceId?: string | null;
+  openSpacesOverview?: () => void;
+  newSpace?: () => void;
+  switchSpace?: (id: string) => void;
 };
 
 const noop = () => {};
@@ -108,32 +108,36 @@ export function createCommandItems(
       icon: KeyboardIcon,
       run: ctx.openKeyboardShortcuts,
     },
-    {
-      id: "spaces.overview",
-      title: "Spaces: Overview",
-      group: "Spaces",
-      keywords: ["spaces", "sessions", "overview", "organize", "manage", "move"],
-      icon: DashboardSquare01Icon,
-      run: ctx.openSpacesOverview,
-    },
-    {
-      id: "spaces.new",
-      title: "New Space",
-      group: "Spaces",
-      keywords: ["space", "session", "workspace", "group", "create"],
-      icon: DashboardSquare01Icon,
-      run: ctx.newSpace,
-    },
-    ...ctx.spaces.map((sp) => ({
-      id: `spaces.switch.${sp.id}`,
-      title: `Switch to ${sp.name}`,
-      group: "Spaces" as const,
-      keywords: ["space", "switch", "session", sp.name],
-      icon: DashboardSquare01Icon,
-      disabledReason:
-        sp.id === ctx.activeSpaceId ? "Current space" : undefined,
-      run: () => ctx.switchSpace(sp.id),
-    })),
+    ...(ctx.openSpacesOverview && ctx.newSpace && ctx.spaces && ctx.switchSpace
+      ? [
+          {
+            id: "spaces.overview",
+            title: "Spaces: Overview",
+            group: "Spaces" as const,
+            keywords: ["spaces", "sessions", "overview", "organize", "manage", "move"],
+            icon: DashboardSquare01Icon,
+            run: ctx.openSpacesOverview,
+          },
+          {
+            id: "spaces.new",
+            title: "New Space",
+            group: "Spaces" as const,
+            keywords: ["space", "session", "workspace", "group", "create"],
+            icon: DashboardSquare01Icon,
+            run: ctx.newSpace,
+          },
+          ...ctx.spaces.map((sp) => ({
+            id: `spaces.switch.${sp.id}`,
+            title: `Switch to ${sp.name}`,
+            group: "Spaces" as const,
+            keywords: ["space", "switch", "session", sp.name],
+            icon: DashboardSquare01Icon,
+            disabledReason:
+              sp.id === ctx.activeSpaceId ? "Current space" : undefined,
+            run: () => ctx.switchSpace!(sp.id),
+          })),
+        ]
+      : []),
     {
       id: "tab.new",
       title: "New terminal",

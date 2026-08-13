@@ -177,6 +177,20 @@ export function submitToLeaf(leafId: number, text: string): void {
   else queuePendingInput(s, data);
 }
 
+/**
+ * Bracketed-paste text into a leaf without submitting it, so the user can
+ * type a follow-up question before pressing Enter. Used to hand a code
+ * selection to an agent (Claude Code) already running in that pane.
+ */
+export function pasteToLeaf(leafId: number, text: string): boolean {
+  const s = sessions.get(leafId);
+  if (!s || s.shellExited) return false;
+  const data = `\x1b[200~${text}\x1b[201~`;
+  if (s.pty) void s.pty.write(data);
+  else queuePendingInput(s, data);
+  return true;
+}
+
 export function interruptLeaf(leafId: number): void {
   sessions.get(leafId)?.pty?.write("\x03");
 }
@@ -277,6 +291,14 @@ export function blockWatermarkState(leafId: number): WatermarkState {
  * the active prompt line — macOS Terminal's ⌘K behaviour. Returns false when no
  * focused terminal slot is bound (e.g. focus is in the editor or AI panel).
  */
+/** Leaf id of the visible, focused terminal pane, or null when none is. */
+export function focusedLeafId(): number | null {
+  for (const [leafId, s] of sessions) {
+    if (s.visibleNow && s.focusedNow) return leafId;
+  }
+  return null;
+}
+
 export function clearFocusedTerminal(): boolean {
   for (const [leafId, s] of sessions) {
     if (!s.visibleNow || !s.focusedNow) continue;

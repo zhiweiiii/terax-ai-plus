@@ -44,7 +44,7 @@ function readSidebarWidth(): number {
 function readSidebarView(): SidebarViewId {
   try {
     const stored = window.localStorage.getItem(SIDEBAR_VIEW_STORAGE_KEY);
-    if (stored === "explorer" || stored === "source-control") return stored;
+    if (stored === "explorer" || stored === "source-control" || stored === "open-files") return stored;
   } catch {
     // ignore
   }
@@ -75,6 +75,7 @@ export function useSidebarPanel(
     useState<SidebarViewId>(readSidebarView);
   const [initialSidebarCollapsed] = useState(readSidebarCollapsed);
   const collapsedRef = useRef(initialSidebarCollapsed);
+  const [sidebarOpen, setSidebarOpen] = useState(!initialSidebarCollapsed);
 
   const persistSidebarView = useCallback((view: SidebarViewId) => {
     setSidebarViewState(view);
@@ -88,6 +89,7 @@ export function useSidebarPanel(
   const persistSidebarCollapsed = useCallback((collapsed: boolean) => {
     if (collapsedRef.current === collapsed) return;
     collapsedRef.current = collapsed;
+    setSidebarOpen(!collapsed);
     try {
       window.localStorage.setItem(
         SIDEBAR_COLLAPSED_STORAGE_KEY,
@@ -197,6 +199,7 @@ export function useSidebarPanel(
     sidebarRef,
     sidebarWidthRef,
     sidebarView,
+    sidebarOpen,
     initialSidebarCollapsed,
     persistSidebarView,
     persistSidebarCollapsed,

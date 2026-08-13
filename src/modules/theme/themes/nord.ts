@@ -10,7 +10,7 @@ const NORD_ANSI = [
 export const nord: Theme = {
   id: "nord",
   name: "Nord",
-  description: "Arctic, north-bluish palette.",
+  description: "北极风格的偏蓝配色。",
   editorTheme: { dark: "nord", light: "xcode-light" },
   variants: {
     dark: {

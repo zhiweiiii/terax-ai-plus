@@ -888,7 +888,7 @@ export type SttProvider = "openai" | "groq" | "whispercpp";
 export const STT_PROVIDER_LABELS: Record<SttProvider, string> = {
   openai: "OpenAI Whisper",
   groq: "Groq Whisper",
-  whispercpp: "Whisper.cpp (local)",
+  whispercpp: "Whisper.cpp (本地)",
 };
 
 export const DEFAULT_STT_PROVIDER: SttProvider = "openai";

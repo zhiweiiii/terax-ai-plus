@@ -24,7 +24,11 @@ import {
 } from "react";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { fileIconUrl } from "./lib/iconResolver";
-import { copyToClipboard, revealInFinder } from "./lib/contextActions";
+import {
+  copyToClipboard,
+  openWithSystemApp,
+  revealInFinder,
+} from "./lib/contextActions";
 import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
 import { cn } from "@/lib/utils";
 
@@ -52,7 +56,6 @@ type Props = {
   onRevealInTerminal?: (path: string) => void;
   onOpenInSourceControl?: (path: string) => void;
   onOpenGitHistory?: (path: string) => void;
-  onAttachToAgent?: (path: string) => void;
 };
 
 export type ExplorerSearchHandle = {
@@ -69,7 +72,6 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
   onRevealInTerminal,
   onOpenInSourceControl,
   onOpenGitHistory,
-  onAttachToAgent,
 }: Props,
   ref,
 ) {
@@ -279,7 +281,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
                           className={COMPACT_ITEM}
                           onSelect={() => onOpenFile(hit.path)}
                         >
-                          Open
+                          打开
                         </ContextMenuItem>
                       )}
                       {hit.is_dir && onRevealInTerminal && (
@@ -287,7 +289,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
                           className={COMPACT_ITEM}
                           onSelect={() => onRevealInTerminal(hit.path)}
                         >
-                          Open in Terminal
+                          在终端中打开
                         </ContextMenuItem>
                       )}
                       {hit.is_dir && onOpenInSourceControl && (
@@ -295,7 +297,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
                           className={COMPACT_ITEM}
                           onSelect={() => onOpenInSourceControl(hit.path)}
                         >
-                          Open in Source Control
+                          在版本控制中打开
                         </ContextMenuItem>
                       )}
                       {hit.is_dir && onOpenGitHistory && (
@@ -303,28 +305,29 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(function E
                           className={COMPACT_ITEM}
                           onSelect={() => onOpenGitHistory(hit.path)}
                         >
-                          Open Git History
+                          查看提交历史
+                        </ContextMenuItem>
+                      )}
+                      {!hit.is_dir && (
+                        <ContextMenuItem
+                          className={COMPACT_ITEM}
+                          onSelect={() => void openWithSystemApp(hit.path)}
+                        >
+                          直接运行
                         </ContextMenuItem>
                       )}
                       <ContextMenuItem
                         className={COMPACT_ITEM}
                         onSelect={() => void revealInFinder(hit.path)}
                       >
-                        Reveal in Finder
+                        在文件管理器中显示
                       </ContextMenuItem>
                       <ContextMenuSeparator />
                       <ContextMenuItem
                         className={COMPACT_ITEM}
                         onSelect={() => void copyToClipboard(hit.path)}
                       >
-                        Copy Path
-                      </ContextMenuItem>
-                      <ContextMenuSeparator />
-                      <ContextMenuItem
-                        className={COMPACT_ITEM}
-                        onSelect={() => onAttachToAgent?.(hit.path)}
-                      >
-                        Attach to Agent
+                        复制路径
                       </ContextMenuItem>
                     </ContextMenuContent>
                   </ContextMenu>

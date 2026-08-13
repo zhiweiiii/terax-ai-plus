@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const gruvbox: Theme = {
   id: "gruvbox",
   name: "Gruvbox",
-  description: "Warm, earthy retro palette.",
+  description: "温暖质朴的复古配色。",
   editorTheme: { dark: "gruvbox-dark", light: "github-light" },
   variants: {
     dark: {

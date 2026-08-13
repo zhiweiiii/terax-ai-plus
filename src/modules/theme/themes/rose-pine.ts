@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const rosePine: Theme = {
   id: "rose-pine",
   name: "Rosé Pine",
-  description: "Soho vibes, all-natural pine and rose.",
+  description: "Soho 气质，天然的松木与玫瑰色。",
   editorTheme: { dark: "rose-pine", light: "rose-pine-dawn" },
   variants: {
     dark: {

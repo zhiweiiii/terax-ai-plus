@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const tokyoNight: Theme = {
   id: "tokyo-night",
   name: "Tokyo Night",
-  description: "Calm, blue-leaning dark theme.",
+  description: "沉静偏蓝的暗色主题。",
   editorTheme: { dark: "tokyo-night" },
   variants: {
     dark: {

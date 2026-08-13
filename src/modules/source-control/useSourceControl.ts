@@ -215,8 +215,10 @@ function touchAutoFetch(map: Map<string, number>, key: string): void {
 
 export function useSourceControl(
   contextPath: string | null,
-  enabled: boolean = true,
+  enabled?: boolean,
+  repoRoot?: string | null,
 ): SourceControlSummary {
+  const _enabled = enabled ?? true;
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
   const workspaceKey = workspaceScopeKey(workspaceEnv);
   const [state, setState] = useState<SourceControlSummaryState>({
@@ -233,9 +235,10 @@ export function useSourceControl(
   const requestIdRef = useRef(0);
   const inflightRef = useRef<InflightRefresh | null>(null);
   const autoFetchByRepoRef = useRef(new Map<string, number>());
-  const enabledRef = useRef(enabled);
+  const enabledRef = useRef(_enabled);
   const lastRefreshAtRef = useRef(0);
   const resetWorkspaceKeyRef = useRef(workspaceKey);
+  const repoRootRef = useRef(repoRoot ?? null);
   const contextKey = sourceControlContextKey(workspaceKey, contextPath);
   const contextKeyRef = useRef(contextKey);
   contextKeyRef.current = contextKey;
@@ -245,8 +248,12 @@ export function useSourceControl(
   }, [state]);
 
   useEffect(() => {
-    enabledRef.current = enabled;
-  }, [enabled]);
+    enabledRef.current = _enabled;
+  }, [_enabled]);
+
+  useEffect(() => {
+    repoRootRef.current = repoRoot ?? null;
+  }, [repoRoot]);
 
   useEffect(() => {
     if (resetWorkspaceKeyRef.current === workspaceKey) return;
@@ -308,9 +315,10 @@ export function useSourceControl(
       }
 
       const activeRoot = stateRef.current.repo?.repoRoot ?? null;
-      const reusableRoot = repositoryContainsContext(activeRoot, contextPath)
-        ? activeRoot
-        : null;
+      const explicitRoot = repoRootRef.current;
+      const reusableRoot =
+        explicitRoot ||
+        (repositoryContainsContext(activeRoot, contextPath) ? activeRoot : null);
 
       setState((current) =>
         beginSourceControlRefresh(current, contextPath, !!reusableRoot),
@@ -320,7 +328,30 @@ export function useSourceControl(
         let repo: GitRepoInfo | null;
         let status: GitStatusSnapshot | null;
 
-        if (reusableRoot) {
+        // Explicit repo root: skip panel_snapshot and go directly to status.
+        if (explicitRoot) {
+          try {
+            status = await native.gitStatus(explicitRoot);
+            if (!isCurrentRequest()) return;
+            repo = {
+              repoRoot: explicitRoot,
+              branch: status.branch,
+              upstream: status.upstream,
+              isDetached: status.isDetached,
+            };
+          } catch {
+            if (!isCurrentRequest()) return;
+            setState((current) => ({
+              ...current,
+              repo: null,
+              status: null,
+              hasRepo: false,
+              isLoading: false,
+              localError: null,
+            }));
+            return;
+          }
+        } else if (reusableRoot) {
           try {
             repo = stateRef.current.repo ?? null;
             status = await native.gitStatus(reusableRoot);
@@ -506,7 +537,7 @@ export function useSourceControl(
   );
 
   useEffect(() => {
-    if (!enabled) {
+    if (!_enabled) {
       requestIdRef.current++;
       setState({
         contextPath: null,
@@ -550,10 +581,10 @@ export function useSourceControl(
         window.clearTimeout(idle as number);
       }
     };
-  }, [refresh, contextPath, enabled]);
+  }, [refresh, contextPath, _enabled, repoRoot]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!_enabled) return;
     let timer = 0;
     const onFocus = () => {
       if (timer) window.clearTimeout(timer);

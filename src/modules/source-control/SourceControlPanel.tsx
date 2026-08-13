@@ -102,6 +102,8 @@ type Props = {
   onNavigateToPath?: (path: string) => void;
   repositoryTarget: SourceControlRepositoryTarget;
   onFollowRepositoryContext: () => void;
+  /** Optional extra content rendered in the panel header (e.g. multi-repo selector). */
+  headerExtra?: ReactNode;
 };
 
 const SOURCE_CONTROL_TOOLTIP_CLASS =
@@ -110,12 +112,14 @@ const SOURCE_CONTROL_TOOLTIP_CLASS =
 const ROW_HEIGHTS = {
   banner: 32,
   header: 30,
+  folder: 24,
   entry: 30,
 } as const;
 
 type RowDescriptor =
   | { kind: "banner-diverged"; key: string }
   | { kind: "list-header"; key: string; count: number }
+  | { kind: "folder-header"; key: string; label: string; count: number }
   | { kind: "entry"; key: string; entry: SourceControlFileEntry };
 
 function basename(path: string): string {
@@ -128,11 +132,6 @@ function dirname(path: string): string {
   const index = normalized.lastIndexOf("/");
   if (index <= 0) return "";
   return normalized.slice(0, index);
-}
-
-function entryPathLabel(entry: SourceControlFileEntry): string {
-  if (entry.originalPath) return `${entry.originalPath} → ${entry.path}`;
-  return dirname(entry.path);
 }
 
 function upstreamBadgeLabel(upstream: string | null | undefined): string {
@@ -396,6 +395,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   onNavigateToPath,
   repositoryTarget,
   onFollowRepositoryContext,
+  headerExtra,
 }: Props) {
   const scm = useSourceControlPanel(open, sourceControl, onOpenDiff);
   const refreshAnimationRef = useRef<number | null>(null);
@@ -532,8 +532,33 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         key: "list-header",
         count: changedCount,
       });
+      // Group entries by their parent directory (like IDEA's Changes view).
+      // Only insert a folder header when ≥2 files share the same directory.
+      const groups = new Map<string, SourceControlFileEntry[]>();
       for (const entry of scm.fileEntries) {
-        result.push({ kind: "entry", key: entry.key, entry });
+        const dir = dirname(entry.path);
+        const bucket = groups.get(dir);
+        if (bucket) bucket.push(entry);
+        else groups.set(dir, [entry]);
+      }
+      const sortedDirs = [...groups.keys()].sort((a, b) => {
+        if (a === "" && b !== "") return -1;
+        if (b === "" && a !== "") return 1;
+        return a.localeCompare(b);
+      });
+      for (const dir of sortedDirs) {
+        const entries = groups.get(dir)!;
+        if (entries.length > 1) {
+          result.push({
+            kind: "folder-header",
+            key: `folder:${dir}`,
+            label: dir || "(root)",
+            count: entries.length,
+          });
+        }
+        for (const entry of entries) {
+          result.push({ kind: "entry", key: entry.key, entry });
+        }
       }
     }
     return result;
@@ -569,6 +594,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           return ROW_HEIGHTS.banner;
         case "list-header":
           return ROW_HEIGHTS.header;
+        case "folder-header":
+          return ROW_HEIGHTS.folder;
         case "entry":
           return ROW_HEIGHTS.entry;
       }
@@ -682,6 +709,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       <aside className="flex h-full min-w-0 flex-col bg-card/80 backdrop-blur [contain:layout_style]">
         <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 pb-2.5 pt-3">
           <div className="flex min-w-0 items-center gap-1.5">
+            {headerExtra}
             <BranchDropdown
               repoRoot={
                 fixedTargetPending ? null : (scm.repo?.repoRoot ?? null)
@@ -1136,6 +1164,8 @@ const RowRenderer = memo(function RowRenderer(props: RowRendererProps) {
       return <DivergedBanner />;
     case "list-header":
       return <ListHeader {...props} row={row} />;
+    case "folder-header":
+      return <FolderHeader row={row} />;
     case "entry":
       return <EntryRow {...props} row={row} />;
   }
@@ -1155,6 +1185,29 @@ function DivergedBanner() {
           Diverged from upstream
         </span>
         <span className="ml-1 opacity-75">— resolve in terminal</span>
+      </span>
+    </div>
+  );
+}
+
+function FolderHeader({
+  row,
+}: {
+  row: Extract<RowDescriptor, { kind: "folder-header" }>;
+}) {
+  return (
+    <div className="flex h-6 items-center gap-2 px-3">
+      <HugeiconsIcon
+        icon={Folder01Icon}
+        size={11}
+        strokeWidth={2}
+        className="shrink-0 text-muted-foreground/70"
+      />
+      <span className="truncate text-[10.5px] font-medium text-muted-foreground/80">
+        {row.label}
+      </span>
+      <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-border/50 px-1 text-[9px] tabular-nums text-muted-foreground/60">
+        {row.count}
       </span>
     </div>
   );
@@ -1208,7 +1261,6 @@ const EntryRow = memo(function EntryRow({
   const isSelected = selectedPath === entry.path;
   const fileName = basename(entry.path);
   const iconUrl = fileIconUrl(fileName);
-  const pathLabel = entryPathLabel(entry);
   const showDiscard = entry.unstaged;
   const isStageBusy =
     actionBusy === `stage:${entry.path}` ||
@@ -1233,7 +1285,8 @@ const EntryRow = memo(function EntryRow({
           aria-selected={isSelected}
           onMouseDown={() => onFocusRow(row.key)}
           className={cn(
-            "group relative flex h-[30px] items-center gap-2 rounded-md pl-2 pr-2 transition-all duration-100",
+            "group relative flex h-[30px] items-center gap-2 rounded-md pr-2 transition-all duration-100",
+            dirname(entry.path) ? "pl-5" : "pl-2",
             focused
               ? "bg-accent/60"
               : isSelected
@@ -1267,20 +1320,14 @@ const EntryRow = memo(function EntryRow({
             <div className="flex min-w-0 flex-1 items-baseline gap-1.5 leading-none">
               <span
                 className={cn(
-                  "truncate text-[12px] leading-tight",
+                  "min-w-0 flex-1 truncate text-[12px] leading-tight",
                   isSelected || focused
                     ? "font-semibold text-foreground"
                     : "font-medium text-foreground/95",
-                  pathLabel ? "max-w-[58%] shrink-0" : "min-w-0 flex-1",
                 )}
               >
                 {fileName}
               </span>
-              {pathLabel ? (
-                <span className="min-w-0 flex-1 truncate text-[10.5px] leading-tight text-muted-foreground/75">
-                  {pathLabel}
-                </span>
-              ) : null}
             </div>
           </button>
 

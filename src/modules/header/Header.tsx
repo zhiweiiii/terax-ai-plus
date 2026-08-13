@@ -2,22 +2,14 @@ import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { NotificationBell } from "@/modules/agents";
-import type { AgentLaunchRequest } from "@/modules/agents/lib/launcher";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import {
   CommandIcon,
   Settings01Icon,
-  SidebarLeftIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import {
-  type ReactNode,
-  type RefObject,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, type RefObject } from "react";
 import {
   SearchInline,
   type SearchInlineHandle,
@@ -34,26 +26,24 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
-  onLaunchAgents: (request: AgentLaunchRequest) => void;
+  onLaunchAgents: (request: any) => void;
   onClose: (id: number) => void;
-  /** Promote a preview (transient) tab to persistent. */
   onPin: (id: number) => void;
-  /** Set a terminal tab's custom label; empty string resets to default. */
   onRename: (id: number, title: string) => void;
-  /** Move a dragged tab to a new position (insertion gap index). */
   onReorder: (fromId: number, toGapIndex: number) => void;
   onOverrideLanguage?: (id: number, lang: string | null) => void;
-  onToggleSidebar: () => void;
   onOpenCommandPalette: () => void;
   onActivateAgent: (tabId: number, leafId: number) => void;
   onActivateLocalAgent: () => void;
   onOpenSettings: () => void;
-  spaceSwitcher: ReactNode;
   searchTarget: SearchTarget;
   searchRef: RefObject<SearchInlineHandle | null>;
+  headerTabs?: ReactNode;
+  /** Group (space) switcher rendered before the tab strip. */
+  groupSwitcher?: ReactNode;
+  onLaunchClaude?: () => void;
+  onLaunchClaudeC?: () => void;
 };
-
-const COMPACT_WIDTH = 720;
 
 export function Header({
   tabs,
@@ -71,28 +61,17 @@ export function Header({
   onRename,
   onReorder,
   onOverrideLanguage,
-  onToggleSidebar,
   onOpenCommandPalette,
   onActivateAgent,
   onActivateLocalAgent,
   onOpenSettings,
-  spaceSwitcher,
   searchTarget,
   searchRef,
+  headerTabs,
+  groupSwitcher,
+  onLaunchClaude,
+  onLaunchClaudeC,
 }: Props) {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const [compact, setCompact] = useState(false);
-
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? 0;
-      setCompact(w < COMPACT_WIDTH);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   const settingsButton = (
     <Button
@@ -108,23 +87,13 @@ export function Header({
 
   return (
     <div
-      ref={rootRef}
       data-tauri-drag-region
       className={`flex h-10 shrink-0 items-center gap-2 border-b border-border/60 bg-card select-none ${
         IS_MAC ? "pr-2 pl-20" : "pr-0 pl-2"
       }`}
     >
       <div className="flex shrink-0 items-center gap-0.5">
-        <Button
-          onClick={onToggleSidebar}
-          title="Toggle sidebar"
-          variant="ghost"
-          size="icon-sm"
-          className="shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-        >
-          <HugeiconsIcon icon={SidebarLeftIcon} size={18} strokeWidth={1.75} />
-        </Button>
-
+        {headerTabs}
         <Button
           size="icon-sm"
           variant="ghost"
@@ -141,17 +110,38 @@ export function Header({
             onActivateLocal={onActivateLocalAgent}
           />
         )}
+        {onLaunchClaude && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="h-6 shrink-0 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+            onClick={onLaunchClaude}
+            title="Launch Claude Code"
+          >
+            C
+          </Button>
+        )}
+        {onLaunchClaudeC && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="h-6 shrink-0 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+            onClick={onLaunchClaudeC}
+            title="Launch Claude Code -c"
+          >
+            C-C
+          </Button>
+        )}
       </div>
 
       {!IS_MAC && <span className="mx-1 h-full w-px shrink-0 bg-border/70" />}
-
       {IS_MAC && <span className="mr-1 h-full w-px shrink-0 bg-border/70" />}
 
       <div
         className="flex min-w-0 flex-1 items-center gap-2"
         data-tauri-drag-region
       >
-        {spaceSwitcher}
+        {groupSwitcher}
         <TabBar
           tabs={tabs}
           activeId={activeId}
@@ -168,12 +158,11 @@ export function Header({
           onRename={onRename}
           onReorder={onReorder}
           onOverrideLanguage={onOverrideLanguage}
-          compact={compact}
         />
         <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
       </div>
 
-      <SearchInline ref={searchRef} target={searchTarget} compact={compact} />
+      <SearchInline ref={searchRef} target={searchTarget} compact={false} />
 
       {IS_MAC && (
         <>

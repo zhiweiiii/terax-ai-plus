@@ -39,7 +39,7 @@ export function LspServersGroup() {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <Label>Language servers</Label>
+        <Label>语言服务器</Label>
         <AddCustomServerDialog customServers={customServers} />
       </div>
       {servers.map((server) => (
@@ -83,10 +83,10 @@ function ServerRow({
   const langs = Object.keys(server.languages).join(", ");
   const status =
     detected === undefined
-      ? "checking..."
+      ? "检测中..."
       : detected
         ? detected
-        : "not found on PATH";
+        : "PATH 中未找到";
   const switchState = resolveLspSwitchState(enabled, detected);
 
   return (
@@ -106,7 +106,7 @@ function ServerRow({
           type="button"
           className="cursor-pointer rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           onClick={() => void redetectBinary(server.command)}
-          title="Detect again"
+          title="重新检测"
         >
           <HugeiconsIcon icon={Refresh01Icon} size={12} strokeWidth={1.75} />
         </button>
@@ -120,7 +120,7 @@ function ServerRow({
                 customServers.filter((c) => c.id !== server.id),
               );
             }}
-            title="Remove server"
+            title="移除服务器"
           >
             <HugeiconsIcon icon={Delete02Icon} size={12} strokeWidth={1.75} />
           </button>
@@ -128,7 +128,7 @@ function ServerRow({
         <Switch
           checked={switchState.checked}
           disabled={switchState.checking}
-          aria-label={`${switchState.checked ? "Disable" : "Enable"} ${server.name} language server`}
+          aria-label={`${switchState.checked ? "停用" : "启用"} ${server.name} 语言服务器`}
           onCheckedChange={(checked) => {
             if (!checked) {
               void setLspActivation(server.id, "dismissed");
@@ -199,17 +199,18 @@ function AddCustomServerDialog({
   };
 
   const field = (
+    key: string,
     label: string,
     value: string,
     onChange: (v: string) => void,
     placeholder: string,
   ) => (
     <div className="flex flex-col gap-1">
-      <Label htmlFor={`${formId}-${label}`} className="text-[11px]">
+      <Label htmlFor={`${formId}-${key}`} className="text-[11px]">
         {label}
       </Label>
       <Input
-        id={`${formId}-${label}`}
+        id={`${formId}-${key}`}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -222,24 +223,24 @@ function AddCustomServerDialog({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]">
-          Add custom server
+          添加自定义服务器
         </Button>
       </DialogTrigger>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle className="text-sm">Custom language server</DialogTitle>
+          <DialogTitle className="text-sm">自定义语言服务器</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-2.5">
-          {field("Name", name, setName, "Zig")}
-          {field("Command", command, setCommand, "zls")}
-          {field("Arguments", args, setArgs, "--stdio")}
-          {field("File extensions", extensions, setExtensions, "zig, zon")}
-          {field("LSP language id", languageId, setLanguageId, "zig")}
-          {field("Root markers", rootMarkers, setRootMarkers, "build.zig")}
+          {field("name", "名称", name, setName, "Zig")}
+          {field("command", "命令", command, setCommand, "zls")}
+          {field("args", "参数", args, setArgs, "--stdio")}
+          {field("exts", "文件扩展名", extensions, setExtensions, "zig, zon")}
+          {field("langid", "LSP 语言 id", languageId, setLanguageId, "zig")}
+          {field("roots", "根目录标记", rootMarkers, setRootMarkers, "build.zig")}
         </div>
         <DialogFooter>
           <Button size="sm" disabled={!valid} onClick={save}>
-            Add server
+            添加服务器
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -1,5 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 
 use crate::modules::git::errors::{GitError, Result};
 use crate::modules::git::parser::parse_porcelain_v2;
@@ -9,9 +11,9 @@ use crate::modules::git::process::{
 };
 use crate::modules::git::types::{
     DiscardEntry, GitBranchEntry, GitBranchListResult, GitCommitFileChange, GitCommitResult,
-    GitDiffContentResult, GitDiffResult, GitLogEntry, GitOutput, GitPanelSnapshot,
-    GitPushResult, GitRepoInfo, GitStatusSnapshot, TextSource, DEFAULT_TIMEOUT_SECS,
-    NETWORK_TIMEOUT_SECS,
+    GitDiffContentResult, GitDiffResult, GitFetchResult, GitLogEntry, GitMultiRepoEntry,
+    GitOutput, GitPanelSnapshot, GitPushResult, GitRepoHead, GitRepoInfo, GitStatusSnapshot,
+    GitWorkspaceSnapshot, TextSource, DEFAULT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
 use crate::modules::git::utils::{
     authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream,
@@ -1147,7 +1149,316 @@ pub fn checkout_branch(
     ensure_success(&output, "git checkout failed")
 }
 
-#[cfg(test)]
+// ── Multi-repo discovery ──────────────────────────────────────────────
+
+/// Directories whose children are never scanned for git repos.
+const SCAN_DENYLIST: &[&str] = &[
+    "node_modules", "target", ".venv", "venv", "__pycache__", ".git",
+    ".terraform", "dist", "build", ".next", ".nuxt", "vendor",
+    "bower_components", ".tox", ".mypy_cache", ".pytest_cache",
+    ".ruby-lsp", ".svelte-kit", ".angular",
+];
+
+/// Maximum subdirectories to scan before giving up.
+const SCAN_DIR_LIMIT: usize = 500;
+
+pub fn scan_repos(
+    registry: &WorkspaceRegistry,
+    base_dir: &str,
+    max_depth: u32,
+    workspace: &WorkspaceEnv,
+) -> Result<Vec<GitRepoHead>> {
+    let cwd = canonical_dir(registry, base_dir, workspace)?;
+    if !registry.is_authorized(&cwd.local_path) {
+        return Err(GitError::PathOutsideWorkspace(cwd.local_path));
+    }
+    ensure_git_available(&cwd.workspace)?;
+
+    let depth = max_depth.clamp(1, 5) as usize;
+    let mut candidates: Vec<(String, usize)> = Vec::new();
+
+    // Also check the base directory itself — it might be a git repo.
+    let base_dot_git = cwd.local_path.join(".git");
+    if base_dot_git.exists() {
+        candidates.push((cwd.git_path.clone(), 0));
+    }
+
+    collect_git_dirs(
+        &cwd.local_path,
+        &cwd.workspace,
+        &cwd.git_path,
+        depth,
+        &mut candidates,
+    )?;
+
+    log::info!(
+        "git scan: {} candidate(s) under {}",
+        candidates.len(),
+        cwd.git_path
+    );
+
+    // Resolve each candidate in parallel so a slow repo doesn't block others.
+    let (tx, rx) = mpsc::channel();
+    let mut spawned = 0usize;
+    for (git_path, _candidate_depth) in candidates {
+        let workspace = cwd.workspace.clone();
+        let tx = tx.clone();
+        spawned += 1;
+        thread::spawn(move || {
+            let _ = tx.send(resolve_repo_head(&workspace, &git_path));
+        });
+    }
+    drop(tx);
+
+    let mut heads: Vec<GitRepoHead> = Vec::with_capacity(spawned);
+    for received in rx {
+        if let Some(head) = received {
+            log::info!("git scan: found repo {} branch {}", head.repo_root, head.branch);
+            heads.push(head);
+        }
+    }
+
+    log::info!("git scan: {} repo(s) resolved", heads.len());
+
+    // Sort by repo_root so the list is stable.
+    heads.sort_by(|a, b| a.repo_root.cmp(&b.repo_root));
+
+    Ok(heads)
+}
+
+fn collect_git_dirs(
+    base: &Path,
+    workspace: &WorkspaceEnv,
+    git_base: &str,
+    max_depth: usize,
+    out: &mut Vec<(String, usize)>,
+) -> Result<()> {
+    if max_depth == 0 {
+        return Ok(());
+    }
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        if out.len() >= SCAN_DIR_LIMIT {
+            break;
+        }
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+
+        // Skip hidden and denylist directories.
+        if name_str.starts_with('.') || SCAN_DENYLIST.contains(&name_str.as_ref()) {
+            continue;
+        }
+
+        if ft.is_dir() {
+            let git_child = entry.path().join(".git");
+            if git_child.exists() {
+                let git_path = if workspace.is_wsl() {
+                    // For WSL we use the original base + subdir convention.
+                    format!("{}/{}", git_base.trim_end_matches('/'), name_str)
+                } else {
+                    crate::modules::fs::to_canon(&entry.path())
+                };
+                out.push((git_path, max_depth));
+            } else {
+                collect_git_dirs(&entry.path(), workspace, git_base, max_depth - 1, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_repo_head(workspace: &WorkspaceEnv, repo_root: &str) -> Option<GitRepoHead> {
+    match git_stdout_line_opt(workspace, repo_root, ["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(Some(head)) => {
+            let is_detached = head == "HEAD";
+            Some(GitRepoHead {
+                repo_root: repo_root.to_string(),
+                branch: if is_detached { "(detached)".to_string() } else { head },
+                is_detached,
+            })
+        }
+        Ok(None) => {
+            log::warn!("git scan: rev-parse returned empty for {}", repo_root);
+            None
+        }
+        Err(err) => {
+            log::warn!("git scan: rev-parse failed for {}: {}", repo_root, err);
+            None
+        }
+    }
+}
+
+/// Fetch multiple repos in parallel. Each repo reports its own result.
+pub fn workspace_snapshot(
+    registry: &WorkspaceRegistry,
+    base_dir: &str,
+    max_depth: u32,
+    workspace: &WorkspaceEnv,
+) -> Result<GitWorkspaceSnapshot> {
+    let heads = scan_repos(registry, base_dir, max_depth, workspace)?;
+    let root = canonical_dir(registry, base_dir, workspace)?.git_path;
+    let truncated = heads.len() >= SCAN_DIR_LIMIT;
+
+    let mut repos: Vec<GitMultiRepoEntry> = Vec::with_capacity(heads.len());
+    let mut total_changed = 0u32;
+
+    for head in heads {
+        // Resolve full repo info with upstream, then status.
+        let (repo, status_result) = {
+            let cwd = canonical_dir(registry, &head.repo_root, workspace);
+            match cwd {
+                Ok(cwd) => {
+                    let _ = registry.authorize(&cwd.local_path);
+                    let repo = repo_info_for_root(&cwd).ok();
+                    let status = match repo.as_ref() {
+                        Some(_) => status_inner(&cwd).ok(),
+                        None => None,
+                    };
+                    (repo, status)
+                }
+                Err(_) => (None, None),
+            }
+        };
+
+        if let Some(ref s) = status_result {
+            total_changed += s.changed_files.len() as u32;
+        }
+
+        let has_status = status_result.is_some();
+        repos.push(GitMultiRepoEntry {
+            repo_root: head.repo_root.clone(),
+            branch: head.branch.clone(),
+            upstream: repo.as_ref().and_then(|r| r.upstream.clone()),
+            is_detached: head.is_detached,
+            status: status_result,
+            error: if has_status {
+                None
+            } else {
+                Some("could not read repository status".to_string())
+            },
+        });
+    }
+
+    Ok(GitWorkspaceSnapshot {
+        root,
+        repos,
+        total_changed,
+        truncated,
+    })
+}
+
+/// Extracted head/upstream resolution shared by resolve_repo and workspace_snapshot.
+fn repo_info_for_root(cwd: &ResolvedGitDirectory) -> Result<GitRepoInfo> {
+    let head = match git_stdout_lines(
+        &cwd.workspace,
+        &cwd.git_path,
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+    )?
+    .into_iter()
+    .next()
+    {
+        Some(h) => h,
+        None => git_stdout_line_opt(
+            &cwd.workspace,
+            &cwd.git_path,
+            ["symbolic-ref", "--short", "HEAD"],
+        )?
+        .ok_or(GitError::CommandFailed {
+            context: "failed to resolve HEAD",
+            detail: String::new(),
+        })?,
+    };
+
+    let upstream = git_stdout_line_opt(
+        &cwd.workspace,
+        &cwd.git_path,
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )?;
+
+    Ok(GitRepoInfo {
+        repo_root: cwd.git_path.clone(),
+        branch: head.clone(),
+        upstream,
+        is_detached: head == "HEAD",
+    })
+}
+
+// ── Multi-repo fetch ───────────────────────────────────────────────────
+
+/// Fetch multiple repos in parallel. Each repo reports its own result.
+pub fn multi_fetch(
+    registry: &WorkspaceRegistry,
+    repo_roots: &[String],
+    workspace: &WorkspaceEnv,
+) -> Result<Vec<GitFetchResult>> {
+    if repo_roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Validate all roots first.
+    let mut resolved: Vec<ResolvedGitDirectory> = Vec::with_capacity(repo_roots.len());
+    for root in repo_roots {
+        let r = authorized_repo_root(registry, root, workspace)?;
+        ensure_git_available(&r.workspace)?;
+        resolved.push(r);
+    }
+
+    let (tx, rx) = mpsc::channel();
+    for r in &resolved {
+        let root = r.git_path.clone();
+        let workspace = r.workspace.clone();
+        let tx = tx.clone();
+        thread::spawn(move || {
+            let result = match run_git(
+                &workspace,
+                Some(&root),
+                ["fetch", "--prune"],
+                NETWORK_TIMEOUT_SECS,
+            ) {
+                Ok(output) if output.exit_code == Some(0) => GitFetchResult {
+                    repo_root: root,
+                    ok: true,
+                    error: None,
+                },
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let detail = if !stderr.is_empty() {
+                        stderr
+                    } else {
+                        "fetch exited with non-zero status".to_string()
+                    };
+                    GitFetchResult {
+                        repo_root: root,
+                        ok: false,
+                        error: Some(detail),
+                    }
+                }
+                Err(e) => GitFetchResult {
+                    repo_root: root,
+                    ok: false,
+                    error: Some(e.to_string()),
+                },
+            };
+            let _ = tx.send(result);
+        });
+    }
+    drop(tx);
+
+    let mut results: Vec<GitFetchResult> = Vec::with_capacity(resolved.len());
+    for result in rx {
+        results.push(result);
+    }
+    results.sort_by(|a, b| a.repo_root.cmp(&b.repo_root));
+    Ok(results)
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
 mod tests {
     use super::*;
 

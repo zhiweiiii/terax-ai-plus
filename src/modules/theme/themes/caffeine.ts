@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const caffeine: Theme = {
   id: "caffeine",
   name: "Caffeine",
-  description: "Warm coffee tones — cream and espresso.",
+  description: "温暖的咖啡色调，奶油与浓缩。",
   editorTheme: { dark: "copilot", light: "github-light" },
   variants: {
     dark: {

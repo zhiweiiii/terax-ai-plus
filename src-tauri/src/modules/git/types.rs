@@ -16,6 +16,59 @@ pub struct GitRepoInfo {
     pub is_detached: bool,
 }
 
+/// Lightweight repo summary for multi-repo discovery.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepoHead {
+    pub repo_root: String,
+    pub branch: String,
+    pub is_detached: bool,
+}
+
+impl From<GitRepoInfo> for GitRepoHead {
+    fn from(info: GitRepoInfo) -> Self {
+        Self {
+            repo_root: info.repo_root,
+            branch: info.branch,
+            is_detached: info.is_detached,
+        }
+    }
+}
+
+/// Result of a single fetch in a batch operation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFetchResult {
+    pub repo_root: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// One repo's worth of info + status in a multi-repo snapshot.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitMultiRepoEntry {
+    pub repo_root: String,
+    pub branch: String,
+    pub upstream: Option<String>,
+    pub is_detached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<GitStatusSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Aggregated snapshot of all discovered repos under a workspace root.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceSnapshot {
+    pub root: String,
+    pub repos: Vec<GitMultiRepoEntry>,
+    pub total_changed: u32,
+    pub truncated: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitChangedFile {

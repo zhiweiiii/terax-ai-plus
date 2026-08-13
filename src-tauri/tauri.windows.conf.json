@@ -8,7 +8,7 @@
         "decorations": false,
         "transparent": true,
         "visible": false,
-        "shadow": false
+        "shadow": true
       }
     ]
   }

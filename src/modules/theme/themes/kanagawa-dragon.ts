@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const kanagawaDragon: Theme = {
   id: "kanagawa-dragon",
   name: "Kanagawa Dragon",
-  description: "The muted, near-black Dragon variant of Kanagawa.",
+  description: "Kanagawa 的近黑低饱和 Dragon 变体。",
   editorTheme: { dark: "kanagawa-dragon" },
   variants: {
     dark: {

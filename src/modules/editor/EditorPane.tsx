@@ -69,6 +69,8 @@ export type EditorPaneHandle = {
   openSearch: () => void;
   focus: () => void;
   getSelection: () => string | null;
+  /** 1-based start/end line of the current selection, or null when empty. */
+  getSelectionRange: () => { startLine: number; endLine: number } | null;
   getPath: () => string;
   /** Re-read the file from disk. Skips silently if the buffer is dirty. */
   reload: () => boolean;
@@ -512,6 +514,16 @@ export const EditorPane = memo(
           const { from, to } = view.state.selection.main;
           if (from === to) return null;
           return view.state.sliceDoc(from, to);
+        },
+        getSelectionRange: () => {
+          const view = cmRef.current?.view;
+          if (!view) return null;
+          const { from, to } = view.state.selection.main;
+          if (from === to) return null;
+          return {
+            startLine: view.state.doc.lineAt(from).number,
+            endLine: view.state.doc.lineAt(to).number,
+          };
         },
         getPath: () => path,
         reload: () => reloadRef.current(),

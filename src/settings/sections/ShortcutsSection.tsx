@@ -16,6 +16,7 @@ import { setShortcuts } from "@/modules/settings/store";
 import {
   getBindingTokens,
   type KeyBinding,
+  SHORTCUT_GROUP_LABELS,
   SHORTCUT_GROUPS,
   SHORTCUTS,
   type Shortcut,
@@ -44,7 +45,8 @@ export function ShortcutsSection() {
     return base.filter(
       (s) =>
         s.label.toLowerCase().includes(lower) ||
-        s.group.toLowerCase().includes(lower),
+        s.group.toLowerCase().includes(lower) ||
+        SHORTCUT_GROUP_LABELS[s.group].includes(search),
     );
   }, [search]);
 
@@ -74,8 +76,8 @@ export function ShortcutsSection() {
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <SectionHeader
-          title="Shortcuts"
-          description="View and customize keyboard shortcuts."
+          title="快捷键"
+          description="查看并自定义键盘快捷键。"
         />
         <Button
           variant="outline"
@@ -88,7 +90,7 @@ export function ShortcutsSection() {
             size={12}
             strokeWidth={2}
           />
-          Reset All
+          全部重置
         </Button>
       </div>
 
@@ -100,7 +102,7 @@ export function ShortcutsSection() {
           className="absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground"
         />
         <Input
-          placeholder="Search shortcuts..."
+          placeholder="搜索快捷键..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="h-9 pl-9 text-[12.5px]"
@@ -115,7 +117,7 @@ export function ShortcutsSection() {
           return (
             <div key={group} className="flex flex-col gap-3">
               <h3 className="text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
-                {group}
+                {SHORTCUT_GROUP_LABELS[group]}
               </h3>
               <div className="flex flex-col divide-y divide-border/40 rounded-lg border border-border/60 bg-card/40 overflow-hidden">
                 {items.map((s) => (
@@ -140,19 +142,18 @@ export function ShortcutsSection() {
       <AlertDialog open={resetDialogOpen} onOpenChange={setResetDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Reset all shortcuts?</AlertDialogTitle>
+            <AlertDialogTitle>重置全部快捷键?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will revert all your custom keyboard shortcuts to their
-              factory defaults. This action cannot be undone.
+              这会把你自定义的所有键盘快捷键恢复为出厂默认值。此操作无法撤销。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
               onClick={onResetAll}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Reset All
+              全部重置
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -213,7 +214,7 @@ function ShortcutRow({
                 </KbdGroup>
               ) : (
                 <span className="text-[11px] text-muted-foreground italic">
-                  Unassigned
+                  未分配
                 </span>
               )}
             </div>
@@ -225,7 +226,7 @@ function ShortcutRow({
                   size="icon"
                   className="size-7 text-muted-foreground hover:text-foreground"
                   onClick={onReset}
-                  title="Reset to default"
+                  title="恢复默认"
                 >
                   <HugeiconsIcon icon={ArrowTurnBackwardIcon} size={12} />
                 </Button>
@@ -235,7 +236,7 @@ function ShortcutRow({
                 size="icon"
                 className="size-7 text-muted-foreground hover:text-destructive opacity-0 transition-opacity group-hover:opacity-100"
                 onClick={onClear}
-                title="Clear shortcut"
+                title="清除快捷键"
               >
                 <HugeiconsIcon icon={Delete02Icon} size={12} />
               </Button>
@@ -321,8 +322,8 @@ function Recorder({
 
   return (
     <div className="flex items-center gap-2 rounded bg-accent/50 px-2 py-1 text-[11px] ring-1 ring-accent">
-      <span className="animate-pulse font-medium">Recording...</span>
-      <span className="text-muted-foreground">(Esc to cancel)</span>
+      <span className="animate-pulse font-medium">录制中...</span>
+      <span className="text-muted-foreground">(按 Esc 取消)</span>
     </div>
   );
 }

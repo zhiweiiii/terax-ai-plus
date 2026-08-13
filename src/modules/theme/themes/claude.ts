@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const claude: Theme = {
   id: "claude",
   name: "Claude",
-  description: "Warm clay accent on paper.",
+  description: "纸感背景上的暖陶土强调色。",
   editorTheme: { dark: "copilot", light: "github-light" },
   variants: {
     dark: {

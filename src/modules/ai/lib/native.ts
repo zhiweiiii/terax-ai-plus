@@ -119,6 +119,34 @@ export type GitPanelSnapshot = {
   status: GitStatusSnapshot | null;
 };
 
+export type GitRepoHead = {
+  repoRoot: string;
+  branch: string;
+  isDetached: boolean;
+};
+
+export type GitFetchResult = {
+  repoRoot: string;
+  ok: boolean;
+  error?: string;
+};
+
+export type GitMultiRepoEntry = {
+  repoRoot: string;
+  branch: string;
+  upstream: string | null;
+  isDetached: boolean;
+  status: GitStatusSnapshot | null;
+  error?: string;
+};
+
+export type GitWorkspaceSnapshot = {
+  root: string;
+  repos: GitMultiRepoEntry[];
+  totalChanged: number;
+  truncated: boolean;
+};
+
 export type GitDiscardEntry = {
   path: string;
   untracked: boolean;
@@ -379,6 +407,23 @@ export const native = {
     invoke<void>("git_checkout_branch", {
       repoRoot,
       branch,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitScanRepos: (baseDir: string, maxDepth?: number) =>
+    invoke<GitRepoHead[]>("git_scan_repos", {
+      baseDir,
+      maxDepth: maxDepth ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitWorkspaceSnapshot: (baseDir: string, maxDepth?: number) =>
+    invoke<GitWorkspaceSnapshot>("git_workspace_snapshot", {
+      baseDir,
+      maxDepth: maxDepth ?? null,
+      workspace: currentWorkspaceEnv(),
+    }),
+  gitFetchAll: (repoRoots: string[]) =>
+    invoke<GitFetchResult[]>("git_fetch_all", {
+      repoRoots,
       workspace: currentWorkspaceEnv(),
     }),
 };

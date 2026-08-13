@@ -109,11 +109,11 @@ const LOCAL_META: Partial<Record<ProviderId, LocalMeta>> = {
     urlPlaceholder: "http://localhost:1234/v1",
     modelPlaceholder: "qwen2.5-coder-7b-instruct",
     description:
-      "Run GGUF models via LM Studio's HTTP server (Developer tab → enable).",
+      "通过 LM Studio 的 HTTP 服务运行 GGUF 模型 (在 Developer 标签页中启用)。",
     modelHint: (
       <>
-        The model id loaded in LM Studio — see the server's{" "}
-        <span className="font-mono">/v1/models</span> page.
+        LM Studio 中已加载的模型 id，可在服务的{" "}
+        <span className="font-mono">/v1/models</span> 页面查看。
       </>
     ),
   },
@@ -121,28 +121,28 @@ const LOCAL_META: Partial<Record<ProviderId, LocalMeta>> = {
     urlPlaceholder: "http://127.0.0.1:8080/v1",
     modelPlaceholder: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
     description:
-      "Apple-silicon inference via mlx_lm.server (pip install mlx-lm).",
-    modelHint: <>The Hugging Face repo path you launched mlx_lm.server with.</>,
+      "通过 mlx_lm.server 在 Apple 芯片上推理 (pip install mlx-lm)。",
+    modelHint: <>启动 mlx_lm.server 时所用的 Hugging Face 仓库路径。</>,
   },
   ollama: {
     urlPlaceholder: "http://localhost:11434/v1",
     modelPlaceholder: "qwen2.5-coder:7b",
-    description: "Local models via Ollama's built-in OpenAI-compatible API.",
-    modelHint: <>The model name from `ollama list` / `ollama pull`.</>,
+    description: "通过 Ollama 内置的 OpenAI 兼容 API 运行本地模型。",
+    modelHint: <>来自 `ollama list` / `ollama pull` 的模型名称。</>,
   },
   "openai-compatible": {
     urlPlaceholder: "https://api.example.com/v1",
     modelPlaceholder: "gpt-4o, qwen3-max, glm-4.6, …",
-    description: "Any OpenAI-compatible endpoint — vLLM, Z.AI, Fireworks, etc.",
+    description: "任意 OpenAI 兼容端点，如 vLLM、Z.AI、Fireworks 等。",
     modelHint: null,
   },
   openrouter: {
     urlPlaceholder: "",
     modelPlaceholder: "anthropic/claude-sonnet-5, openai/gpt-5.6, …",
-    description: "Any model on OpenRouter — type its full provider/model id.",
+    description: "OpenRouter 上的任意模型，填写完整的 provider/model id。",
     modelHint: (
       <>
-        Browse ids at <span className="font-mono">openrouter.ai/models</span>.
+        可在 <span className="font-mono">openrouter.ai/models</span> 查询 id。
       </>
     ),
   },
@@ -356,8 +356,8 @@ export function ModelsSection() {
   return (
     <div className="flex flex-col gap-7">
       <SectionHeader
-        title="Models"
-        description="Connect the providers you use. Keys live in your OS keychain and are used only by Terax."
+        title="模型"
+        description="连接你要使用的供应商。密钥保存在操作系统钥匙串中，仅供 Terax 使用。"
       />
 
       <DefaultsBlock
@@ -371,7 +371,7 @@ export function ModelsSection() {
 
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <Label>Providers</Label>
+          <Label>供应商</Label>
           <AddProviderMenu
             providers={addableProviders}
             onAdd={addProvider}
@@ -382,10 +382,10 @@ export function ModelsSection() {
         {visibleProviders.length === 0 && customEndpoints.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border/60 bg-card/40 px-4 py-8 text-center">
             <p className="text-[12px] text-muted-foreground">
-              No providers connected yet.
+              还没有连接任何供应商。
             </p>
             <p className="mt-0.5 text-[10.5px] text-muted-foreground/70">
-              Click "Add provider" to connect a cloud or local model source.
+              点击"添加供应商"来连接云端或本地的模型来源。
             </p>
           </div>
         ) : (
@@ -476,14 +476,14 @@ function AddProviderMenu({
           className="h-7 gap-1.5 px-2.5 text-[11px]"
         >
           <HugeiconsIcon icon={Add01Icon} size={12} strokeWidth={2} />
-          Add provider
+          添加供应商
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-55 p-1">
         {cloud.length > 0 ? (
           <>
             <DropdownMenuLabel className="px-2 text-[10px] tracking-wide text-muted-foreground uppercase">
-              Cloud
+              云端
             </DropdownMenuLabel>
             {cloud.map((p) => (
               <ProviderMenuItem key={p.id} provider={p} onAdd={onAdd} />
@@ -491,7 +491,7 @@ function AddProviderMenu({
           </>
         ) : null}
         <DropdownMenuLabel className="px-2 text-[10px] tracking-wide text-muted-foreground uppercase">
-          Local & custom
+          本地与自定义
         </DropdownMenuLabel>
         {local.map((p) => (
           <ProviderMenuItem key={p.id} provider={p} onAdd={onAdd} />
@@ -539,9 +539,9 @@ function DefaultsBlock({
 }) {
   return (
     <div className="flex flex-col gap-3">
-      <Label>Defaults</Label>
+      <Label>默认设置</Label>
       <div className="flex flex-col gap-2.5 rounded-lg border border-border/60 bg-card/60 px-3 py-2.5">
-        <FieldRow label="Chat model">
+        <FieldRow label="对话模型">
           <DefaultModelPicker
             defaultModel={defaultModel}
             configuredIds={configuredIds}
@@ -714,7 +714,7 @@ function AutocompleteRow({
 
   return (
     <>
-      <FieldRow label="Autocomplete">
+      <FieldRow label="自动补全">
         <div className="flex flex-1 items-center gap-2">
           <Switch
             checked={enabled}
@@ -759,7 +759,7 @@ function AutocompleteRow({
                       <span>{p.label}</span>
                       {!pConfigured ? (
                         <span className="ml-auto text-[9.5px] normal-case tracking-normal text-muted-foreground/70">
-                          not connected
+                          未连接
                         </span>
                       ) : null}
                     </div>
@@ -789,7 +789,7 @@ function AutocompleteRow({
         </div>
       </FieldRow>
       {enabled ? (
-        <FieldRow label="Trigger">
+        <FieldRow label="触发方式">
           <Select
             value={trigger}
             onValueChange={(v) =>
@@ -800,9 +800,9 @@ function AutocompleteRow({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="auto">Automatic (as you type)</SelectItem>
+              <SelectItem value="auto">自动 (输入时触发)</SelectItem>
               <SelectItem value="manual">
-                Manual ({aiCompleteShortcut || "shortcut"})
+                手动 ({aiCompleteShortcut || "快捷键"})
               </SelectItem>
             </SelectContent>
           </Select>
@@ -810,7 +810,7 @@ function AutocompleteRow({
       ) : null}
       {enabled && !hasKey ? (
         <p className="pl-19 text-[10.5px] text-muted-foreground">
-          {getProvider(provider).label} isn't connected — add it below.
+          {getProvider(provider).label} 尚未连接，请在下方添加。
         </p>
       ) : null}
     </>
@@ -885,7 +885,7 @@ function LocalProviderCard({
               size={9}
               strokeWidth={2}
             />
-            Connected
+            已连接
           </Badge>
         ) : null}
         <button
@@ -893,7 +893,7 @@ function LocalProviderCard({
           onClick={() => void openUrl(provider.consoleUrl)}
           className="ml-auto inline-flex items-center gap-0.5 text-[10.5px] text-muted-foreground transition-colors hover:text-foreground"
         >
-          Docs
+          文档
           <HugeiconsIcon
             icon={ArrowUpRight01Icon}
             size={11}
@@ -904,7 +904,7 @@ function LocalProviderCard({
           size="icon"
           variant="ghost"
           onClick={onRemove}
-          title="Remove provider"
+          title="移除供应商"
           className="size-7 text-muted-foreground hover:text-destructive"
         >
           <HugeiconsIcon icon={Cancel01Icon} size={12} strokeWidth={1.75} />
@@ -917,7 +917,7 @@ function LocalProviderCard({
 
       <div className="mt-0.5 flex flex-col gap-2.5">
         {noBaseURL ? null : (
-          <FieldRow label="Base URL">
+          <FieldRow label="接口地址">
             <div className="flex flex-1 gap-1.5">
               <Input
                 value={urlDraft}
@@ -937,13 +937,13 @@ function LocalProviderCard({
                 disabled={!urlDraft.trim()}
                 className="h-8 px-3 text-[11px]"
               >
-                Test
+                测试
               </Button>
             </div>
           </FieldRow>
         )}
 
-        <FieldRow label="Model ID">
+        <FieldRow label="模型 ID">
           <Input
             value={modelDraft}
             onChange={(e) => setModelDraft(e.target.value)}
@@ -958,7 +958,7 @@ function LocalProviderCard({
         </FieldRow>
 
         {setContextLimit ? (
-          <FieldRow label="Context">
+          <FieldRow label="上下文">
             <div className="flex flex-1 items-center gap-1.5">
               <Input
                 value={contextDraft}
@@ -980,7 +980,7 @@ function LocalProviderCard({
         ) : null}
 
         {supportsKey ? (
-          <FieldRow label="API key">
+          <FieldRow label="API 密钥">
             {compatKey ? (
               <div className="flex flex-1 items-center gap-1.5">
                 <code className="flex-1 truncate rounded bg-muted/40 px-2 py-1 font-mono text-[11px] text-muted-foreground">
@@ -990,7 +990,7 @@ function LocalProviderCard({
                   size="icon"
                   variant="ghost"
                   onClick={() => void onClearKey()}
-                  title="Remove key"
+                  title="移除密钥"
                   className="size-7 text-muted-foreground hover:text-destructive"
                 >
                   <HugeiconsIcon
@@ -1006,7 +1006,7 @@ function LocalProviderCard({
                   type="password"
                   value={keyDraft}
                   onChange={(e) => setKeyDraft(e.target.value)}
-                  placeholder="Optional — leave empty for unauthenticated endpoints"
+                  placeholder="可选，无需认证的端点请留空"
                   spellCheck={false}
                   className="h-8 flex-1 font-mono text-[11.5px]"
                 />
@@ -1021,7 +1021,7 @@ function LocalProviderCard({
                   disabled={!keyDraft.trim()}
                   className="h-8 px-3 text-[11px]"
                 >
-                  Save
+                  保存
                 </Button>
               </div>
             )}
@@ -1122,7 +1122,7 @@ function CustomEndpointCard({
               size={9}
               strokeWidth={2}
             />
-            Connected
+            已连接
           </Badge>
         ) : null}
         <Button
@@ -1132,7 +1132,7 @@ function CustomEndpointCard({
             e.stopPropagation();
             onRemove();
           }}
-          title="Remove endpoint"
+          title="移除端点"
           className="ml-auto size-7 text-muted-foreground hover:text-destructive"
         >
           <HugeiconsIcon icon={Cancel01Icon} size={12} strokeWidth={1.75} />
@@ -1141,7 +1141,7 @@ function CustomEndpointCard({
 
       {expanded && (
         <div className="flex flex-col gap-2.5 border-t border-border/40 px-3 py-2.5">
-          <FieldRow label="Name">
+          <FieldRow label="名称">
             <Input
               value={nameDraft}
               onChange={(e) => setNameDraft(e.target.value)}
@@ -1149,13 +1149,13 @@ function CustomEndpointCard({
                 const v = nameDraft.trim();
                 if (v !== endpoint.name) void onUpdate({ name: v });
               }}
-              placeholder="My endpoint"
+              placeholder="我的端点"
               spellCheck={false}
               className="h-8 flex-1 text-[11.5px]"
             />
           </FieldRow>
 
-          <FieldRow label="Base URL">
+          <FieldRow label="接口地址">
             <div className="flex flex-1 gap-1.5">
               <Input
                 value={urlDraft}
@@ -1175,12 +1175,12 @@ function CustomEndpointCard({
                 disabled={!urlDraft.trim()}
                 className="h-8 px-3 text-[11px]"
               >
-                Test
+                测试
               </Button>
             </div>
           </FieldRow>
 
-          <FieldRow label="Model ID">
+          <FieldRow label="模型 ID">
             <Input
               value={modelDraft}
               onChange={(e) => setModelDraft(e.target.value)}
@@ -1194,7 +1194,7 @@ function CustomEndpointCard({
             />
           </FieldRow>
 
-          <FieldRow label="Context">
+          <FieldRow label="上下文">
             <div className="flex flex-1 items-center gap-1.5">
               <Input
                 value={contextDraft}
@@ -1215,7 +1215,7 @@ function CustomEndpointCard({
             </div>
           </FieldRow>
 
-          <FieldRow label="API key">
+          <FieldRow label="API 密钥">
             {endpointKey ? (
               <div className="flex flex-1 items-center gap-1.5">
                 <code className="flex-1 truncate rounded bg-muted/40 px-2 py-1 font-mono text-[11px] text-muted-foreground">
@@ -1225,7 +1225,7 @@ function CustomEndpointCard({
                   size="icon"
                   variant="ghost"
                   onClick={() => void onClearKey()}
-                  title="Remove key"
+                  title="移除密钥"
                   className="size-7 text-muted-foreground hover:text-destructive"
                 >
                   <HugeiconsIcon
@@ -1241,7 +1241,7 @@ function CustomEndpointCard({
                   type="password"
                   value={keyDraft}
                   onChange={(e) => setKeyDraft(e.target.value)}
-                  placeholder="Optional — leave empty for unauthenticated endpoints"
+                  placeholder="可选，无需认证的端点请留空"
                   spellCheck={false}
                   className="h-8 flex-1 font-mono text-[11.5px]"
                 />
@@ -1256,7 +1256,7 @@ function CustomEndpointCard({
                   disabled={!keyDraft.trim()}
                   className="h-8 px-3 text-[11px]"
                 >
-                  Save
+                  保存
                 </Button>
               </div>
             )}
@@ -1294,20 +1294,20 @@ function StatusLine({
   if (status === "idle") return null;
   if (status === "testing") {
     return (
-      <span className="text-[10.5px] text-muted-foreground">Testing…</span>
+      <span className="text-[10.5px] text-muted-foreground">测试中…</span>
     );
   }
   if (status === "ok") {
     return (
       <span className="flex items-center gap-1 text-[10.5px] text-muted-foreground">
         <HugeiconsIcon icon={CheckmarkCircle02Icon} size={11} strokeWidth={2} />
-        Reachable — server responded.
+        连接正常，服务已响应。
       </span>
     );
   }
   return (
     <span className="text-[10.5px] text-destructive/80">
-      Could not reach the server.
+      无法连接到该服务。
     </span>
   );
 }
@@ -1326,10 +1326,10 @@ function VoiceBlock() {
     <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-card/60 px-3 py-2.5">
       <div className="flex items-center gap-2">
         <HugeiconsIcon icon={Mic01Icon} size={15} strokeWidth={1.5} />
-        <span className="text-[12.5px] font-medium">Voice input</span>
+        <span className="text-[12.5px] font-medium">语音输入</span>
       </div>
 
-      <FieldRow label="Provider">
+      <FieldRow label="供应商">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -1364,16 +1364,16 @@ function VoiceBlock() {
 
       <p className="text-[10.5px] leading-relaxed text-muted-foreground">
         {sttProvider === "openai" &&
-          "Uses your official OpenAI API key and the Whisper model for transcription."}
+          "使用你的官方 OpenAI API 密钥和 Whisper 模型进行转写。"}
         {sttProvider === "groq" &&
-          "Uses your official Groq API key and Groq's Whisper endpoint for transcription."}
+          "使用你的官方 Groq API 密钥和 Groq 的 Whisper 端点进行转写。"}
         {sttProvider === "whispercpp" &&
-          "Connects to a local Whisper.cpp server for fully offline transcription."}
+          "连接本地 Whisper.cpp 服务，完全离线转写。"}
       </p>
 
       {sttProvider === "groq" && (
         <div className="flex flex-col gap-2.5">
-          <FieldRow label="Model">
+          <FieldRow label="模型">
             <Input
               value={groqModelDraft}
               onChange={(e) => setGroqModelDraft(e.target.value)}
@@ -1391,7 +1391,7 @@ function VoiceBlock() {
 
       {sttProvider === "whispercpp" && (
         <div className="flex flex-col gap-2.5">
-          <FieldRow label="Base URL">
+          <FieldRow label="接口地址">
             <Input
               value={urlDraft}
               onChange={(e) => setUrlDraft(e.target.value)}

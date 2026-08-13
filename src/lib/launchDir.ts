@@ -22,3 +22,12 @@ export async function consumeLaunchFiles(): Promise<string[]> {
   const files = await invoke<string[]>("get_launch_files").catch(() => []);
   return files.map((f) => f.replace(/\\/g, "/"));
 }
+
+/**
+ * Drains the command passed via `--run`. Already validated in Rust (single
+ * line, no control characters), so it is safe to type into a PTY. Drained once
+ * so HMR / re-mounts can't re-run it.
+ */
+export async function consumeLaunchCommand(): Promise<string | null> {
+  return await invoke<string | null>("get_launch_command").catch(() => null);
+}

@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const tide: Theme = {
   id: "tide",
   name: "Tide",
-  description: "Deep slate with muted teal.",
+  description: "深石板色搭配低饱和青色。",
   editorTheme: { dark: "nord", light: "github-light" },
   variants: {
     dark: {

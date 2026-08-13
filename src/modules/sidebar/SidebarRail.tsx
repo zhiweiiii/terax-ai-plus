@@ -1,12 +1,16 @@
 import { cn } from "@/lib/utils";
-import { FolderGitTwoIcon, FolderTreeIcon } from "@hugeicons/core-free-icons";
+import {
+  ComputerTerminal02Icon,
+  FolderGitTwoIcon,
+  FolderTreeIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { SidebarViewId } from "./types";
+import { type SidebarRailTab, type SidebarViewId } from "./types";
 
-export const SIDEBAR_RAIL_HEIGHT = 36;
+export const SIDEBAR_RAIL_WIDTH = 48;
 
 type RailItem = {
-  id: SidebarViewId;
+  id: SidebarRailTab;
   label: string;
   icon: Parameters<typeof HugeiconsIcon>[0]["icon"];
   badge?: number;
@@ -15,15 +19,32 @@ type RailItem = {
 type Props = {
   activeView: SidebarViewId;
   onSelectView: (view: SidebarViewId) => void;
+  onSelectWindow: () => void;
   changedCount: number;
+  sidebarOpen: boolean;
 };
 
-export function SidebarRail({ activeView, onSelectView, changedCount }: Props) {
+export function SidebarRail({
+  activeView,
+  onSelectView,
+  onSelectWindow,
+  changedCount,
+  sidebarOpen,
+}: Props) {
   const items: RailItem[] = [
-    { id: "explorer", label: "Files", icon: FolderTreeIcon },
+    {
+      id: "window",
+      label: "窗口",
+      icon: ComputerTerminal02Icon,
+    },
+    {
+      id: "explorer",
+      label: "文件",
+      icon: FolderTreeIcon,
+    },
     {
       id: "source-control",
-      label: "Source Control",
+      label: "版本控制",
       icon: FolderGitTwoIcon,
       badge: changedCount,
     },
@@ -31,36 +52,51 @@ export function SidebarRail({ activeView, onSelectView, changedCount }: Props) {
 
   return (
     <div
-      style={{ height: SIDEBAR_RAIL_HEIGHT }}
-      className="flex shrink-0 items-stretch gap-1 border-t border-border/60 bg-card/85 px-1.5 py-1 backdrop-blur"
+      style={{ width: SIDEBAR_RAIL_WIDTH }}
+      className="flex shrink-0 flex-col items-center gap-1 border-r border-border/50 bg-card/85 py-2 backdrop-blur"
     >
       {items.map((item) => {
-        const isActive = item.id === activeView;
+        const isWindow = item.id === "window";
+        const isActive = isWindow
+          ? !sidebarOpen
+          : item.id === activeView;
         const showBadge = !!item.badge && item.badge > 0;
+
         return (
           <button
             key={item.id}
             type="button"
             aria-label={item.label}
             aria-pressed={isActive}
-            onClick={() => onSelectView(item.id)}
+            onClick={() => {
+              if (isWindow) onSelectWindow();
+              else onSelectView(item.id as SidebarViewId);
+            }}
+            title={item.label}
             className={cn(
-              "group relative flex flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md text-[11px] font-medium outline-none transition-colors duration-[var(--dur-base)]",
+              "group relative flex w-10 cursor-pointer flex-col items-center gap-0.5 rounded-lg py-1.5 outline-none transition-colors duration-[var(--dur-base)]",
               "focus-visible:ring-2 focus-visible:ring-primary/40",
               isActive
-                ? "bg-foreground/[0.07] text-foreground dark:bg-foreground/[0.09]"
-                : "text-muted-foreground hover:bg-foreground/[0.045] hover:text-foreground",
+                ? "text-foreground"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
+            {/* Active indicator — left border bar */}
+            <span
+              className={cn(
+                "absolute left-0 top-1/2 h-5 w-[2px] -translate-y-1/2 rounded-full bg-primary transition-opacity",
+                isActive ? "opacity-100" : "opacity-0 group-hover:opacity-30",
+              )}
+            />
             <HugeiconsIcon
               icon={item.icon}
-              size={14}
+              size={20}
               strokeWidth={isActive ? 2 : 1.75}
               className="shrink-0 transition-[stroke-width] duration-[var(--dur-base)]"
             />
-            <span>{item.label}</span>
+            <span className="text-[9px] font-medium leading-none">{item.label}</span>
             {showBadge ? (
-              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-border/60 bg-card px-1 text-[9px] font-semibold leading-none tabular-nums text-muted-foreground/95">
+              <span className="absolute right-0 top-1.5 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[8px] font-bold leading-none text-primary-foreground tabular-nums">
                 {item.badge! > 99 ? "99+" : item.badge}
               </span>
             ) : null}

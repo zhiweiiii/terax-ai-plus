@@ -9,6 +9,7 @@ import {
   type SourceControlRepositoryTarget,
 } from "./repositoryTarget";
 import { useSourceControl } from "./useSourceControl";
+import { useMultiRepoSourceControl } from "./useMultiRepoSourceControl";
 
 type Params = {
   activeTab: Tab | undefined;
@@ -81,13 +82,23 @@ export function useSourceControlContext({
     target: repositoryTarget,
   });
   const sourceControl = useSourceControl(sourceControlPath, true);
+  // Multi-repo layer: scans the explorer root for nested git repos.
+  const scanRoot = explorerRoot ?? workspaceFallbackPath;
+  const multiRepo = useMultiRepoSourceControl(sourceControlPath, scanRoot);
 
   const toggleSourceControl = useCallback(() => {
     cycleSidebarView("source-control");
   }, [cycleSidebarView]);
 
+  // When multiple repos are discovered, prefer the multi-repo summary so
+  // BranchDropdown and the file list follow the selected repo.
+  const effectiveSourceControl =
+    multiRepo.repos.length > 0 ? multiRepo.summary : sourceControl;
+
   const openGitGraphFromContext = useCallback(async () => {
-    const known = sourceControl.hasRepo ? sourceControl.repo : null;
+    const known = effectiveSourceControl.hasRepo
+      ? effectiveSourceControl.repo
+      : null;
     const fixedTargetIsLoaded =
       sidebarView !== "source-control" ||
       repositoryTarget.mode !== "fixed" ||
@@ -95,7 +106,7 @@ export function useSourceControlContext({
     if (known && fixedTargetIsLoaded) {
       openCommitHistoryTab({
         repoRoot: known.repoRoot,
-        branch: sourceControl.status?.branch ?? null,
+        branch: effectiveSourceControl.status?.branch ?? null,
       });
       return;
     }
@@ -109,13 +120,19 @@ export function useSourceControlContext({
     }
   }, [
     openCommitHistoryTab,
-    sourceControl.hasRepo,
-    sourceControl.repo,
-    sourceControl.status?.branch,
+    effectiveSourceControl.hasRepo,
+    effectiveSourceControl.repo,
+    effectiveSourceControl.status?.branch,
     graphContextPath,
     repositoryTarget,
     sidebarView,
   ]);
 
-  return { sourceControl, toggleSourceControl, openGitGraphFromContext };
+  return {
+    sourceControl: effectiveSourceControl,
+    multiRepo,
+    toggleSourceControl,
+    openGitGraphFromContext,
+  };
 }
+

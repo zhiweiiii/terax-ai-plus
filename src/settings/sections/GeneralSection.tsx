@@ -54,21 +54,21 @@ const APPEARANCE: {
   label: string;
   icon: typeof ComputerIcon;
 }[] = [
-  { id: "system", label: "System", icon: ComputerIcon },
-  { id: "light", label: "Light", icon: Sun03Icon },
-  { id: "dark", label: "Dark", icon: Moon02Icon },
+  { id: "system", label: "跟随系统", icon: ComputerIcon },
+  { id: "light", label: "浅色", icon: Sun03Icon },
+  { id: "dark", label: "深色", icon: Moon02Icon },
 ];
 
 const TERMINAL_FONT_WEIGHTS = [
-  { value: "normal", label: "Normal" },
-  { value: "500", label: "Medium" },
-  { value: "600", label: "Semi-Bold" },
-  { value: "bold", label: "Bold" },
+  { value: "normal", label: "常规" },
+  { value: "500", label: "中等" },
+  { value: "600", label: "半粗" },
+  { value: "bold", label: "粗体" },
 ] as const;
 const TERMINAL_CURSOR_STYLES = [
-  { value: "bar", label: "Bar" },
-  { value: "block", label: "Block" },
-  { value: "underline", label: "Underline" },
+  { value: "bar", label: "竖线" },
+  { value: "block", label: "方块" },
+  { value: "underline", label: "下划线" },
 ] as const;
 const LETTER_SPACINGS = [-4, -3, -2, -1, 0, 1, 2, 3, 4] as const;
 
@@ -142,13 +142,10 @@ export function GeneralSection() {
 
   return (
     <div className="flex flex-col gap-6">
-      <SectionHeader
-        title="General"
-        description="Mode, terminal, and startup."
-      />
+      <SectionHeader title="通用" description="外观模式、终端与启动项。" />
 
       <div className="flex flex-col gap-2">
-        <Label>Appearance</Label>
+        <Label>外观</Label>
         <div className="grid grid-cols-3 gap-2">
           {APPEARANCE.map((o) => (
             <button
@@ -168,17 +165,17 @@ export function GeneralSection() {
           ))}
         </div>
         <p className="text-[11px] text-muted-foreground">
-          For theme, background and customization, see the{" "}
-          <strong className="font-medium text-foreground">Themes</strong> tab.
+          主题配色、背景图与个性化设置请前往{" "}
+          <strong className="font-medium text-foreground">主题</strong> 标签页。
         </p>
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Zoom</Label>
+        <Label>缩放</Label>
         <div className="flex flex-col gap-3 rounded-lg border border-border/60 p-3">
           <div className="flex items-center justify-between gap-3">
             <span className="text-[11.5px] text-muted-foreground">
-              UI zoom level
+              界面缩放比例
             </span>
             <span className="tabular-nums text-[11px] text-muted-foreground">
               {Math.round(zoomLevel * 100)}%
@@ -195,10 +192,10 @@ export function GeneralSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Explorer</Label>
+        <Label>文件浏览器</Label>
         <SettingRow
-          title="Show hidden files"
-          description="Include dot-prefixed files and folders (.env, .gitignore, .config) in the file explorer and search."
+          title="显示隐藏文件"
+          description="在文件浏览器和搜索中包含以点开头的文件与文件夹 (.env、.gitignore、.config)。"
         >
           <Switch
             checked={showHidden}
@@ -206,8 +203,8 @@ export function GeneralSection() {
           />
         </SettingRow>
         <SettingRow
-          title="Git decorations"
-          description="Tint changed files and dim gitignored entries in the file explorer."
+          title="Git 状态标记"
+          description="在文件浏览器中为已改动的文件着色，并淡化被 gitignore 忽略的条目。"
         >
           <Switch
             checked={explorerGitDecorations}
@@ -217,33 +214,32 @@ export function GeneralSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Terminal</Label>
+        <Label>终端</Label>
         <SettingRow
           title={
             <span className="inline-flex items-center gap-1.5">
-              Use WebGL renderer
+              使用 WebGL 渲染器
               <TooltipProvider delayDuration={200}>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span
                       className="cursor-help text-[11px] text-muted-foreground/70 leading-none"
-                      aria-label="More info about WebGL renderer"
+                      aria-label="关于 WebGL 渲染器的更多说明"
                     >
                       ⓘ
                     </span>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="max-w-65 text-[11px]">
-                    xterm's WebGL renderer caches glyphs in a GPU texture atlas.
-                    On some macOS setups (especially with Nerd Fonts), the atlas
-                    corrupts and terminal text becomes unreadable. Turn this off
-                    as a fallback — performance dips slightly, but text renders
-                    correctly via the DOM renderer.
+                    xterm 的 WebGL 渲染器会把字形缓存在 GPU 纹理图集中。在部分
+                    macOS 环境下 (尤其是配合 Nerd Font 时)，图集会损坏，导致终端
+                    文字无法辨认。此时可关闭此项作为兜底方案: 性能会略有下降，但
+                    DOM 渲染器能正确显示文字。
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
             </span>
           }
-          description="Hardware-accelerated rendering. Turn off if text shows corruption or blank tiles."
+          description="硬件加速渲染。若出现文字错乱或空白色块，请关闭此项。"
         >
           <Switch
             checked={terminalWebglEnabled}
@@ -251,8 +247,8 @@ export function GeneralSection() {
           />
         </SettingRow>
         <SettingRow
-          title="Cursor blinking"
-          description="Blink the terminal cursor. Off by default for lower idle CPU, matching VS Code and the macOS terminal."
+          title="光标闪烁"
+          description="让终端光标闪烁。默认关闭以降低空闲时的 CPU 占用，与 VS Code 和 macOS 终端保持一致。"
         >
           <Switch
             checked={terminalCursorBlink}
@@ -260,8 +256,8 @@ export function GeneralSection() {
           />
         </SettingRow>
         <SettingRow
-          title="Cursor style"
-          description="Shape of the terminal cursor."
+          title="光标样式"
+          description="终端光标的形状。"
         >
           <Select
             value={terminalCursorStyle}
@@ -291,8 +287,8 @@ export function GeneralSection() {
           onCommit={(v) => void setTerminalFontFamily(v)}
         />
         <SettingRow
-          title="Font weight"
-          description="Thickness of terminal characters"
+          title="字重"
+          description="终端字符的粗细"
         >
           <Select
             value={terminalFontWeight}
@@ -318,13 +314,13 @@ export function GeneralSection() {
           </Select>
         </SettingRow>
         <SettingRow
-          title="Integrated terminal shell"
+          title="集成终端 Shell"
           description={
             shells.find((s) => s.path === terminalShell)?.integrated === false
-              ? "Command blocks and directory tracking are unavailable for this shell."
+              ? "该 Shell 不支持命令块和目录跟踪。"
               : wslDistros.length > 0
-                ? "Shell for the integrated terminal. WSL spaces use the distro login shell. Existing tabs keep their shell."
-                : "Shell for new terminal tabs. Existing tabs keep their shell."
+                ? "集成终端使用的 Shell。WSL 工作区使用该发行版的登录 Shell。已打开的标签页保持原有 Shell。"
+                : "新建终端标签页使用的 Shell。已打开的标签页保持原有 Shell。"
           }
         >
           <Select
@@ -341,7 +337,7 @@ export function GeneralSection() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value={SHELL_AUTO} className="text-[12px]">
-                Auto
+                自动
               </SelectItem>
               {shells.map((s) => (
                 <SelectItem key={s.path} value={s.path} className="text-[12px]">
@@ -353,8 +349,8 @@ export function GeneralSection() {
         </SettingRow>
         {(wslDistros.length > 0 || defaultWorkspaceEnv !== "local") && (
           <SettingRow
-            title="Workspace environment"
-            description="Where new spaces run, terminal and AI agent alike: Windows or a WSL distro. Existing spaces keep theirs; switch any from the status bar."
+            title="工作区环境"
+            description="新建工作区的运行环境，终端和 AI 智能体都适用: Windows 或某个 WSL 发行版。已有工作区保持原设置，可在状态栏随时切换。"
           >
             <Select
               value={defaultWorkspaceEnv}
@@ -387,7 +383,7 @@ export function GeneralSection() {
                       value={defaultWorkspaceEnv}
                       className="text-[12px]"
                     >
-                      {defaultWorkspaceEnv.slice("wsl:".length)} (unavailable)
+                      {defaultWorkspaceEnv.slice("wsl:".length)} (不可用)
                     </SelectItem>
                   )}
               </SelectContent>
@@ -395,8 +391,8 @@ export function GeneralSection() {
           </SettingRow>
         )}
         <SettingRow
-          title="Letter spacing"
-          description="Extra horizontal space between characters (px). Use negative values to tighten Nerd Fonts."
+          title="字符间距"
+          description="字符之间额外的水平间距 (px)。使用负值可收紧 Nerd Font。"
         >
           <Select
             value={String(terminalLetterSpacing)}
@@ -414,7 +410,7 @@ export function GeneralSection() {
             </SelectContent>
           </Select>
         </SettingRow>
-        <SettingRow title="Font size" description="Terminal text size.">
+        <SettingRow title="字号" description="终端文字大小。">
           <Select
             value={String(terminalFontSize)}
             onValueChange={(v) => void setTerminalFontSize(Number(v))}
@@ -436,8 +432,8 @@ export function GeneralSection() {
           </Select>
         </SettingRow>
         <SettingRow
-          title="Scrollback"
-          description="Lines of history kept per terminal. Higher uses more RAM (~3 KB / line)."
+          title="回滚缓冲"
+          description="每个终端保留的历史行数。数值越大占用内存越多 (约 3 KB / 行)。"
         >
           <Select
             value={String(terminalScrollback)}
@@ -453,7 +449,7 @@ export function GeneralSection() {
                   value={String(lines)}
                   className="text-[12px]"
                 >
-                  {lines.toLocaleString()} lines
+                  {lines.toLocaleString()} 行
                 </SelectItem>
               ))}
             </SelectContent>
@@ -462,10 +458,10 @@ export function GeneralSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Agents</Label>
+        <Label>智能体</Label>
         <SettingRow
-          title="Coding agent notifications"
-          description="Alert when Claude Code or Codex running in a terminal needs your input or finishes. Desktop notification when Terax is unfocused, in-app otherwise."
+          title="编码智能体通知"
+          description="当终端中运行的 Claude Code 或 Codex 需要你输入或已完成时提醒。Terax 未聚焦时发送桌面通知，否则在应用内提示。"
         >
           <Switch
             checked={agentNotifications}
@@ -475,11 +471,11 @@ export function GeneralSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Startup</Label>
+        <Label>启动</Label>
         <div className="flex flex-col gap-2">
           <SettingRow
-            title="Launch at login"
-            description="Open Terax automatically when you sign in."
+            title="开机自启"
+            description="登录系统时自动打开 Terax。"
           >
             <Switch
               checked={autostart}
@@ -487,8 +483,8 @@ export function GeneralSection() {
             />
           </SettingRow>
           <SettingRow
-            title="Restore window position & size"
-            description="Reopen the main window where you left it. Applies on next launch."
+            title="恢复窗口位置与大小"
+            description="下次启动时，主窗口在你上次关闭的位置和大小重新打开。"
           >
             <Switch
               checked={restoreWindowState}
@@ -532,13 +528,13 @@ function FontFamilyInput({
 
   return (
     <SettingRow
-      title="Font family"
-      description='Nerd Font name for icons (e.g. "CaskaydiaCove Nerd Font Mono"). Leave blank to auto-detect.'
+      title="字体"
+      description='用于显示图标的 Nerd Font 名称 (例如 "CaskaydiaCove Nerd Font Mono")。留空则自动检测。'
     >
       <input
         type="text"
         value={draft}
-        placeholder="Auto-detect"
+        placeholder="自动检测"
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {

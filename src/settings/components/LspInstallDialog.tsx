@@ -63,12 +63,11 @@ export function LspInstallDialog({ server, onClose }: Props) {
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Install {server.name} language server</DialogTitle>
+          <DialogTitle>安装 {server.name} 语言服务器</DialogTitle>
           <DialogDescription>
-            Terax could not find{" "}
-            <code className="font-mono text-foreground">{server.command}</code>{" "}
-            on your PATH. Install it, then check again to enable this language
-            server.
+            Terax 在 PATH 中找不到{" "}
+            <code className="font-mono text-foreground">{server.command}</code>
+            。请先安装，然后重新检测以启用该语言服务器。
           </DialogDescription>
         </DialogHeader>
 
@@ -81,7 +80,7 @@ export function LspInstallDialog({ server, onClose }: Props) {
               type="button"
               className="shrink-0 cursor-pointer rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
               onClick={() => void copyInstallCommand()}
-              title="Copy install command"
+              title="复制安装命令"
             >
               <HugeiconsIcon
                 icon={copied ? Tick02Icon : Copy01Icon}
@@ -92,15 +91,13 @@ export function LspInstallDialog({ server, onClose }: Props) {
           </div>
         ) : (
           <p className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            Install this custom server manually and make sure its command is
-            available on PATH.
+            请手动安装该自定义服务器，并确保其命令在 PATH 中可用。
           </p>
         )}
 
         {notFound ? (
           <p className="text-xs text-destructive">
-            Still not found. Finish the installation and make sure the command
-            is available on PATH.
+            仍未找到。请完成安装，并确保该命令在 PATH 中可用。
           </p>
         ) : null}
 
@@ -114,7 +111,7 @@ export function LspInstallDialog({ server, onClose }: Props) {
                 void openUrl(server.install?.docsUrl ?? "").catch(console.error)
               }
             >
-              Documentation
+              查看文档
             </Button>
           ) : (
             <span />
@@ -130,7 +127,7 @@ export function LspInstallDialog({ server, onClose }: Props) {
               strokeWidth={1.9}
               className={checking ? "animate-spin" : undefined}
             />
-            {checking ? "Checking..." : "Check again"}
+            {checking ? "检测中..." : "重新检测"}
           </Button>
         </DialogFooter>
       </DialogContent>

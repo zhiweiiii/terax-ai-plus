@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const everforest: Theme = {
   id: "everforest",
   name: "Everforest",
-  description: "Soft, low-contrast green forest palette.",
+  description: "柔和低对比的森林绿配色。",
   editorTheme: { dark: "everforest", light: "everforest-light" },
   variants: {
     dark: {

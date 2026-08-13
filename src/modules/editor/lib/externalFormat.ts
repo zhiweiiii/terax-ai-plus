@@ -67,8 +67,8 @@ export const FORMATTERS: Record<
 };
 
 export const FORMATTER_LABELS: Record<EditorFormatter, string> = {
-  lsp: "Language server",
-  custom: "Custom command",
+  lsp: "语言服务器",
+  custom: "自定义命令",
   ...Object.fromEntries(
     Object.entries(FORMATTERS).map(([id, def]) => [id, def.label]),
   ),

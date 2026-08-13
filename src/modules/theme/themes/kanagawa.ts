@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const kanagawa: Theme = {
   id: "kanagawa",
   name: "Kanagawa",
-  description: "Inky dark inspired by Hokusai; warm Lotus light.",
+  description: "取自北斋的墨色暗调，搭配暖色 Lotus 浅色。",
   editorTheme: { dark: "kanagawa", light: "kanagawa-lotus" },
   variants: {
     dark: {

@@ -16,6 +16,10 @@ struct LaunchDir(Mutex<Option<String>>);
 #[derive(Default)]
 struct LaunchFiles(Mutex<Vec<String>>);
 
+/// Drained on first read so HMR / re-mounts can't re-run the launch command.
+#[derive(Default)]
+struct LaunchCommand(Mutex<Option<String>>);
+
 #[tauri::command]
 fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
     state.0.lock().expect("LaunchDir mutex poisoned").take()
@@ -24,6 +28,11 @@ fn get_launch_dir(state: State<'_, LaunchDir>) -> Option<String> {
 #[tauri::command]
 fn get_launch_files(state: State<'_, LaunchFiles>) -> Vec<String> {
     std::mem::take(&mut *state.0.lock().expect("LaunchFiles mutex poisoned"))
+}
+
+#[tauri::command]
+fn get_launch_command(state: State<'_, LaunchCommand>) -> Option<String> {
+    state.0.lock().expect("LaunchCommand mutex poisoned").take()
 }
 
 enum LaunchEntry {
@@ -60,10 +69,73 @@ fn resolve_launch_target(entries: Vec<LaunchEntry>) -> LaunchTarget {
     LaunchTarget { dir, files }
 }
 
-fn parse_launch_target() -> LaunchTarget {
-    let entries = std::env::args()
-        .skip(1)
-        .filter(|arg| !arg.starts_with('-'))
+/// Roomy enough for a command that carries a prompt, still far under the OS
+/// argv limit so a runaway caller can't push megabytes through startup.
+const MAX_LAUNCH_COMMAND_CHARS: usize = 2048;
+
+/// argv is a trust boundary: the command is typed into a PTY and followed by a
+/// CR, so an embedded newline or escape byte would run something the caller
+/// never sees. Reject rather than strip, so a mangled command never half-runs.
+fn sanitize_launch_command(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_LAUNCH_COMMAND_CHARS {
+        return None;
+    }
+    if trimmed.chars().any(char::is_control) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Splits argv into the optional `--run` command and the remaining path args.
+/// The first `--run` wins and always consumes its value, so a rejected command
+/// can't fall through and be treated as a path. `--` ends option parsing.
+/// Kept free of fs/env access so it stays unit-testable.
+fn split_launch_args(args: Vec<String>) -> (Option<String>, Vec<String>) {
+    let mut command = None;
+    let mut seen_run = false;
+    let mut paths = Vec::new();
+    let mut options = true;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if options {
+            if arg == "--" {
+                options = false;
+                index += 1;
+                continue;
+            }
+            if let Some(value) = arg.strip_prefix("--run=") {
+                if !seen_run {
+                    seen_run = true;
+                    command = sanitize_launch_command(value);
+                }
+                index += 1;
+                continue;
+            }
+            if arg == "--run" {
+                if !seen_run {
+                    seen_run = true;
+                    command = args.get(index + 1).and_then(|v| sanitize_launch_command(v));
+                }
+                index += 2;
+                continue;
+            }
+            if arg.starts_with('-') {
+                index += 1;
+                continue;
+            }
+        }
+        paths.push(arg.clone());
+        index += 1;
+    }
+    (command, paths)
+}
+
+fn parse_launch_target() -> (LaunchTarget, Option<String>) {
+    let (command, paths) = split_launch_args(std::env::args().skip(1).collect());
+    let entries = paths
+        .into_iter()
         .filter_map(|arg| std::fs::canonicalize(arg).ok())
         .filter_map(|path| {
             let meta = std::fs::metadata(&path).ok()?;
@@ -74,7 +146,7 @@ fn parse_launch_target() -> LaunchTarget {
             })
         })
         .collect();
-    resolve_launch_target(entries)
+    (resolve_launch_target(entries), command)
 }
 
 #[tauri::command]
@@ -172,7 +244,7 @@ pub fn run() {
         }
     }
 
-    let launch = parse_launch_target();
+    let (launch, launch_command) = parse_launch_target();
     let cli_dir = launch.dir.clone();
     workspace::init_launch_cwd(cli_dir.as_deref());
     let control_state = control::ControlState::default();
@@ -242,6 +314,7 @@ pub fn run() {
         })
         .manage(LaunchDir(Mutex::new(cli_dir)))
         .manage(LaunchFiles(Mutex::new(launch.files)))
+        .manage(LaunchCommand(Mutex::new(launch_command)))
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
             pty::pty_write,
@@ -258,6 +331,8 @@ pub fn run() {
             fs::file::fs_write_file,
             fs::file::fs_stat,
             fs::file::fs_canonicalize,
+            fs::clipboard::fs_save_clipboard_image,
+            fs::clipboard::fs_clipboard_file_paths,
             fs::mutate::fs_create_file,
             fs::mutate::fs_create_dir,
             fs::mutate::fs_rename,
@@ -295,6 +370,9 @@ pub fn run() {
             git::commands::git_remote_url,
             git::commands::git_list_branches,
             git::commands::git_checkout_branch,
+            git::commands::git_scan_repos,
+            git::commands::git_workspace_snapshot,
+            git::commands::git_fetch_all,
             shell::shell_run_command,
             shell::shell_session_open,
             shell::shell_session_run,
@@ -312,6 +390,7 @@ pub fn run() {
             control::control_respond,
             get_launch_dir,
             get_launch_files,
+            get_launch_command,
             open_settings_window,
             agent::agent_enable_hooks,
             agent::agent_hooks_status,
@@ -374,6 +453,111 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod launch_args_tests {
+    use super::{sanitize_launch_command, split_launch_args, MAX_LAUNCH_COMMAND_CHARS};
+
+    fn split(args: &[&str]) -> (Option<String>, Vec<String>) {
+        split_launch_args(args.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn plain_paths_carry_through_without_a_command() {
+        let (command, paths) = split(&["/home/u/proj"]);
+        assert_eq!(command, None);
+        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
+    }
+
+    #[test]
+    fn run_takes_the_next_arg_and_leaves_the_path() {
+        let (command, paths) = split(&["--run", "pnpm dev", "/home/u/proj"]);
+        assert_eq!(command.as_deref(), Some("pnpm dev"));
+        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
+    }
+
+    #[test]
+    fn run_also_accepts_the_equals_form() {
+        let (command, paths) = split(&["--run=pnpm dev", "/home/u/proj"]);
+        assert_eq!(command.as_deref(), Some("pnpm dev"));
+        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
+    }
+
+    #[test]
+    fn unknown_flags_are_ignored_not_treated_as_paths() {
+        let (command, paths) = split(&["--no-focus", "/home/u/proj"]);
+        assert_eq!(command, None);
+        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
+    }
+
+    #[test]
+    fn separator_stops_option_parsing() {
+        let (command, paths) = split(&["--", "--run", "/home/u/proj"]);
+        assert_eq!(command, None);
+        assert_eq!(
+            paths,
+            vec!["--run".to_string(), "/home/u/proj".to_string()]
+        );
+    }
+
+    #[test]
+    fn first_run_wins_and_the_second_value_is_never_a_path() {
+        let (command, paths) = split(&["--run", "a", "--run", "b", "/home/u/proj"]);
+        assert_eq!(command.as_deref(), Some("a"));
+        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
+    }
+
+    // A rejected command must not fall through and be opened as a file path.
+    #[test]
+    fn rejected_command_still_consumes_its_value() {
+        let (command, paths) = split(&["--run", "bad\ncommand", "/home/u/proj"]);
+        assert_eq!(command, None);
+        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
+    }
+
+    #[test]
+    fn run_without_a_value_is_harmless() {
+        let (command, paths) = split(&["/home/u/proj", "--run"]);
+        assert_eq!(command, None);
+        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
+    }
+
+    #[test]
+    fn commands_are_trimmed() {
+        assert_eq!(
+            sanitize_launch_command("  pnpm dev  ").as_deref(),
+            Some("pnpm dev")
+        );
+    }
+
+    #[test]
+    fn blank_commands_are_rejected() {
+        assert_eq!(sanitize_launch_command("   "), None);
+    }
+
+    // Newlines and escape bytes would run commands the caller never typed.
+    #[test]
+    fn control_characters_are_rejected() {
+        assert_eq!(sanitize_launch_command("echo hi\rrm -rf /"), None);
+        assert_eq!(sanitize_launch_command("echo hi\nrm -rf /"), None);
+        assert_eq!(sanitize_launch_command("echo \x1b[31mhi"), None);
+        assert_eq!(sanitize_launch_command("echo \x00hi"), None);
+    }
+
+    #[test]
+    fn overlong_commands_are_rejected() {
+        let long = "a".repeat(MAX_LAUNCH_COMMAND_CHARS + 1);
+        assert_eq!(sanitize_launch_command(&long), None);
+        let at_limit = "a".repeat(MAX_LAUNCH_COMMAND_CHARS);
+        assert_eq!(sanitize_launch_command(&at_limit).as_deref(), Some(&*at_limit));
+    }
+
+    #[test]
+    fn multibyte_commands_are_measured_in_chars_not_bytes() {
+        let cmd = "回显 你好世界";
+        assert_eq!(sanitize_launch_command(cmd).as_deref(), Some(cmd));
+    }
 }
 
 #[cfg(test)]

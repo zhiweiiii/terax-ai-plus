@@ -7,3 +7,6 @@ export {
   type SourceControlSummary,
 } from "./useSourceControl";
 export { useSourceControlContext } from "./useSourceControlContext";
+export { useRepoList } from "./useRepoList";
+export { useMultiRepoSourceControl } from "./useMultiRepoSourceControl";
+export { RepoSelector } from "./RepoSelector";

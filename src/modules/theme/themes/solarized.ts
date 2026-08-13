@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const solarized: Theme = {
   id: "solarized",
   name: "Solarized",
-  description: "Ethan Schoonover's precision low-glare palette.",
+  description: "Ethan Schoonover 的精准低眩光配色。",
   editorTheme: { dark: "solarized-dark", light: "solarized-light" },
   variants: {
     dark: {

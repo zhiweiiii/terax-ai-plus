@@ -12,7 +12,7 @@ export type SelectionAskAiProps = {
   onDismiss: () => void;
 };
 
-const W = 130;
+const W = 150;
 const OFFSET = 32;
 
 export function SelectionAskAi({
@@ -53,13 +53,16 @@ export function SelectionAskAi({
     >
       <button
         type="button"
+        title="把选中内容粘贴到运行中的 Claude Code"
         onClick={(e) => {
           e.stopPropagation();
           onAsk();
         }}
         className="flex h-7 w-full items-center justify-between gap-1.5 rounded-md border border-border/60 bg-card/95 px-2 text-xs shadow-lg backdrop-blur-md hover:border-border hover:bg-accent"
       >
-        <span className="min-w-0 flex-1 truncate whitespace-nowrap">Ask Terax</span>
+        <span className="min-w-0 flex-1 truncate whitespace-nowrap text-left">
+          发给 Claude
+        </span>
         <KbdGroup>
           <Kbd className="h-4 min-w-4 px-1 text-[10px]">{shortcut}</Kbd>
         </KbdGroup>

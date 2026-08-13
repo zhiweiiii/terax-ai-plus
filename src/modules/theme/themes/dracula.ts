@@ -3,7 +3,7 @@ import type { Theme } from "../types";
 export const dracula: Theme = {
   id: "dracula",
   name: "Dracula",
-  description: "The classic high-contrast purple dark theme.",
+  description: "经典的高对比紫色暗色主题。",
   editorTheme: { dark: "dracula" },
   variants: {
     dark: {

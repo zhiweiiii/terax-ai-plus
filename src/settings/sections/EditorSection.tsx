@@ -56,13 +56,13 @@ export function EditorSection() {
   return (
     <div className="flex flex-col gap-6">
       <SectionHeader
-        title="Editor"
-        description="Editing behavior, saving, and language servers."
+        title="编辑器"
+        description="编辑行为、保存与语言服务器。"
       />
 
       <div className="flex flex-col gap-2">
-        <Label>Appearance</Label>
-        <SettingRow title="Font size" description="Code editor text size.">
+        <Label>外观</Label>
+        <SettingRow title="字号" description="代码编辑器文字大小。">
           <Select
             value={String(editorFontSize)}
             onValueChange={(v) => void setEditorFontSize(Number(v))}
@@ -86,10 +86,10 @@ export function EditorSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Editing</Label>
+        <Label>编辑</Label>
         <SettingRow
-          title="Vim mode"
-          description="Enable Vim keybindings in the code editor."
+          title="Vim 模式"
+          description="在代码编辑器中启用 Vim 按键绑定。"
         >
           <Switch
             checked={vimMode}
@@ -97,8 +97,8 @@ export function EditorSection() {
           />
         </SettingRow>
         <SettingRow
-          title="Word wrap"
-          description="Wrap long lines instead of scrolling horizontally."
+          title="自动换行"
+          description="长行自动折行显示，而不是横向滚动。"
         >
           <Switch
             checked={editorWordWrap}
@@ -108,10 +108,10 @@ export function EditorSection() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label>Saving</Label>
+        <Label>保存</Label>
         <SettingRow
-          title="Auto save"
-          description="Automatically save files after a delay when changes are detected."
+          title="自动保存"
+          description="检测到改动后，延迟一段时间自动保存文件。"
         >
           <Switch
             checked={editorAutoSave}
@@ -125,8 +125,8 @@ export function EditorSection() {
           />
         )}
         <SettingRow
-          title="Format on save"
-          description="Format the file on explicit save (Cmd+S / :w) with the formatter below."
+          title="保存时格式化"
+          description="手动保存 (Cmd+S / :w) 时用下方选择的格式化工具格式化文件。"
         >
           <Switch
             checked={editorFormatOnSave}
@@ -136,8 +136,8 @@ export function EditorSection() {
         {editorFormatOnSave && (
           <>
             <SettingRow
-              title="Formatter"
-              description="Language server formats the buffer before writing; external tools run on the saved file from your PATH."
+              title="格式化工具"
+              description="语言服务器在写入前格式化缓冲区；外部工具则从 PATH 调用，作用于已保存的文件。"
             >
               <FormatterSelect
                 value={editorFormatter}
@@ -194,8 +194,8 @@ function CustomFormatCommandInput() {
 
   return (
     <SettingRow
-      title="Custom command"
-      description="Runs on the saved file; {file} is replaced with the quoted path (appended when omitted)."
+      title="自定义命令"
+      description="作用于已保存的文件；{file} 会被替换为带引号的路径 (省略时自动追加到末尾)。"
     >
       <Input
         value={draft}
@@ -224,8 +224,8 @@ function FormatterOverrides() {
   return (
     <>
       <SettingRow
-        title="Language overrides"
-        description="Use a different formatter for specific languages (e.g. Ruff for Python)."
+        title="按语言覆盖"
+        description="为特定语言指定不同的格式化工具 (例如 Python 用 Ruff)。"
       >
         <button
           type="button"
@@ -236,7 +236,7 @@ function FormatterOverrides() {
             if (first) update({ ...byLang, [first.ext]: "lsp" });
           }}
         >
-          Add override
+          添加覆盖规则
         </button>
       </SettingRow>
       {entries.map(([lang, formatter]) => (
@@ -274,7 +274,7 @@ function FormatterOverrides() {
           <button
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-            title="Remove override"
+            title="移除覆盖规则"
             onClick={() => {
               const next = { ...byLang };
               delete next[lang];
@@ -323,8 +323,8 @@ function AutoSaveDelayInput({
 
   return (
     <SettingRow
-      title="Auto save delay"
-      description="Delay before unsaved changes are saved automatically."
+      title="自动保存延迟"
+      description="未保存的改动在多久之后自动写入磁盘。"
     >
       <div className="flex items-center gap-2">
         <Input
@@ -342,7 +342,7 @@ function AutoSaveDelayInput({
           }}
           className="h-8 w-20 rounded-md border border-border bg-background px-2.5 text-right text-[12px] md:text-[12px] tabular-nums outline-none focus:border-foreground/40 focus-visible:ring-0 focus-visible:border-foreground/40 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
         />
-        <span className="text-[11px] text-muted-foreground">ms</span>
+        <span className="text-[11px] text-muted-foreground">毫秒</span>
       </div>
     </SettingRow>
   );
