@@ -1,5 +1,5 @@
+import { type GitRepoHead, native } from "@/modules/ai/lib/native";
 import { useEffect, useRef, useState } from "react";
-import { native, type GitRepoHead } from "@/modules/ai/lib/native";
 
 type UseRepoListResult = {
   repos: GitRepoHead[];
@@ -17,44 +17,52 @@ type UseRepoListResult = {
  * If exactly one repo is found it is auto-selected.
  */
 export function useRepoList(basePath: string | null): UseRepoListResult {
-  console.log("[terax] useRepoList called, basePath=", basePath);
   const [repos, setRepos] = useState<GitRepoHead[]>([]);
   const [activeRepo, setActiveRepoState] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const lastPathRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRepoRef = useRef<string | null>(activeRepo);
+  activeRepoRef.current = activeRepo;
+  // Scans race whenever workspaces are switched quickly: without a token the
+  // slower scan of the workspace you left can land last and repopulate the
+  // panel with its repos.
+  const scanTokenRef = useRef(0);
 
   const doScan = async (path: string) => {
+    const token = ++scanTokenRef.current;
     setIsLoading(true);
     try {
       const heads = await native.gitScanRepos(path, 1);
-      console.log(
-        `[terax] repo scan: ${heads.length} repo(s) under ${path}`,
-        heads.map((h) => `${h.repoRoot} [${h.branch}]`),
-      );
+      if (token !== scanTokenRef.current) return;
       setRepos(heads);
       if (heads.length === 1) {
         setActiveRepoState(heads[0].repoRoot);
+      } else if (heads.length === 0) {
+        // Leaving the selection set would keep the old project's repo on
+        // screen with no entry in the list backing it.
+        setActiveRepoState(null);
       } else if (
-        heads.length > 1 &&
-        activeRepo &&
-        !heads.some((h) => h.repoRoot === activeRepo)
+        activeRepoRef.current &&
+        !heads.some((h) => h.repoRoot === activeRepoRef.current)
       ) {
         // Active repo no longer in the list — pick the first.
         setActiveRepoState(heads[0].repoRoot);
       }
     } catch (err) {
+      if (token !== scanTokenRef.current) return;
       console.warn("[terax] repo scan failed:", err);
       setRepos([]);
       setActiveRepoState(null);
     } finally {
-      setIsLoading(false);
+      if (token === scanTokenRef.current) setIsLoading(false);
     }
   };
 
   useEffect(() => {
     // Clear on null/empty path.
     if (!basePath) {
+      scanTokenRef.current++;
       setRepos([]);
       setActiveRepoState(null);
       lastPathRef.current = null;
@@ -66,7 +74,6 @@ export function useRepoList(basePath: string | null): UseRepoListResult {
     lastPathRef.current = basePath;
 
     // Fire scan immediately — 500ms debounce is too slow for initial detection.
-    console.log("[terax] useRepoList: scheduling scan for", basePath);
     void doScan(basePath);
   }, [basePath]); // eslint-disable-line react-hooks/exhaustive-deps
 

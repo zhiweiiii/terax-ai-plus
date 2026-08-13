@@ -1,7 +1,7 @@
 import { isMarkdownPath } from "@/lib/utils";
 import {
-  createAgentPanePlan,
   type AgentInstanceCount,
+  createAgentPanePlan,
 } from "@/modules/agents/lib/launcher";
 import {
   findLeafCwd,
@@ -263,6 +263,41 @@ export function planFileTabOpen(
   return { tabs: next, tabId };
 }
 
+/** Editor tabs a single space keeps open; opening past it closes the oldest. */
+export const MAX_EDITOR_TABS_PER_SPACE = 5;
+
+/**
+ * Trims a space back to MAX_EDITOR_TABS_PER_SPACE editor tabs, closing them in
+ * tab order — which is the order they were opened, until tabs are dragged.
+ *
+ * Two tabs are never evicted: the ones named in `keepIds` (the file just
+ * opened and whatever is active), and any tab with unsaved edits, since
+ * closing one would drop the buffer with no prompt. Both exemptions can leave
+ * the space above the cap, which is the right way for this to fail.
+ */
+export function capEditorTabs(
+  tabs: Tab[],
+  spaceId: string,
+  keepIds: number[],
+): Tab[] {
+  const editors = tabs.filter(
+    (t): t is EditorTab => t.kind === "editor" && t.spaceId === spaceId,
+  );
+  let over = editors.length - MAX_EDITOR_TABS_PER_SPACE;
+  if (over <= 0) return tabs;
+
+  const keep = new Set(keepIds);
+  const evict = new Set<number>();
+  for (const t of editors) {
+    if (over <= 0) break;
+    if (keep.has(t.id) || t.dirty) continue;
+    evict.add(t.id);
+    over--;
+  }
+  if (evict.size === 0) return tabs;
+  return tabs.filter((t) => !evict.has(t.id));
+}
+
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : path;
@@ -341,8 +376,7 @@ export function planGitDiffOpen(
     tab.path === input.path &&
     tab.mode === input.mode;
   const matchingTabs = tabs.filter(matches);
-  const existing =
-    matchingTabs.find((tab) => !tab.preview) ?? matchingTabs[0];
+  const existing = matchingTabs.find((tab) => !tab.preview) ?? matchingTabs[0];
 
   if (existing) {
     const preview = pin ? false : existing.preview;
@@ -468,7 +502,10 @@ export function planSpaceRemoval(
   let activeId = currentActiveId;
   if (!next.some((t) => t.spaceId === fallbackSpaceId)) {
     const tabId = allocId();
-    next = [...next, coldTerminalTab(tabId, allocId(), fallbackSpaceId, fallbackCwd)];
+    next = [
+      ...next,
+      coldTerminalTab(tabId, allocId(), fallbackSpaceId, fallbackCwd),
+    ];
     activeId = tabId;
   } else if (!next.some((t) => t.id === currentActiveId)) {
     const inFallback = next.filter((t) => t.spaceId === fallbackSpaceId);
@@ -757,8 +794,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         targetSpaceId,
         () => nextIdRef.current++,
       );
-      tabsRef.current = plan.tabs;
-      setTabs(plan.tabs);
+      const next = capEditorTabs(plan.tabs, targetSpaceId, [
+        plan.tabId,
+        activeIdRef.current,
+      ]);
+      tabsRef.current = next;
+      setTabs(next);
       if (activate) setActiveId(plan.tabId);
       return plan.tabId;
     },
@@ -943,25 +984,22 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     [],
   );
 
-  const openGitDiffTab = useCallback(
-    (input: GitDiffOpenInput, pin = false) => {
-      const curr = tabsRef.current;
-      const plan = planGitDiffOpen(
-        curr,
-        input,
-        activeSpaceIdRef.current,
-        pin,
-        () => nextIdRef.current++,
-      );
-      if (plan.tabs !== curr) {
-        tabsRef.current = plan.tabs;
-        setTabs(plan.tabs);
-      }
-      setActiveId(plan.targetId);
-      return plan.targetId;
-    },
-    [],
-  );
+  const openGitDiffTab = useCallback((input: GitDiffOpenInput, pin = false) => {
+    const curr = tabsRef.current;
+    const plan = planGitDiffOpen(
+      curr,
+      input,
+      activeSpaceIdRef.current,
+      pin,
+      () => nextIdRef.current++,
+    );
+    if (plan.tabs !== curr) {
+      tabsRef.current = plan.tabs;
+      setTabs(plan.tabs);
+    }
+    setActiveId(plan.targetId);
+    return plan.targetId;
+  }, []);
 
   const openCommitHistoryTab = useCallback(
     (input: { repoRoot: string; branch?: string | null }) => {
@@ -1108,9 +1146,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
 
   const selectByIndex = useCallback(
     (idx: number, spaceId?: string) => {
-      const t = spaceId
-        ? pickTabBySpaceIndex(tabs, idx, spaceId)
-        : tabs[idx];
+      const t = spaceId ? pickTabBySpaceIndex(tabs, idx, spaceId) : tabs[idx];
       if (t) setActiveId(t.id);
     },
     [tabs],

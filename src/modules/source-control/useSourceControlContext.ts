@@ -1,15 +1,15 @@
-import { useCallback, useMemo } from "react";
 import { native } from "@/modules/ai/lib/native";
 import type { SidebarViewId } from "@/modules/sidebar";
 import type { Tab } from "@/modules/tabs";
+import { useCallback, useMemo } from "react";
 import {
   activeRepositoryContextPath,
   gitGraphRepositoryPath,
-  sourceControlRepositoryPath,
   type SourceControlRepositoryTarget,
+  sourceControlRepositoryPath,
 } from "./repositoryTarget";
-import { useSourceControl } from "./useSourceControl";
 import { useMultiRepoSourceControl } from "./useMultiRepoSourceControl";
+import { useSourceControl } from "./useSourceControl";
 
 type Params = {
   activeTab: Tab | undefined;
@@ -135,4 +135,3 @@ export function useSourceControlContext({
     openGitGraphFromContext,
   };
 }
-

@@ -46,7 +46,10 @@ export function RepoSelector({
   }
 
   const activeName = activeRepo
-    ? repos.find((r) => r.repoRoot === activeRepo)?.repoRoot.split(/[/\\]/).pop() ?? activeRepo
+    ? (repos
+        .find((r) => r.repoRoot === activeRepo)
+        ?.repoRoot.split(/[/\\]/)
+        .pop() ?? activeRepo)
     : null;
 
   return (

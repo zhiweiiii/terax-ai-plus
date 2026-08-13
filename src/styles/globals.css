@@ -463,3 +463,12 @@ html *::-webkit-scrollbar {
     background-position: 0% center;
   }
 }
+
+/* Find-in-page over rendered markdown (see modules/markdown/lib/findInRendered).
+   The CSS Custom Highlight API paints matches without mutating the DOM. */
+::highlight(terax-md-find) {
+  background-color: color-mix(in oklch, var(--primary) 28%, transparent);
+}
+::highlight(terax-md-find-current) {
+  background-color: color-mix(in oklch, var(--primary) 60%, transparent);
+}

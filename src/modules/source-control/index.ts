@@ -1,12 +1,12 @@
-export { SourceControlPanel } from "./SourceControlPanelLazy";
+export { RepoSelector } from "./RepoSelector";
 export type { SourceControlRepositoryTarget } from "./repositoryTarget";
+export { SourceControlPanel } from "./SourceControlPanelLazy";
+export { useMultiRepoSourceControl } from "./useMultiRepoSourceControl";
+export { useRepoList } from "./useRepoList";
 export { useRepositoryTargeting } from "./useRepositoryTargeting";
 export {
   getSourceControlRemoteIndicator,
-  useSourceControl,
   type SourceControlSummary,
+  useSourceControl,
 } from "./useSourceControl";
 export { useSourceControlContext } from "./useSourceControlContext";
-export { useRepoList } from "./useRepoList";
-export { useMultiRepoSourceControl } from "./useMultiRepoSourceControl";
-export { RepoSelector } from "./RepoSelector";

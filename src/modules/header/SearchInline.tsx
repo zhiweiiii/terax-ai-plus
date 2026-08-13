@@ -28,6 +28,16 @@ export type SearchTarget =
   | { kind: "terminal"; addon: SearchAddon; focus: () => void }
   | { kind: "editor"; handle: EditorPaneHandle; focus: () => void }
   | {
+      kind: "markdown";
+      handle: {
+        setQuery: (q: string) => void;
+        findNext: () => void;
+        findPrevious: () => void;
+        clearQuery: () => void;
+      };
+      focus: () => void;
+    }
+  | {
       kind: "git-history";
       handle: { setQuery: (q: string) => void; clearQuery: () => void };
       focus: () => void;
@@ -125,7 +135,7 @@ export const SearchInline = forwardRef<SearchInlineHandle, Props>(
         const opts = { decorations: TERM_DECORATIONS };
         if (forward) target.addon.findNext(q, opts);
         else target.addon.findPrevious(q, opts);
-      } else if (target.kind === "editor") {
+      } else if (target.kind === "editor" || target.kind === "markdown") {
         if (forward) target.handle.findNext();
         else target.handle.findPrevious();
       }

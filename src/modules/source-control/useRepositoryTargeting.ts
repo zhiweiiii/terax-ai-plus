@@ -4,8 +4,8 @@ import { toast } from "sonner";
 import {
   clearRepositoryTargetForSpace,
   repositoryTargetForSpace,
-  setRepositoryTargetForSpace,
   type SourceControlRepositoryTargets,
+  setRepositoryTargetForSpace,
 } from "./repositoryTarget";
 
 type RequestCounter = { current: number };

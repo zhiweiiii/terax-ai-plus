@@ -2,10 +2,13 @@
 # 用法: .\打包.ps1
 #
 # 做的事:
-#   1. 关掉正在跑的 Terax (不然 exe 被占用, 编译会失败)
+#   1. 把被占用的旧产物改名挪开 (不关闭正在运行的 Terax)
 #   2. 类型检查
 #   3. 编译 CLI + 前端 + Rust 后端
 #   4. 生成 NSIS / MSI 安装包
+#
+# 打包过程中可以继续用正在开着的 Terax, 它跑的还是旧版本,
+# 想用新版本自己重启一下就行。
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
@@ -20,16 +23,68 @@ $startTime = Get-Date
 
 $releaseExe = Join-Path $root "src-tauri\target\release\terax-awei.exe"
 
-Step "关闭正在运行的正式版 Terax"
-# 只杀 target/release/ 下的进程 —— 开发模式 (target/debug/) 不受影响
-$procs = Get-Process -Name "terax-awei" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -eq $releaseExe }
-if ($procs) {
-    $procs | Stop-Process -Force
-    Start-Sleep -Seconds 1
-    Write-Host "  已关闭 $($procs.Count) 个进程" -ForegroundColor Gray
+# 文件是不是被别的进程占着写不了
+function Test-FileLocked($path) {
+    try {
+        $fs = [System.IO.File]::Open($path, 'Open', 'ReadWrite', 'None')
+        $fs.Dispose()
+        return $false
+    } catch {
+        return $true
+    }
+}
+
+Step "挪开被占用的旧产物"
+# Windows 允许重命名正在运行的 exe: 把被占用的旧文件改个名让开位置,
+# 链接器就能写新文件, 已经开着的 Terax 继续用改名后的旧文件跑, 不受影响。
+# 改名留下的 *.locked-* 等下次打包 (那个进程退出后) 自动清掉。
+
+$outDirs = @(
+    (Join-Path $root "src-tauri\target\release")
+    (Join-Path $root "src-tauri\binaries")
+)
+# 交叉编译目录 target/<triple>/release/ —— build-cli.mjs 的 CLI 产物在这
+$outDirs += Get-ChildItem (Join-Path $root "src-tauri\target") -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "*-windows-*" } |
+    ForEach-Object { Join-Path $_.FullName "release" }
+
+$locked = @()
+foreach ($dir in $outDirs) {
+    if (-not (Test-Path $dir)) { continue }
+    foreach ($f in Get-ChildItem $dir -File -ErrorAction SilentlyContinue) {
+        if ($f.Name -notlike "terax-*") { continue }
+        if ($f.Name -like "*.locked-*") {
+            # 上次挪开的, 现在没人占了就删掉
+            if (-not (Test-FileLocked $f.FullName)) {
+                Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+            }
+            continue
+        }
+        if ($f.Extension -ne ".exe" -and $f.Extension -ne ".pdb") { continue }
+        if (Test-FileLocked $f.FullName) { $locked += $f }
+    }
+}
+
+if ($locked) {
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    foreach ($f in $locked) {
+        try {
+            Rename-Item $f.FullName -NewName "$($f.Name).locked-$stamp" -Force -ErrorAction Stop
+            Write-Host "  已挪开 $($f.Name)" -ForegroundColor Gray
+        } catch {
+            Write-Host "  挪不动 $($f.FullName)" -ForegroundColor Red
+            Write-Host "  请手动关掉占用它的程序再打包" -ForegroundColor Red
+            exit 1
+        }
+    }
 } else {
-    Write-Host "  没有在运行" -ForegroundColor Gray
+    Write-Host "  没有被占用的文件" -ForegroundColor Gray
+}
+
+$running = Get-Process -Name "terax-awei" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -like "$root*" }
+if ($running) {
+    Write-Host "  正式版 Terax 保持运行 ($($running.Count) 个), 跑的仍是旧版本" -ForegroundColor Gray
 }
 
 Step "类型检查"

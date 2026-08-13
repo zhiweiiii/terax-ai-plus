@@ -1,9 +1,10 @@
 import {
-  native,
   type GitRepoInfo,
   type GitStatusSnapshot,
+  native,
 } from "@/modules/ai/lib/native";
 import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const AUTO_FETCH_THROTTLE_MS = 5 * 60_000;
@@ -15,8 +16,14 @@ const SC_STATUS_TTL_MS = 2000;
 
 export type SourceControlRefreshMode = "auto" | "always" | "never";
 export type SourceControlRemoteAction = "fetch" | "pull" | "push";
+/**
+ * "sync" is fetch followed by a fast-forward pull when the fetch revealed new
+ * upstream commits. Plain "pull" can only run once something already told git
+ * it was behind, which made pulling a two-click affair.
+ */
 export type SourceControlRemoteActionMode =
   | "contextual"
+  | "sync"
   | SourceControlRemoteAction;
 
 export type SourceControlRemoteActionResult = {
@@ -42,9 +49,7 @@ export type SourceControlSummary = {
   applyStatus: (
     updater: (status: GitStatusSnapshot) => GitStatusSnapshot,
   ) => void;
-  refresh: (options?: {
-    remote?: SourceControlRefreshMode;
-  }) => Promise<void>;
+  refresh: (options?: { remote?: SourceControlRefreshMode }) => Promise<void>;
   runRemoteAction: (
     mode?: SourceControlRemoteActionMode,
   ) => Promise<SourceControlRemoteActionResult>;
@@ -143,6 +148,14 @@ function normalizeError(error: unknown): string {
   return "Unknown source control error";
 }
 
+/** True when a fast-forward pull would actually move the branch. */
+export function canFastForward(
+  status: Pick<GitStatusSnapshot, "upstream" | "ahead" | "behind"> | null,
+): boolean {
+  if (!status?.upstream) return false;
+  return status.behind > 0 && status.ahead === 0;
+}
+
 function getContextualAction(
   status: GitStatusSnapshot | null,
 ): SourceControlRemoteAction | null {
@@ -160,7 +173,13 @@ export function getSourceControlRemoteIndicator(
   >,
 ): SourceControlRemoteIndicator {
   if (!summary.hasRepo || !summary.upstream) {
-    return { visible: false, label: "", title: "", disabled: true, action: null };
+    return {
+      visible: false,
+      label: "",
+      title: "",
+      disabled: true,
+      action: null,
+    };
   }
   if (summary.ahead > 0 && summary.behind > 0) {
     return {
@@ -288,10 +307,7 @@ export function useSourceControl(
   const doRefresh = useCallback(
     async (remoteMode: SourceControlRefreshMode): Promise<void> => {
       const refreshContextKey = contextKey;
-      if (
-        !enabledRef.current ||
-        refreshContextKey !== contextKeyRef.current
-      ) {
+      if (!enabledRef.current || refreshContextKey !== contextKeyRef.current) {
         return;
       }
       const requestId = ++requestIdRef.current;
@@ -318,7 +334,9 @@ export function useSourceControl(
       const explicitRoot = repoRootRef.current;
       const reusableRoot =
         explicitRoot ||
-        (repositoryContainsContext(activeRoot, contextPath) ? activeRoot : null);
+        (repositoryContainsContext(activeRoot, contextPath)
+          ? activeRoot
+          : null);
 
       setState((current) =>
         beginSourceControlRefresh(current, contextPath, !!reusableRoot),
@@ -416,8 +434,7 @@ export function useSourceControl(
           repo.upstream &&
           remoteMode !== "never" &&
           (remoteMode === "always" ||
-            Date.now() -
-              (autoFetchByRepoRef.current.get(repo.repoRoot) ?? 0) >=
+            Date.now() - (autoFetchByRepoRef.current.get(repo.repoRoot) ?? 0) >=
               AUTO_FETCH_THROTTLE_MS);
 
         if (shouldAutoFetch) {
@@ -501,11 +518,16 @@ export function useSourceControl(
         return { ok: false, action: null, blocked: "diverged" };
       }
 
-      setState((current) => ({ ...current, busyAction: action }));
+      // Sync drives the fetch button, so report it as one for the spinner.
+      setState((current) => ({
+        ...current,
+        busyAction: action === "sync" ? "fetch" : action,
+      }));
       const actionContextKey = contextKeyRef.current;
-      const isCurrentContext = () =>
-        actionContextKey === contextKeyRef.current;
+      const isCurrentContext = () => actionContextKey === contextKeyRef.current;
 
+      let performed: SourceControlRemoteAction =
+        action === "sync" ? "fetch" : action;
       try {
         if (action === "fetch") {
           await native.gitFetch(repo.repoRoot);
@@ -514,6 +536,20 @@ export function useSourceControl(
           await native.gitFetch(repo.repoRoot);
           touchAutoFetch(autoFetchByRepoRef.current, repo.repoRoot);
           await native.gitPullFfOnly(repo.repoRoot);
+        } else if (action === "sync") {
+          await native.gitFetch(repo.repoRoot);
+          touchAutoFetch(autoFetchByRepoRef.current, repo.repoRoot);
+          // Re-read after fetching: the pre-fetch snapshot cannot know whether
+          // upstream moved, which is the whole reason pull was gated before.
+          const fresh = await native.gitStatus(repo.repoRoot);
+          if (canFastForward(fresh)) {
+            await native.gitPullFfOnly(repo.repoRoot);
+            performed = "pull";
+          } else if (fresh.ahead > 0 && fresh.behind > 0) {
+            // Leave the merge decision to the user, same as the pull button.
+            if (isCurrentContext()) await refresh({ remote: "never" });
+            return { ok: false, action: "pull", blocked: "diverged" };
+          }
         } else {
           await native.gitPush(repo.repoRoot);
         }
@@ -521,14 +557,14 @@ export function useSourceControl(
           setState((current) => ({ ...current, lastRemoteError: null }));
           await refresh({ remote: "never" });
         }
-        return { ok: true, action };
+        return { ok: true, action: performed };
       } catch (error) {
         const message = normalizeError(error);
         if (isCurrentContext()) {
           setState((current) => ({ ...current, lastRemoteError: message }));
           await refresh({ remote: "never" }).catch(() => {});
         }
-        return { ok: false, action, error: message };
+        return { ok: false, action: performed, error: message };
       } finally {
         setState((current) => ({ ...current, busyAction: null }));
       }
@@ -586,17 +622,46 @@ export function useSourceControl(
   useEffect(() => {
     if (!_enabled) return;
     let timer = 0;
-    const onFocus = () => {
-      if (timer) window.clearTimeout(timer);
+    // lastRefreshAtRef moves on *every* refresh, including the context-change
+    // one that fires when the terminal cd's. Dropping the focus refresh when it
+    // lands inside that window meant a refresh that raced the agent's writes
+    // could be the last one to run — which is why the change list updated only
+    // sometimes. Wait the window out instead of giving up on the refresh.
+    const schedule = (delay: number) => {
       timer = window.setTimeout(() => {
         timer = 0;
         const elapsed = Date.now() - lastRefreshAtRef.current;
-        if (elapsed < FOCUS_REFRESH_MIN_INTERVAL_MS) return;
+        if (elapsed < FOCUS_REFRESH_MIN_INTERVAL_MS) {
+          schedule(FOCUS_REFRESH_MIN_INTERVAL_MS - elapsed);
+          return;
+        }
         void refresh({ remote: "never" });
-      }, 400);
+      }, delay);
     };
+    const onFocus = () => {
+      if (timer) window.clearTimeout(timer);
+      schedule(400);
+    };
+    // The DOM focus event only fires when the *document* regains focus, which
+    // an OS-level window switch does not reliably produce inside the webview —
+    // so alt-tabbing back from an agent's terminal left the change list stale.
+    // onFocusChanged is the window-level signal; both feed the same throttle,
+    // so firing twice costs nothing.
     window.addEventListener("focus", onFocus);
+    let alive = true;
+    let unlistenWindow: (() => void) | undefined;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) onFocus();
+      })
+      .then((un) => {
+        if (alive) unlistenWindow = un;
+        else un();
+      })
+      .catch(() => {});
     return () => {
+      alive = false;
+      unlistenWindow?.();
       window.removeEventListener("focus", onFocus);
       if (timer) window.clearTimeout(timer);
     };

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import type { Tab } from "@/modules/tabs";
+import { describe, expect, it } from "vitest";
 import {
   activeRepositoryContextPath,
   clearRepositoryTargetForSpace,
@@ -54,12 +54,7 @@ describe("repository targets", () => {
       mode: "follow-context",
     });
     expect(
-      setRepositoryTargetForSpace(
-        targets,
-        "space-a",
-        "local",
-        "/repos/a",
-      ),
+      setRepositoryTargetForSpace(targets, "space-a", "local", "/repos/a"),
     ).toBe(targets);
   });
 

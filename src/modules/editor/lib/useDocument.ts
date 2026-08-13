@@ -180,6 +180,20 @@ export function useDocument({ path, onDirtyChange }: Options) {
     return true;
   }, [readFromDisk, adoptRead, path]);
 
+  // Poll-friendly reload: stat first so a periodic sweep over the open files
+  // costs one stat each instead of re-reading every buffer from disk.
+  const revalidate = useCallback(async (): Promise<void> => {
+    if (dirtyRef.current) return;
+    const known = diskMtimeRef.current;
+    if (known === null) return;
+    const stat = await invoke<FileStat>("fs_stat", {
+      path,
+      workspace: currentWorkspaceEnv(),
+    }).catch(() => null);
+    if (!stat || stat.mtime === known) return;
+    reload();
+  }, [path, reload]);
+
   const save = useCallback(async (): Promise<boolean> => {
     clearAutoSaveTimer();
     if (bufferRef.current === savedRef.current) return true;
@@ -223,5 +237,14 @@ export function useDocument({ path, onDirtyChange }: Options) {
 
   useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);
 
-  return { doc, dirty, onChange, save, reload, adoptDiskText, openAnyway };
+  return {
+    doc,
+    dirty,
+    onChange,
+    save,
+    reload,
+    revalidate,
+    adoptDiskText,
+    openAnyway,
+  };
 }

@@ -74,6 +74,8 @@ export type EditorPaneHandle = {
   getPath: () => string;
   /** Re-read the file from disk. Skips silently if the buffer is dirty. */
   reload: () => boolean;
+  /** Stat the file and reload only if its mtime moved. For periodic polling. */
+  revalidate: () => void;
   /** Move the cursor to a 1-based line and center it, once content is ready. */
   gotoLine: (line: number, options?: { focus?: boolean }) => void;
   /** Apply CodeMirror's undo/redo commands. */
@@ -109,13 +111,22 @@ export const EditorPane = memo(
   forwardRef<EditorPaneHandle, Props>(function EditorPane(props, ref) {
     const { path, overrideLanguage, onDirtyChange, onSaved, onClose } = props;
 
-    const { doc, onChange, save, reload, adoptDiskText, openAnyway } =
-      useDocument({
-        path,
-        onDirtyChange,
-      });
+    const {
+      doc,
+      onChange,
+      save,
+      reload,
+      revalidate,
+      adoptDiskText,
+      openAnyway,
+    } = useDocument({
+      path,
+      onDirtyChange,
+    });
     const reloadRef = useRef(reload);
     reloadRef.current = reload;
+    const revalidateRef = useRef(revalidate);
+    revalidateRef.current = revalidate;
     const adoptDiskTextRef = useRef(adoptDiskText);
     adoptDiskTextRef.current = adoptDiskText;
     const cmRef = useRef<ReactCodeMirrorRef>(null);
@@ -527,6 +538,7 @@ export const EditorPane = memo(
         },
         getPath: () => path,
         reload: () => reloadRef.current(),
+        revalidate: () => void revalidateRef.current(),
         gotoLine: (line: number, options) => {
           pendingLineRef.current = {
             path,
@@ -633,7 +645,8 @@ export const EditorPane = memo(
         );
       }
 
-      const canForce = doc.status === "toolarge" && doc.size <= FORCE_READ_LIMIT;
+      const canForce =
+        doc.status === "toolarge" && doc.size <= FORCE_READ_LIMIT;
       return (
         <div className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center">
           <div className="text-sm text-foreground">

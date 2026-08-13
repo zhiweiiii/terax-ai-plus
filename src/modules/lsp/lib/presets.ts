@@ -121,6 +121,39 @@ export const LSP_PRESETS: LspPreset[] = [
     },
   },
   {
+    id: "jdtls",
+    name: "Java",
+    command: "jdtls",
+    // The launcher is a thin Python script that execs the JVM, so the memwatch
+    // in session.rs would only ever see the wrapper's RSS — no maxMemoryMb here,
+    // -Xmx is the only cap that reaches the process actually holding the heap.
+    args: ["--jvm-arg=-Xmx2G"],
+    languages: { java: "java" },
+    // Without -data the launcher derives a workspace dir from cwd, and sessions
+    // are spawned with cwd = project root, so each project gets its own index.
+    rootMarkers: [
+      "pom.xml",
+      "build.gradle",
+      "build.gradle.kts",
+      "settings.gradle",
+      "settings.gradle.kts",
+      ".project",
+      "mvnw",
+      "gradlew",
+    ],
+    // Default is "interactive", which parks the classpath behind a client prompt
+    // we never show — the build file would silently stop matching the index.
+    initializationOptions: {
+      settings: {
+        java: { configuration: { updateBuildConfiguration: "automatic" } },
+      },
+    },
+    install: {
+      command: "brew install jdtls",
+      docsUrl: "https://github.com/eclipse-jdtls/eclipse.jdt.ls#installation",
+    },
+  },
+  {
     id: "zls",
     name: "Zig",
     command: "zls",

@@ -59,6 +59,25 @@ describe("resolveDisplayName", () => {
     expect(tree).toContain("DirectiveOn");
   });
 
+  // Java runs on the Lezer grammar, not the clike stream mode its C/C++/C#
+  // neighbours share — a stream mode yields no named nodes, so folding and
+  // structural indent would silently regress with the tree.
+  it("loads Java files with a real syntax tree", async () => {
+    const result = await resolveLanguage("/project/Greeter.java");
+    if (!result) throw new Error("Java language failed to load");
+
+    expect(result.name).toBe("Java");
+    expect(result.id).toBe("java");
+
+    const state = EditorState.create({
+      doc: "class Greeter { String greet(String n) { return n; } }",
+      extensions: [result.ext],
+    });
+    const tree = syntaxTree(state).toString();
+    expect(tree).toContain("ClassDeclaration");
+    expect(tree).toContain("MethodDeclaration");
+  });
+
   // The prefix fallback must not let extension languages capture lookalike
   // files: `go.sum` / `go.mod` are not Go, `json.backup` is not JSON.
   it("does not let extension languages capture prefix lookalikes", () => {

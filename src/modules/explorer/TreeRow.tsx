@@ -29,6 +29,8 @@ export type EntryRowProps = {
   onSelectPath: (path: string) => void;
   gitStatusCode?: GitStatusCode | null;
   gitignored?: boolean;
+  /** "active" = the tab being viewed, "open" = open in a background tab. */
+  openState?: "active" | "open" | null;
 };
 
 function EntryRowImpl(props: EntryRowProps) {
@@ -47,6 +49,7 @@ function EntryRowImpl(props: EntryRowProps) {
     onSelectPath,
     gitStatusCode,
     gitignored = false,
+    openState = null,
   } = props;
 
   const iconUrl = isDir ? folderIconUrl(name, isExpanded) : fileIconUrl(name);
@@ -123,6 +126,18 @@ function EntryRowImpl(props: EntryRowProps) {
       >
         {name}
       </span>
+      {openState ? (
+        <span
+          className={cn(
+            "shrink-0 text-[10px] leading-none",
+            openState === "active"
+              ? "text-foreground/70"
+              : "text-muted-foreground/60",
+          )}
+        >
+          {openState === "active" ? "(打开中)" : "(打开)"}
+        </span>
+      ) : null}
     </button>
   );
 }

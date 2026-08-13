@@ -32,9 +32,9 @@ import {
   applyCursorBlink,
   applyCursorStyle,
   applyLetterSpacing,
-  applyTerminalFont,
   applyTheme as applyPoolTheme,
   applyScrollback,
+  applyTerminalFont,
   applyWebglPreference,
   configureRendererPool,
   discardRetainedSlot,
@@ -100,7 +100,9 @@ type Session = {
   // the terminal, so the leaf must keep its live grid while hidden.
   commandRunning: boolean;
   hiddenReleaseTimer: ReturnType<typeof setTimeout> | null;
-  spawnFailed: boolean;
+  // Pane is parked on a dead shell (spawn failed, or the shell exited
+  // abnormally) showing a notice; Enter respawns instead of reaching the pty.
+  awaitingRestart: boolean;
 };
 
 const sessions = new Map<number, Session>();
@@ -401,8 +403,8 @@ configureRendererPool({
     if (!s) return null;
     return {
       writeToPty: (data) => {
-        // Shell spawn failed (bad cwd, missing binary): Enter retries.
-        if (s.spawnFailed) {
+        // Parked on a dead shell (spawn failure or abnormal exit): Enter retries.
+        if (s.awaitingRestart) {
           if (data.includes("\r")) void respawnSession(leafId);
           return;
         }
@@ -495,7 +497,7 @@ function ensureSession(
     altScreenAtRelease: false,
     commandRunning: false,
     hiddenReleaseTimer: null,
-    spawnFailed: false,
+    awaitingRestart: false,
   };
   sessions.set(leafId, session);
 
@@ -540,7 +542,7 @@ async function openPtyWithRetry(
 function surfaceSpawnFailure(leafId: number, s: Session, e: unknown): void {
   console.error("[terax] shell spawn failed:", e);
   s.shellExited = true;
-  s.spawnFailed = true;
+  s.awaitingRestart = true;
   const detail = String(e)
     .replace(/[\x00-\x1f\x7f]/g, " ")
     .slice(0, 300);
@@ -548,6 +550,25 @@ function surfaceSpawnFailure(leafId: number, s: Session, e: unknown): void {
     leafId,
     new TextEncoder().encode(
       `\r\n\x1b[31m[terax] failed to start shell: ${detail}\x1b[0m\r\n\x1b[2mpress Enter to retry\x1b[0m\r\n`,
+    ),
+  );
+}
+
+// Windows-style "graceful" close: only a clean exit tears the pane down. A
+// shell that died on its own (a TUI child taking pwsh with it on Ctrl+C leaves
+// 0x800703E3) parks the pane instead, so a crash can never silently close the
+// last pane and with it the window.
+function surfaceAbnormalExit(leafId: number, s: Session, code: number): void {
+  s.awaitingRestart = true;
+  // Win32 codes come back as unsigned; show the familiar hex next to it.
+  const hex =
+    code < 0 || code > 0xffff
+      ? ` (0x${(code >>> 0).toString(16).toUpperCase()})`
+      : "";
+  deliverPtyBytes(
+    leafId,
+    new TextEncoder().encode(
+      `\r\n\x1b[33m[terax] shell exited with code ${code}${hex}\x1b[0m\r\n\x1b[2mpress Enter to restart\x1b[0m\r\n`,
     ),
   );
 }
@@ -569,6 +590,12 @@ async function openPtyForSession(
         s.pty = null;
         s.pendingInput = "";
         s.commandRunning = false;
+        if (code !== 0) {
+          // Park, keeping stdin so Enter can restart — do not disable it here.
+          surfaceAbnormalExit(leafId, s, code);
+          scheduleHiddenRelease(leafId, s);
+          return;
+        }
         const slot = getSlotForLeaf(leafId);
         if (slot) slot.term.options.disableStdin = true;
         scheduleHiddenRelease(leafId, s);
@@ -626,8 +653,8 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     snapshot: s.snapshot,
     altScreen,
     drainRing: (write) => s.dormantRing.drain(write),
-    // Keep stdin alive after a spawn failure so Enter can trigger the retry.
-    shellExited: s.shellExited && !s.spawnFailed,
+    // Keep stdin alive on a parked pane so Enter can trigger the retry.
+    shellExited: s.shellExited && !s.awaitingRestart,
     searchQuery: s.searchQuery,
     cols: s.cols,
     rows: s.rows,
@@ -763,7 +790,7 @@ export async function respawnSession(
   s.pendingInput = "";
   s.altScreenAtRelease = false;
   s.commandRunning = false;
-  s.spawnFailed = false;
+  s.awaitingRestart = false;
   cancelHiddenRelease(s);
 
   const slot = getSlotForLeaf(leafId);

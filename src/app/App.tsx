@@ -49,15 +49,17 @@ import {
   type SearchTarget,
 } from "@/modules/header";
 import { setLspNavigator } from "@/modules/lsp";
+import type { MarkdownPreviewHandle } from "@/modules/markdown";
 import type { PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
-  shouldDisablePaneSwapShortcut,
   type ShortcutHandlers,
   type ShortcutId,
+  shouldDisablePaneSwapShortcut,
   useGlobalShortcuts,
 } from "@/modules/shortcuts";
+import type { SidebarViewId } from "@/modules/sidebar";
 import {
   OpenFilesPanel,
   SIDEBAR_MAX_WIDTH,
@@ -65,8 +67,8 @@ import {
   useSidebarPanel,
 } from "@/modules/sidebar";
 import {
-  SourceControlPanel,
   RepoSelector,
+  SourceControlPanel,
   useRepositoryTargeting,
   useSourceControlContext,
 } from "@/modules/source-control";
@@ -93,9 +95,9 @@ import {
   leafCwd,
   leafIds,
   navigateFocusedBlocks,
+  type PaneBounds,
   pasteToLeaf,
   ptyIdForLeaf,
-  type PaneBounds,
   type TerminalPaneHandle,
   useAgentActivityStore,
   useTerminalFileDrop,
@@ -106,8 +108,8 @@ import { ThemeProvider, useThemeFileEditing } from "@/modules/theme";
 import { UpdaterDialog } from "@/modules/updater";
 import {
   useWorkspaceEnvStore,
-  workspaceScopeKey,
   type WorkspaceEnv,
+  workspaceScopeKey,
 } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -121,6 +123,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { toast } from "sonner";
 import { CloseDialogs } from "./components/CloseDialogs";
 import {
   TOGGLE_BLOCK_INPUT_EVENT,
@@ -128,8 +131,6 @@ import {
 } from "./components/WorkspaceInputBar";
 import { WorkspaceSurface } from "./components/WorkspaceSurface";
 import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
-import type { SidebarViewId } from "@/modules/sidebar";
-import { toast } from "sonner";
 
 function HeaderTabs({
   active,
@@ -140,15 +141,14 @@ function HeaderTabs({
   sourceControlChanged: number;
   onSelect: (id: SidebarViewId) => void;
 }) {
-  const tabs: { id: SidebarViewId; label: string; badge?: number }[] =
-    [
-      { id: "explorer", label: "文件" },
-      {
-        id: "source-control",
-        label: "版本",
-        badge: sourceControlChanged,
-      },
-    ];
+  const tabs: { id: SidebarViewId; label: string; badge?: number }[] = [
+    { id: "explorer", label: "文件" },
+    {
+      id: "source-control",
+      label: "版本",
+      badge: sourceControlChanged,
+    },
+  ];
   return (
     <>
       {tabs.map((t) => (
@@ -173,6 +173,7 @@ function HeaderTabs({
     </>
   );
 }
+
 import { useTabCloseGuards } from "./hooks/useTabCloseGuards";
 import { useWorkspaceSwitcher } from "./hooks/useWorkspaceSwitcher";
 
@@ -234,6 +235,9 @@ export default function App() {
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
   const terminalRefs = useRef<Map<number, TerminalPaneHandle>>(new Map());
   const editorRefs = useRef<Map<number, EditorPaneHandle>>(new Map());
+  const markdownRefs = useRef<Map<number, MarkdownPreviewHandle>>(new Map());
+  const [activeMarkdownHandle, setActiveMarkdownHandle] =
+    useState<MarkdownPreviewHandle | null>(null);
   const previewRefs = useRef<Map<number, PreviewPaneHandle>>(new Map());
   const [activeEditorHandle, setActiveEditorHandle] =
     useState<EditorPaneHandle | null>(null);
@@ -312,6 +316,16 @@ export default function App() {
     enabled: spacesHydrated,
   });
 
+  // Per-space memory of the terminal tab last focused there. Switching groups
+  // should land back on the shell you were working in, so file tabs are never
+  // the restore target even when one sits last in tab order.
+  const lastTerminalBySpaceRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    const t = tabsRef.current.find((x) => x.id === activeId);
+    if (t?.kind === "terminal")
+      lastTerminalBySpaceRef.current.set(t.spaceId, t.id);
+  }, [activeId]);
+
   const prevSpaceRef = useRef(activeSpaceId);
   useEffect(() => {
     if (!spacesHydrated || !activeSpaceId) return;
@@ -326,9 +340,16 @@ export default function App() {
     const inSpace = tabsRef.current.filter((t) => t.spaceId === activeSpaceId);
     if (inSpace.length === 0) return;
     // Keep the active tab if it already belongs to the newly active space (a
-    // cross-space jump set it explicitly); else fall to the space's last tab.
+    // cross-space jump set it explicitly).
     if (inSpace.some((t) => t.id === activeId)) return;
-    setActiveId(inSpace[inSpace.length - 1].id);
+    // Otherwise: the terminal last focused here, then this space's last
+    // terminal, and only if it has none at all fall back to its last tab.
+    const remembered = lastTerminalBySpaceRef.current.get(activeSpaceId);
+    const target =
+      inSpace.find((t) => t.id === remembered && t.kind === "terminal") ??
+      [...inSpace].reverse().find((t) => t.kind === "terminal") ??
+      inSpace[inSpace.length - 1];
+    setActiveId(target.id);
   }, [
     activeSpaceId,
     activeId,
@@ -392,6 +413,7 @@ export default function App() {
   const isTerminalTab = activeTab?.kind === "terminal";
   const isBlockTab = activeTerminalTab?.blocks === true;
   const isEditorTab = activeTab?.kind === "editor";
+  const isMarkdownTab = activeTab?.kind === "markdown";
   const isGitHistoryTab = activeTab?.kind === "git-history";
 
   useEditorFileSync({ tabs, tabsRef, editorRefs });
@@ -412,7 +434,19 @@ export default function App() {
         : null,
     );
     setActiveEditorHandle(editorRefs.current.get(activeId) ?? null);
+    setActiveMarkdownHandle(markdownRefs.current.get(activeId) ?? null);
   }, [activeId, activeLeafId]);
+
+  const registerMarkdownHandle = useCallback(
+    (id: number, h: MarkdownPreviewHandle | null) => {
+      if (h) markdownRefs.current.set(id, h);
+      else markdownRefs.current.delete(id);
+      // The pane mounts lazily (Suspense), so the handle can land after the
+      // activation effect already ran — publish it when it does.
+      if (id === activeIdRef.current) setActiveMarkdownHandle(h);
+    },
+    [],
+  );
 
   const handleSearchReady = useCallback(
     (leafId: number, addon: SearchAddon) => {
@@ -535,8 +569,6 @@ export default function App() {
       focusInput(null);
     }
   }, [hasComposer, panelOpen, openPanel, focusInput]);
-
-
 
   // Pick the terminal leaf to receive a selection. With several Claude Code
   // panes open, the right one is whichever runs in the directory that contains
@@ -825,7 +857,9 @@ export default function App() {
       if (leafId === undefined) return;
       await whenSessionReady(leafId);
       if (!writeToSession(leafId, `${command}\r`)) {
-        console.error("[terax] launch terminal closed before --run could start");
+        console.error(
+          "[terax] launch terminal closed before --run could start",
+        );
       }
     })();
   }, [booted, newAgentGroupTab]);
@@ -877,10 +911,17 @@ export default function App() {
     activeTab?.kind === "editor" || activeTab?.kind === "markdown"
       ? activeTab.path
       : null;
+  // Marks every open file in the tree, across spaces, not just this space's.
+  const explorerOpenFilePaths = useMemo(
+    () =>
+      tabs
+        .filter((t) => t.kind === "editor" || t.kind === "markdown")
+        .map((t) => t.path),
+    [tabs],
+  );
   const isRepositoryContextCurrent = useCallback(
     (spaceId: string, workspaceKey: string) => {
-      const currentSpaceId =
-        useSpaces.getState().activeId ?? DEFAULT_SPACE_ID;
+      const currentSpaceId = useSpaces.getState().activeId ?? DEFAULT_SPACE_ID;
       const currentWorkspaceKey = workspaceScopeKey(
         useWorkspaceEnvStore.getState().env,
       );
@@ -903,20 +944,24 @@ export default function App() {
     openSourceControl,
     openCommitHistoryTab,
   });
-  const { sourceControl, multiRepo, toggleSourceControl, openGitGraphFromContext } =
-    useSourceControlContext({
-      activeTab,
-      tabs,
-      activeTerminalLeafCwd,
-      explorerRoot,
-      launchCwd,
-      launchCwdResolved,
-      home,
-      sidebarView,
-      repositoryTarget: sourceControlRepositoryTarget,
-      cycleSidebarView,
-      openCommitHistoryTab,
-    });
+  const {
+    sourceControl,
+    multiRepo,
+    toggleSourceControl,
+    openGitGraphFromContext,
+  } = useSourceControlContext({
+    activeTab,
+    tabs,
+    activeTerminalLeafCwd,
+    explorerRoot,
+    launchCwd,
+    launchCwdResolved,
+    home,
+    sidebarView,
+    repositoryTarget: sourceControlRepositoryTarget,
+    cycleSidebarView,
+    openCommitHistoryTab,
+  });
   const explorerGitDecorations = usePreferencesStore(
     (s) => s.explorerGitDecorations,
   );
@@ -1246,6 +1291,12 @@ export default function App() {
         handle: activeEditorHandle,
         focus: () => activeEditorHandle.focus(),
       };
+    if (isMarkdownTab && activeMarkdownHandle)
+      return {
+        kind: "markdown",
+        handle: activeMarkdownHandle,
+        focus: () => activeMarkdownHandle.focus(),
+      };
     if (isGitHistoryTab && gitHistoryHandle)
       return {
         kind: "git-history",
@@ -1256,6 +1307,8 @@ export default function App() {
   }, [
     isTerminalTab,
     isEditorTab,
+    isMarkdownTab,
+    activeMarkdownHandle,
     isGitHistoryTab,
     activeLeafId,
     activeSearchAddon,
@@ -1491,7 +1544,9 @@ export default function App() {
                     } else {
                       persistSidebarView(id as SidebarViewId);
                       if (!sidebarOpen) {
-                        sidebarRef.current?.resize(`${sidebarWidthRef.current}px`);
+                        sidebarRef.current?.resize(
+                          `${sidebarWidthRef.current}px`,
+                        );
                       }
                       if (id === "source-control") {
                         void multiRepo.scanRepos().then(() => {
@@ -1507,87 +1562,89 @@ export default function App() {
 
           <main className="zoom-content flex min-h-0 flex-1 flex-col">
             <ResizablePanelGroup
-                orientation="horizontal"
-                className="min-h-0 flex-1"
-                onLayoutChanged={(_, { isUserInteraction }) => {
-                  const width = sidebarRef.current?.getSize().inPixels ?? 0;
-                  persistSidebarWidth(width, isUserInteraction);
+              orientation="horizontal"
+              className="min-h-0 flex-1"
+              onLayoutChanged={(_, { isUserInteraction }) => {
+                const width = sidebarRef.current?.getSize().inPixels ?? 0;
+                persistSidebarWidth(width, isUserInteraction);
+              }}
+            >
+              <ResizablePanel
+                id="sidebar"
+                panelRef={sidebarRef}
+                defaultSize={
+                  initialSidebarCollapsed
+                    ? "0px"
+                    : `${sidebarWidthRef.current}px`
+                }
+                minSize={`${SIDEBAR_MIN_WIDTH}px`}
+                maxSize={`${SIDEBAR_MAX_WIDTH}px`}
+                collapsible
+                collapsedSize={0}
+                onResize={(size) => {
+                  persistSidebarCollapsed(size.inPixels <= 0);
                 }}
               >
-                <ResizablePanel
-                  id="sidebar"
-                  panelRef={sidebarRef}
-                  defaultSize={
-                    initialSidebarCollapsed
-                      ? "0px"
-                      : `${sidebarWidthRef.current}px`
-                  }
-                  minSize={`${SIDEBAR_MIN_WIDTH}px`}
-                  maxSize={`${SIDEBAR_MAX_WIDTH}px`}
-                  collapsible
-                  collapsedSize={0}
-                  onResize={(size) => {
-                    persistSidebarCollapsed(size.inPixels <= 0);
-                  }}
-                >
-                  <div className="flex h-full min-h-0 flex-col border-r border-border/60 bg-card">
-                    <div
-                      key={sidebarView}
-                      className="min-h-0 flex-1 terax-panel-in"
-                    >
-                      {sidebarView === "open-files" ? (
-                        <OpenFilesPanel
-                          tabs={tabs}
-                          activeId={activeId}
-                          onSelectTab={setActiveId}
-                          onCloseTab={handleClose}
-                        />
-                      ) : sidebarView === "explorer" ? (
-                        <FileExplorer
-                          ref={explorerRef}
-                          rootPath={explorerRoot}
-                          gitStatus={
-                            explorerGitDecorations ? sourceControl.status : null
-                          }
-                          activeFilePath={explorerActiveFilePath}
-                          onOpenFile={handleOpenFile}
-                          onPathRenamed={handlePathRenamed}
-                          onPathDeleted={handlePathDeleted}
-                          onRevealInTerminal={cdInNewTab}
-                          onOpenInSourceControl={
-                            handleOpenRepositoryInSourceControl
-                          }
-                          onOpenGitHistory={handleOpenGitHistoryForPath}
-                          onAttachToAgent={handleAttachFileToAgent}
-                          pathDropTarget={terminalPathDropTarget}
-                        />
-                      ) : (
-                        <SourceControlPanel
-                          open={sidebarOpen}
-                          sourceControl={sourceControl}
-                          onOpenDiff={openGitDiffTab}
-                          onOpenGitGraph={openGitGraphFromContext}
-                          onOpenFile={handleOpenFile}
-                          onNavigateToPath={cdInNewTab}
-                          repositoryTarget={sourceControlRepositoryTarget}
-                          onFollowRepositoryContext={
-                            handleFollowRepositoryContext
-                          }
-                          headerExtra={
-                            <RepoSelector
-                              repos={multiRepo.repos}
-                              activeRepo={multiRepo.activeRepo}
-                              onChangeRepo={multiRepo.setActiveRepo}
-                              onRefresh={multiRepo.scanRepos}
-                            />
-                          }
-                        />
-                      )}
-                    </div>
+                <div className="flex h-full min-h-0 flex-col border-r border-border/60 bg-card">
+                  <div
+                    key={sidebarView}
+                    className="min-h-0 flex-1 terax-panel-in"
+                  >
+                    {sidebarView === "open-files" ? (
+                      <OpenFilesPanel
+                        tabs={tabs}
+                        activeId={activeId}
+                        onSelectTab={setActiveId}
+                        onCloseTab={handleClose}
+                      />
+                    ) : sidebarView === "explorer" ? (
+                      <FileExplorer
+                        ref={explorerRef}
+                        rootPath={explorerRoot}
+                        gitStatus={
+                          explorerGitDecorations ? sourceControl.status : null
+                        }
+                        activeFilePath={explorerActiveFilePath}
+                        openFilePaths={explorerOpenFilePaths}
+                        onOpenFile={handleOpenFile}
+                        onPathRenamed={handlePathRenamed}
+                        onPathDeleted={handlePathDeleted}
+                        onRevealInTerminal={cdInNewTab}
+                        onOpenInSourceControl={
+                          handleOpenRepositoryInSourceControl
+                        }
+                        onOpenGitHistory={handleOpenGitHistoryForPath}
+                        onAttachToAgent={handleAttachFileToAgent}
+                        pathDropTarget={terminalPathDropTarget}
+                      />
+                    ) : (
+                      <SourceControlPanel
+                        open={sidebarOpen}
+                        sourceControl={sourceControl}
+                        repoCount={multiRepo.repos.length}
+                        onOpenDiff={openGitDiffTab}
+                        onOpenGitGraph={openGitGraphFromContext}
+                        onOpenFile={handleOpenFile}
+                        onNavigateToPath={cdInNewTab}
+                        repositoryTarget={sourceControlRepositoryTarget}
+                        onFollowRepositoryContext={
+                          handleFollowRepositoryContext
+                        }
+                        headerExtra={
+                          <RepoSelector
+                            repos={multiRepo.repos}
+                            activeRepo={multiRepo.activeRepo}
+                            onChangeRepo={multiRepo.setActiveRepo}
+                            onRefresh={multiRepo.scanRepos}
+                          />
+                        }
+                      />
+                    )}
                   </div>
-                </ResizablePanel>
-                <ResizableHandle withHandle />
-                <ResizablePanel id="workspace" defaultSize="78%" minSize="30%">
+                </div>
+              </ResizablePanel>
+              <ResizableHandle withHandle />
+              <ResizablePanel id="workspace" defaultSize="78%" minSize="30%">
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="relative min-h-0 flex-1">
                     <WorkspaceSurface
@@ -1609,6 +1666,7 @@ export default function App() {
                       onOpenCommitFile={openCommitFileDiffTab}
                       onGitHistorySearchHandle={setGitHistoryHandle}
                       onSetMarkdownView={setMarkdownView}
+                      registerMarkdownHandle={registerMarkdownHandle}
                     />
                   </div>
 

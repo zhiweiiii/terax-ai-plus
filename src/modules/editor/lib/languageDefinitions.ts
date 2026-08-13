@@ -225,10 +225,9 @@ export const LANGUAGES: LanguageDefinition[] = [
   {
     name: "Java",
     extensions: ["java"],
-    loader: () =>
-      defineLanguage(
-        import("@codemirror/legacy-modes/mode/clike").then((m) => m.java),
-      ),
+    // Lezer grammar, not the clike stream mode its C/C++/C# neighbours use —
+    // a real tree buys folding and structural indent on top of the highlight.
+    loader: () => import("@codemirror/lang-java").then((m) => m.java()),
     userSelectable: true,
   },
   {

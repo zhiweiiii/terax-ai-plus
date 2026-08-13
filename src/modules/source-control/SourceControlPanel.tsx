@@ -27,7 +27,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
-import { toast } from "sonner";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Tooltip,
@@ -67,24 +66,25 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
+  type KeyboardEvent,
   memo,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent,
-  type ReactNode,
 } from "react";
+import { toast } from "sonner";
 import {
   repositoryTargetIsPending,
   type SourceControlRepositoryTarget,
 } from "./repositoryTarget";
 import type { SourceControlSummary } from "./useSourceControl";
 import {
-  useSourceControlPanel,
   type CheckState,
   type SourceControlFileEntry,
+  useSourceControlPanel,
 } from "./useSourceControlPanel";
 
 type Props = {
@@ -104,6 +104,8 @@ type Props = {
   onFollowRepositoryContext: () => void;
   /** Optional extra content rendered in the panel header (e.g. multi-repo selector). */
   headerExtra?: ReactNode;
+  /** Repos discovered in the workspace; >1 makes Sync walk them one by one. */
+  repoCount?: number;
 };
 
 const SOURCE_CONTROL_TOOLTIP_CLASS =
@@ -396,6 +398,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   repositoryTarget,
   onFollowRepositoryContext,
   headerExtra,
+  repoCount = 1,
 }: Props) {
   const scm = useSourceControlPanel(open, sourceControl, onOpenDiff);
   const refreshAnimationRef = useRef<number | null>(null);
@@ -514,7 +517,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   }, [scm]);
 
   const handleFetch = useCallback(() => {
-    void sourceControl.runRemoteAction("fetch");
+    void sourceControl.runRemoteAction("sync");
   }, [sourceControl]);
 
   const handlePull = useCallback(() => {
@@ -757,7 +760,13 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
             <IconActionButton
-              label={fetchBusy ? "Fetching…" : "Fetch from remote"}
+              label={
+                fetchBusy
+                  ? "Syncing…"
+                  : repoCount > 1
+                    ? `Sync ${repoCount} repos (fetch + fast-forward pull, one at a time)`
+                    : "Sync (fetch + fast-forward pull)"
+              }
               disabled={!canFetch}
               onClick={handleFetch}
               side="bottom"

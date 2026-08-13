@@ -1,15 +1,46 @@
 import { describe, expect, it } from "vitest";
 import {
   beginSourceControlRefresh,
+  canFastForward,
   repositoryContainsContext,
 } from "./useSourceControl";
+
+describe("canFastForward", () => {
+  const at = (upstream: string | null, ahead: number, behind: number) => ({
+    upstream,
+    ahead,
+    behind,
+  });
+
+  it("allows a pull when the branch is purely behind", () => {
+    expect(canFastForward(at("origin/main", 0, 3))).toBe(true);
+  });
+
+  it("refuses when already up to date", () => {
+    expect(canFastForward(at("origin/main", 0, 0))).toBe(false);
+  });
+
+  it("refuses a diverged branch — that merge is the user's call", () => {
+    expect(canFastForward(at("origin/main", 2, 3))).toBe(false);
+  });
+
+  it("refuses when only ahead", () => {
+    expect(canFastForward(at("origin/main", 2, 0))).toBe(false);
+  });
+
+  it("refuses without an upstream, however far behind it looks", () => {
+    expect(canFastForward(at(null, 0, 5))).toBe(false);
+  });
+
+  it("refuses a missing status", () => {
+    expect(canFastForward(null)).toBe(false);
+  });
+});
 
 describe("repositoryContainsContext", () => {
   it("matches a repository root and its descendants", () => {
     expect(repositoryContainsContext("/repo", "/repo")).toBe(true);
-    expect(repositoryContainsContext("/repo", "/repo/packages/app")).toBe(
-      true,
-    );
+    expect(repositoryContainsContext("/repo", "/repo/packages/app")).toBe(true);
   });
 
   it("rejects sibling paths that only share a string prefix", () => {
@@ -18,9 +49,9 @@ describe("repositoryContainsContext", () => {
   });
 
   it("normalizes Windows separators and drive-letter casing", () => {
-    expect(
-      repositoryContainsContext("C:\\Repo", "c:/repo/packages/app"),
-    ).toBe(true);
+    expect(repositoryContainsContext("C:\\Repo", "c:/repo/packages/app")).toBe(
+      true,
+    );
   });
 
   it("normalizes UNC server and share casing", () => {

@@ -21,9 +21,12 @@ export function EditorStack({
   onCloseTab,
   onSetMarkdownView,
 }: Props) {
-  const editors = tabs.filter(
+  // The open set is already capped at MAX_EDITOR_TABS_PER_SPACE when files are
+  // opened, so every open editor tab stays mounted.
+  const open = tabs.filter(
     (t): t is EditorTab => t.kind === "editor" && !t.cold,
   );
+  const editors = open;
 
   // Stable per-tab callbacks. Inline arrows in `ref` and `onDirtyChange`
   // change identity every render, which makes React detach+reattach the ref
@@ -74,9 +77,11 @@ export function EditorStack({
     return cb;
   };
 
-  // Drop callback entries for closed tabs to avoid unbounded growth.
+  // Drop callback entries for closed tabs to avoid unbounded growth. Keyed on
+  // the open set, not the mounted one, so an evicted tab keeps its stable
+  // callback identities for when it remounts.
   useEffect(() => {
-    const live = new Set(editors.map((t) => t.id));
+    const live = new Set(open.map((t) => t.id));
     for (const id of refCallbacks.current.keys()) {
       if (!live.has(id)) refCallbacks.current.delete(id);
     }
@@ -86,7 +91,7 @@ export function EditorStack({
     for (const id of closeCallbacks.current.keys()) {
       if (!live.has(id)) closeCallbacks.current.delete(id);
     }
-  }, [editors]);
+  }, [open]);
 
   if (editors.length === 0) return null;
   return (
