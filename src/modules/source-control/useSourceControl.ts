@@ -592,7 +592,16 @@ export function useSourceControl(
       const root = stateRef.current.repo?.repoRoot;
       const sameRepo = repositoryContainsContext(root ?? null, contextPath);
       const fresh = Date.now() - lastRefreshAtRef.current < SC_STATUS_TTL_MS;
-      if (fresh && sameRepo && stateRef.current.hasRepo) {
+      // An explicit repoRoot (the multi-repo selector) is a hard target: when it
+      // names a different repo than the one loaded, the freshness short-circuit
+      // must not win, or picking a repo would swap the name while the branch and
+      // change list kept showing the previous one.
+      const explicitRoot = repoRootRef.current;
+      const rootMatches =
+        !explicitRoot ||
+        (!!root &&
+          normalizedContextPath(root) === normalizedContextPath(explicitRoot));
+      if (fresh && sameRepo && rootMatches && stateRef.current.hasRepo) {
         setState((current) =>
           current.contextPath === contextPath
             ? current

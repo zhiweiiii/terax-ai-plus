@@ -1021,6 +1021,42 @@ pub fn list_branches(
         }
     }
 
+    // Remote-tracking branches. `origin/HEAD` is a symbolic alias for the
+    // default branch, not something a user checks out, so it is filtered out.
+    if let Ok(lines) = git_stdout_lines(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["branch", "--remotes", "--format=%(refname:short)"],
+    ) {
+        let local_names: std::collections::HashSet<String> = branches
+            .iter()
+            .filter(|b| b.kind == "local")
+            .map(|b| b.name.clone())
+            .collect();
+        for line in &lines {
+            let name = line.trim();
+            if name.is_empty() || name.contains("->") {
+                continue;
+            }
+            if name.split('/').next_back() == Some("HEAD") {
+                continue;
+            }
+            // A remote whose local counterpart already exists adds nothing:
+            // checking it out would just land on the local branch.
+            let short = name.split_once('/').map(|(_, rest)| rest).unwrap_or(name);
+            if local_names.contains(short) {
+                continue;
+            }
+            branches.push(GitBranchEntry {
+                name: name.to_string(),
+                kind: "remote".into(),
+                worktree_path: None,
+                is_head: false,
+                is_detached: false,
+            });
+        }
+    }
+
     if let Ok(lines) = git_stdout_lines(
         &repo_root.workspace,
         &repo_root.git_path,
@@ -1129,6 +1165,39 @@ fn push_worktree(
     });
 }
 
+/// For `origin/feature`, the local branch name to create (`feature`) -- but only
+/// when the ref really is remote-tracking and no local branch already owns the
+/// name. Returns None for anything that should be checked out verbatim.
+fn remote_tracking_target(repo_root: &ResolvedGitDirectory, branch_name: &str) -> Option<String> {
+    let (_, short) = branch_name.split_once('/')?;
+    if short.is_empty() {
+        return None;
+    }
+    let is_remote = git_stdout_line_opt(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{branch_name}")],
+    )
+    .ok()
+    .flatten()
+    .is_some();
+    if !is_remote {
+        return None;
+    }
+    let local_exists = git_stdout_line_opt(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["rev-parse", "--verify", "--quiet", &format!("refs/heads/{short}")],
+    )
+    .ok()
+    .flatten()
+    .is_some();
+    if local_exists {
+        return None;
+    }
+    Some(short.to_string())
+}
+
 pub fn checkout_branch(
     registry: &WorkspaceRegistry,
     repo_root: &str,
@@ -1140,12 +1209,24 @@ pub fn checkout_branch(
     if branch_name.starts_with('-') || branch_name.is_empty() {
         return Err(GitError::InvalidPath(branch_name.into()));
     }
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["checkout", branch_name],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
+    // `git checkout origin/x` lands on a detached HEAD. When the caller names a
+    // remote-tracking ref, create the local branch that tracks it instead --
+    // that is what picking a remote branch in the UI is asking for.
+    let remote_target = remote_tracking_target(&repo_root, branch_name);
+    let output = match &remote_target {
+        Some(local) => run_git(
+            &repo_root.workspace,
+            Some(&repo_root.git_path),
+            ["checkout", "-b", local, "--track", branch_name],
+            DEFAULT_TIMEOUT_SECS,
+        )?,
+        None => run_git(
+            &repo_root.workspace,
+            Some(&repo_root.git_path),
+            ["checkout", branch_name],
+            DEFAULT_TIMEOUT_SECS,
+        )?,
+    };
     ensure_success(&output, "git checkout failed")
 }
 

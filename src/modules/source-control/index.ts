@@ -1,3 +1,4 @@
+export { RepoBranchSelector } from "./RepoBranchSelector";
 export { RepoSelector } from "./RepoSelector";
 export type { SourceControlRepositoryTarget } from "./repositoryTarget";
 export { SourceControlPanel } from "./SourceControlPanelLazy";

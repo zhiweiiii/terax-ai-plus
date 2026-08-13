@@ -6,6 +6,7 @@ import {
 import {
   type GitChangedFile,
   type GitDiscardEntry,
+  type GitRepoHead,
   type GitRepoInfo,
   type GitStatusSnapshot,
   native,
@@ -18,6 +19,7 @@ import {
 } from "@/modules/editor/lib/diffCache";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { repoDisplayName, useRepoStatuses } from "./useRepoStatuses";
 import type { SourceControlSummary } from "./useSourceControl";
 
 type PanelState = "closed" | "loading" | "no-repo" | "ready" | "error";
@@ -54,6 +56,8 @@ export type CheckState = "checked" | "indeterminate" | "unchecked";
 /** One row per changed file (flat list) — merges the staged/unstaged split. */
 export type SourceControlFileEntry = {
   key: string;
+  /** Which repo the file belongs to; drives staging and diff in multi-repo. */
+  repoRoot: string;
   path: string;
   originalPath: string | null;
   statusCode: string;
@@ -62,6 +66,13 @@ export type SourceControlFileEntry = {
   staged: boolean;
   unstaged: boolean;
   untracked: boolean;
+};
+
+/** One repo's slice of the change list, rendered under a group header. */
+export type RepoFileGroup = {
+  repoRoot: string;
+  name: string;
+  files: SourceControlFileEntry[];
 };
 
 export type PendingDiscard = {
@@ -84,6 +95,8 @@ type SourceControlPanelState = {
   stagedEntries: SourceControlEntry[];
   unstagedEntries: SourceControlEntry[];
   fileEntries: SourceControlFileEntry[];
+  /** Per-repo grouping for the change list; empty unless multi-repo. */
+  repoGroups: RepoFileGroup[];
   headerCheckState: CheckState;
   allClean: boolean;
   canPush: boolean;
@@ -371,6 +384,7 @@ export function useSourceControlPanel(
         title?: string;
       }) => void)
     | null,
+  repos: GitRepoHead[] = [],
 ): SourceControlPanelState {
   const selectedModelId = useChatStore((state) => state.selectedModelId);
   const agentStatus = useChatStore((state) => state.agentMeta.status);
@@ -428,10 +442,31 @@ export function useSourceControlPanel(
     [status],
   );
 
-  const fileEntries = useMemo<SourceControlFileEntry[]>(() => {
+  // Every repo in the workspace, so the change list is not limited to whichever
+  // one the selector happens to point at. The active repo's snapshot comes from
+  // `summary`; the rest are fetched by useRepoStatuses.
+  const multiRepo = repos.length > 1;
+  const {
+    entries: repoStatusEntries,
+    applyStatus: applyOtherStatus,
+    refreshRepo: refreshOtherRepo,
+    refreshAll: refreshOtherRepos,
+  } = useRepoStatuses(
+    repos,
+    multiRepo && isOpen,
+    repo?.repoRoot ?? null,
+    status,
+  );
+
+  const activeRepoRoot = repo?.repoRoot ?? null;
+
+  function entriesForStatus(
+    repoRoot: string,
+    snapshot: GitStatusSnapshot,
+  ): SourceControlFileEntry[] {
     const seen = new Set<string>();
     const out: SourceControlFileEntry[] = [];
-    for (const file of status?.changedFiles ?? []) {
+    for (const file of snapshot.changedFiles) {
       if (seen.has(file.path)) continue;
       seen.add(file.path);
       const checkState: CheckState =
@@ -444,7 +479,9 @@ export function useSourceControlPanel(
         ? statusCodeForMode("-", file)
         : statusCodeForMode("+", file);
       out.push({
-        key: file.path,
+        // Paths repeat across repos, so the row key has to carry the repo too.
+        key: `${repoRoot}\u0000${file.path}`,
+        repoRoot,
         path: file.path,
         originalPath: file.originalPath,
         statusCode,
@@ -456,7 +493,22 @@ export function useSourceControlPanel(
       });
     }
     return out;
-  }, [status]);
+  }
+
+  const repoGroups = useMemo<RepoFileGroup[]>(() => {
+    if (!multiRepo) return [];
+    return repoStatusEntries.map((entry) => ({
+      repoRoot: entry.repoRoot,
+      name: entry.name,
+      files: entriesForStatus(entry.repoRoot, entry.status),
+    }));
+  }, [multiRepo, repoStatusEntries]);
+
+  const fileEntries = useMemo<SourceControlFileEntry[]>(() => {
+    if (multiRepo) return repoGroups.flatMap((g) => g.files);
+    if (!status || !activeRepoRoot) return [];
+    return entriesForStatus(activeRepoRoot, status);
+  }, [multiRepo, repoGroups, status, activeRepoRoot]);
 
   const headerCheckState = useMemo<CheckState>(() => {
     if (fileEntries.length === 0) return "unchecked";
@@ -466,7 +518,10 @@ export function useSourceControlPanel(
     return anyStaged ? "indeterminate" : "unchecked";
   }, [fileEntries]);
 
-  const allClean = stagedEntries.length === 0 && unstagedEntries.length === 0;
+  // Must read the aggregate, not the active repo: with the panel anchored on
+  // repos[0], a clean first repo made this true and the whole list collapsed
+  // into the "nothing to commit" hint while other repos had changes waiting.
+  const allClean = fileEntries.length === 0;
   const canPush = !!status?.upstream && status.behind === 0;
   const selectedModel = resolveModel(selectedModelId);
   const selectedModelSupportsTemperature = modelSupportsTemperature(
@@ -681,28 +736,50 @@ export function useSourceControlPanel(
       optimistic: ((status: GitStatusSnapshot) => GitStatusSnapshot) | null,
       ipc: () => Promise<void>,
       affected: string[],
+      // Defaults to the active repo so every single-repo caller is unchanged.
+      targetRepoRoot?: string,
     ) => {
-      if (!repo || summary.busyAction) return;
+      const root = targetRepoRoot ?? repo?.repoRoot;
+      if (!root || summary.busyAction) return;
+      const isActive = root === repo?.repoRoot;
       setLocalActionBusy(busyKey);
       setActionMessage(null);
       setActionError(null);
-      if (optimistic) summary.applyStatus(optimistic);
+      if (optimistic) {
+        if (isActive) summary.applyStatus(optimistic);
+        else applyOtherStatus(root, optimistic);
+      }
       for (const path of affected) {
-        invalidateDiff(workingDiffKey(repo.repoRoot, path, "+"));
-        invalidateDiff(workingDiffKey(repo.repoRoot, path, "-"));
+        invalidateDiff(workingDiffKey(root, path, "+"));
+        invalidateDiff(workingDiffKey(root, path, "-"));
       }
       try {
         await ipc();
-        scheduleReconcile();
+        // Only the active repo has the debounced reconcile behind it; a
+        // secondary repo has to be re-read directly or its optimistic state
+        // would be the last word.
+        if (isActive) scheduleReconcile();
+        else await refreshOtherRepo(root);
       } catch (error) {
         setActionError(normalizeError(error));
-        cancelReconcile();
-        await summary.refresh({ remote: "never" }).catch(() => {});
+        if (isActive) {
+          cancelReconcile();
+          await summary.refresh({ remote: "never" }).catch(() => {});
+        } else {
+          await refreshOtherRepo(root);
+        }
       } finally {
         setLocalActionBusy(null);
       }
     },
-    [cancelReconcile, repo, scheduleReconcile, summary],
+    [
+      applyOtherStatus,
+      cancelReconcile,
+      refreshOtherRepo,
+      repo,
+      scheduleReconcile,
+      summary,
+    ],
   );
 
   const stageEntry = useCallback(
@@ -772,7 +849,25 @@ export function useSourceControlPanel(
     );
   }, [pendingDiscard, repo, runMutation]);
 
+  // Select-all spans every repo in multi-repo mode, one repo per call so each
+  // gets its own optimistic update and reconcile.
   const stageAllEntries = useCallback(async () => {
+    if (multiRepo) {
+      for (const group of repoGroups) {
+        const paths = new Set(
+          group.files.filter((f) => f.unstaged).map((f) => f.path),
+        );
+        if (paths.size === 0) continue;
+        await runMutation(
+          `stage:all:${group.repoRoot}`,
+          (s) => optimisticStage(s, paths),
+          () => native.gitStage(group.repoRoot, [...paths]),
+          [...paths],
+          group.repoRoot,
+        );
+      }
+      return;
+    }
     if (!repo || unstagedEntries.length === 0) return;
     const paths = new Set(unstagedEntries.map((entry) => entry.path));
     await runMutation(
@@ -781,9 +876,25 @@ export function useSourceControlPanel(
       () => native.gitStage(repo.repoRoot, [...paths]),
       [...paths],
     );
-  }, [repo, runMutation, unstagedEntries]);
+  }, [multiRepo, repo, repoGroups, runMutation, unstagedEntries]);
 
   const unstageAllEntries = useCallback(async () => {
+    if (multiRepo) {
+      for (const group of repoGroups) {
+        const paths = new Set(
+          group.files.filter((f) => f.staged).map((f) => f.path),
+        );
+        if (paths.size === 0) continue;
+        await runMutation(
+          `unstage:all:${group.repoRoot}`,
+          (s) => optimisticUnstage(s, paths),
+          () => native.gitUnstage(group.repoRoot, [...paths]),
+          [...paths],
+          group.repoRoot,
+        );
+      }
+      return;
+    }
     if (!repo || stagedEntries.length === 0) return;
     const paths = new Set(stagedEntries.map((entry) => entry.path));
     await runMutation(
@@ -792,11 +903,12 @@ export function useSourceControlPanel(
       () => native.gitUnstage(repo.repoRoot, [...paths]),
       [...paths],
     );
-  }, [repo, runMutation, stagedEntries]);
+  }, [multiRepo, repo, repoGroups, runMutation, stagedEntries]);
 
   const selectFile = useCallback(
     async (entry: SourceControlFileEntry) => {
-      if (!repo) return;
+      const root = entry.repoRoot || repo?.repoRoot;
+      if (!root) return;
       const mode: DiffMode = entry.unstaged ? "-" : "+";
       const nextSelection: DiffSelection = { path: entry.path, mode };
       if (sameSelection(selected, nextSelection)) {
@@ -809,29 +921,37 @@ export function useSourceControlPanel(
       setActionError(null);
       setActionMessage(null);
       setSelectionTransition("none");
-      const file = status?.changedFiles.find((c) => c.path === entry.path);
-      openSelection(nextSelection, repo.repoRoot, file);
+      const source =
+        root === repo?.repoRoot
+          ? status
+          : (repoStatusEntries.find((e) => e.repoRoot === root)?.status ??
+            null);
+      const file = source?.changedFiles.find((c) => c.path === entry.path);
+      openSelection(nextSelection, root, file);
     },
-    [openSelection, repo, selected, status],
+    [openSelection, repo, repoStatusEntries, selected, status],
   );
 
   const toggleStageFile = useCallback(
     async (entry: SourceControlFileEntry) => {
-      if (!repo) return;
+      const root = entry.repoRoot || repo?.repoRoot;
+      if (!root) return;
       const paths = new Set([entry.path]);
       if (entry.checkState === "checked") {
         await runMutation(
-          `unstage:${entry.path}`,
+          `unstage:${entry.key}`,
           (s) => optimisticUnstage(s, paths),
-          () => native.gitUnstage(repo.repoRoot, [entry.path]),
+          () => native.gitUnstage(root, [entry.path]),
           [entry.path],
+          root,
         );
       } else {
         await runMutation(
-          `stage:${entry.path}`,
+          `stage:${entry.key}`,
           (s) => optimisticStage(s, paths),
-          () => native.gitStage(repo.repoRoot, [entry.path]),
+          () => native.gitStage(root, [entry.path]),
           [entry.path],
+          root,
         );
       }
     },
@@ -948,24 +1068,53 @@ export function useSourceControlPanel(
   ]);
 
   const commit = useCallback(async () => {
-    if (!repo || summary.busyAction) return;
+    if (summary.busyAction) return;
+
+    // Repos with nothing staged are skipped rather than erroring: "commit
+    // everything I checked" should not fail because some group is untouched.
+    const targets = multiRepo
+      ? repoGroups
+          .filter((g) => g.files.some((f) => f.staged))
+          .map((g) => ({ repoRoot: g.repoRoot, name: g.name }))
+      : repo
+        ? [{ repoRoot: repo.repoRoot, name: repoDisplayName(repo.repoRoot) }]
+        : [];
+    if (targets.length === 0) return;
+
     setLocalActionBusy("commit");
     setActionMessage(null);
     setActionError(null);
+    const done: string[] = [];
+    const failed: { name: string; error: string }[] = [];
     try {
-      const result = await native.gitCommit(repo.repoRoot, commitMessage);
-      setCommitMessage("");
-      setActionMessage(
-        `Committed ${result.commitSha.slice(0, 7)} ${result.summary}`,
-      );
-      invalidateRepoDiffs(repo.repoRoot);
+      // Sequential: a shared commit message still means N independent commits,
+      // and stopping mid-way has to leave a legible record of how far it got.
+      for (const target of targets) {
+        try {
+          const result = await native.gitCommit(target.repoRoot, commitMessage);
+          invalidateRepoDiffs(target.repoRoot);
+          done.push(`${target.name} ${result.commitSha.slice(0, 7)}`);
+        } catch (error) {
+          failed.push({ name: target.name, error: normalizeError(error) });
+        }
+      }
+      if (failed.length === 0) setCommitMessage("");
+      if (done.length > 0) {
+        setActionMessage(
+          targets.length === 1
+            ? `Committed ${done[0]}`
+            : `Committed ${done.length}/${targets.length} repos: ${done.join(", ")}`,
+        );
+      }
+      if (failed.length > 0) {
+        setActionError(failed.map((f) => `${f.name}: ${f.error}`).join("; "));
+      }
       await summary.refresh({ remote: "never" });
-    } catch (error) {
-      setActionError(normalizeError(error));
+      if (multiRepo) await refreshOtherRepos();
     } finally {
       setLocalActionBusy(null);
     }
-  }, [commitMessage, repo, summary]);
+  }, [commitMessage, multiRepo, refreshOtherRepos, repo, repoGroups, summary]);
 
   const push = useCallback(async () => {
     if (!repo) return;
@@ -1015,6 +1164,7 @@ export function useSourceControlPanel(
     stagedEntries,
     unstagedEntries,
     fileEntries,
+    repoGroups,
     headerCheckState,
     allClean,
     canPush,

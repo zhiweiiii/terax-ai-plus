@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import { invoke } from "@tauri-apps/api/core";
 
 export type ReadResult =
   | { kind: "text"; content: string; size: number }
@@ -154,7 +154,7 @@ export type GitDiscardEntry = {
 
 export type GitBranchEntry = {
   name: string;
-  kind: "local" | "worktree";
+  kind: "local" | "worktree" | "remote";
   worktreePath: string | null;
   isHead: boolean;
   isDetached: boolean;
@@ -221,11 +221,7 @@ export const native = {
       maxResults: params.maxResults ?? null,
       workspace: currentWorkspaceEnv(),
     }),
-  runCommand: (
-    command: string,
-    cwd?: string | null,
-    timeoutSecs?: number,
-  ) =>
+  runCommand: (command: string, cwd?: string | null, timeoutSecs?: number) =>
     invoke<CommandOutput>("shell_run_command", {
       command,
       cwd: cwd ?? null,
@@ -360,7 +356,10 @@ export const native = {
       repoRoot,
       workspace: currentWorkspaceEnv(),
     }),
-  gitLog: (repoRoot: string, options?: { limit?: number; beforeSha?: string }) =>
+  gitLog: (
+    repoRoot: string,
+    options?: { limit?: number; beforeSha?: string },
+  ) =>
     invoke<GitLogEntry[]>("git_log", {
       repoRoot,
       limit: options?.limit ?? null,

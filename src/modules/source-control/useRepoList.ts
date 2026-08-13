@@ -5,6 +5,8 @@ type UseRepoListResult = {
   repos: GitRepoHead[];
   activeRepo: string | null;
   setActiveRepo: (root: string) => void;
+  /** Drop the explicit selection; the panel then spans every repo. */
+  clearActiveRepo: () => void;
   scan: () => Promise<void>;
   isLoading: boolean;
 };
@@ -92,5 +94,7 @@ export function useRepoList(basePath: string | null): UseRepoListResult {
     }
   };
 
-  return { repos, activeRepo, setActiveRepo, scan, isLoading };
+  const clearActiveRepo = () => setActiveRepoState(null);
+
+  return { repos, activeRepo, setActiveRepo, clearActiveRepo, scan, isLoading };
 }

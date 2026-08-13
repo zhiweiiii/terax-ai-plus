@@ -36,7 +36,11 @@ import {
 } from "@/components/ui/tooltip";
 import { IS_MAC } from "@/lib/platform";
 import { cn } from "@/lib/utils";
-import { type GitBranchEntry, native } from "@/modules/ai/lib/native";
+import {
+  type GitBranchEntry,
+  type GitRepoHead,
+  native,
+} from "@/modules/ai/lib/native";
 import {
   copyToClipboard,
   revealInFinder,
@@ -80,6 +84,11 @@ import {
   repositoryTargetIsPending,
   type SourceControlRepositoryTarget,
 } from "./repositoryTarget";
+import type {
+  PushPlan,
+  RepoSyncItem,
+  SyncProgress,
+} from "./useMultiRepoSourceControl";
 import type { SourceControlSummary } from "./useSourceControl";
 import {
   type CheckState,
@@ -104,9 +113,107 @@ type Props = {
   onFollowRepositoryContext: () => void;
   /** Optional extra content rendered in the panel header (e.g. multi-repo selector). */
   headerExtra?: ReactNode;
-  /** Repos discovered in the workspace; >1 makes Sync walk them one by one. */
-  repoCount?: number;
+  /** Repos discovered in the workspace; >1 groups Changes and batches Sync. */
+  repos?: GitRepoHead[];
+  /** Live per-repo Sync state; rendered above the change list while present. */
+  syncProgress?: SyncProgress | null;
+  onDismissSyncProgress?: () => void;
+  /** Survey what a push would send, for the confirmation dialog. */
+  buildPushPlan?: () => Promise<PushPlan>;
+  pushAll?: (plan: PushPlan) => Promise<void>;
 };
+
+function syncPhaseText(phase: RepoSyncItem["phase"]): {
+  text: string;
+  tone: "muted" | "active" | "good" | "warn" | "bad";
+} {
+  switch (phase.kind) {
+    case "pending":
+      return { text: "Waiting", tone: "muted" };
+    case "fetching":
+      return { text: "Fetching…", tone: "active" };
+    case "pulling":
+      return {
+        text: `Pulling ${phase.commits}…`,
+        tone: "active",
+      };
+    case "pulled":
+      return {
+        text: `Pulled ${phase.commits} ${phase.commits === 1 ? "commit" : "commits"}`,
+        tone: "good",
+      };
+    case "up-to-date":
+      return { text: "Up to date", tone: "muted" };
+    case "no-upstream":
+      return { text: "No upstream", tone: "warn" };
+    case "diverged":
+      return { text: "Diverged — resolve manually", tone: "warn" };
+    case "failed":
+      return { text: phase.error, tone: "bad" };
+  }
+}
+
+const SYNC_TONE_CLASS = {
+  muted: "text-muted-foreground/70",
+  active: "text-foreground/80",
+  good: "text-emerald-500",
+  warn: "text-amber-500",
+  bad: "text-destructive",
+} as const;
+
+function SyncProgressList({
+  progress,
+  onDismiss,
+}: {
+  progress: SyncProgress;
+  onDismiss?: () => void;
+}) {
+  const done = progress.items.filter(
+    (i) =>
+      i.phase.kind !== "pending" &&
+      i.phase.kind !== "fetching" &&
+      i.phase.kind !== "pulling",
+  ).length;
+  return (
+    <div className="shrink-0 border-b border-border/50 px-3 py-2">
+      <div className="mb-1.5 flex items-center gap-2">
+        {progress.running ? <Spinner className="size-3" /> : null}
+        <span className="text-[11px] font-medium text-foreground/85">
+          {progress.running
+            ? `Syncing ${done + 1}/${progress.items.length}`
+            : `Synced ${progress.items.length} repos`}
+        </span>
+        {!progress.running && onDismiss ? (
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="ml-auto cursor-pointer rounded px-1 text-[10px] text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+          >
+            Dismiss
+          </button>
+        ) : null}
+      </div>
+      <ul className="flex flex-col gap-0.5">
+        {progress.items.map((item) => {
+          const { text, tone } = syncPhaseText(item.phase);
+          return (
+            <li
+              key={item.repoRoot}
+              className="flex items-center gap-2 text-[10.5px]"
+            >
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                {item.name}
+              </span>
+              <span className={cn("shrink-0 truncate", SYNC_TONE_CLASS[tone])}>
+                {text}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 const SOURCE_CONTROL_TOOLTIP_CLASS =
   "border border-border/70 bg-zinc-950 text-zinc-100 shadow-lg shadow-black/30 dark:border-border/60 dark:bg-zinc-950 dark:text-zinc-100";
@@ -114,12 +221,14 @@ const SOURCE_CONTROL_TOOLTIP_CLASS =
 const ROW_HEIGHTS = {
   banner: 32,
   header: 30,
+  repo: 26,
   folder: 24,
   entry: 30,
 } as const;
 
 type RowDescriptor =
   | { kind: "banner-diverged"; key: string }
+  | { kind: "repo-header"; key: string; label: string; count: number }
   | { kind: "list-header"; key: string; count: number }
   | { kind: "folder-header"; key: string; label: string; count: number }
   | { kind: "entry"; key: string; entry: SourceControlFileEntry };
@@ -398,9 +507,17 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   repositoryTarget,
   onFollowRepositoryContext,
   headerExtra,
-  repoCount = 1,
+  repos,
+  syncProgress,
+  onDismissSyncProgress,
+  buildPushPlan,
+  pushAll,
 }: Props) {
-  const scm = useSourceControlPanel(open, sourceControl, onOpenDiff);
+  const repoList = useMemo(() => repos ?? [], [repos]);
+  const [pushPlan, setPushPlan] = useState<PushPlan | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
+  const repoCount = repoList.length;
+  const scm = useSourceControlPanel(open, sourceControl, onOpenDiff, repoList);
   const refreshAnimationRef = useRef<number | null>(null);
   const [refreshAnimating, setRefreshAnimating] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -431,14 +548,22 @@ export const SourceControlPanel = memo(function SourceControlPanel({
 
   const commitShortcut = IS_MAC ? "⌘↩" : "Ctrl+Enter";
   const generateShortcut = IS_MAC ? "⌘G" : "Ctrl+G";
+  // stagedEntries covers the active repo only; fileEntries spans every repo, so
+  // commit stays enabled when the staged work sits in another group.
+  const stagedRepoCount =
+    scm.repoGroups.length > 0
+      ? scm.repoGroups.filter((g) => g.files.some((f) => f.staged)).length
+      : scm.stagedEntries.length > 0
+        ? 1
+        : 0;
   const canCommit =
-    scm.stagedEntries.length > 0 &&
+    stagedRepoCount > 0 &&
     scm.commitMessage.trim().length > 0 &&
     !fixedTargetPending &&
     !scm.actionBusy;
   const commitDisabledReason = scm.actionBusy
     ? "Wait for the current Git action to finish."
-    : scm.stagedEntries.length === 0
+    : stagedRepoCount === 0
       ? "Stage changes to enable commit."
       : scm.commitMessage.trim().length === 0
         ? "Enter a commit message to enable commit."
@@ -452,7 +577,9 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     : scm.actionBusy
       ? "Wait for the current Git action to finish."
       : pushHint;
-  const stagedCount = scm.stagedEntries.length;
+  // Aggregate, like changedCount: the staged count under the commit box has to
+  // match what Commit will actually include across every repo.
+  const stagedCount = scm.fileEntries.filter((f) => f.staged).length;
   const changedCount = scm.fileEntries.length;
   const pushStatusLabel = upstreamBadgeLabel(scm.status?.upstream);
   const hasUpstream = !!scm.status?.upstream;
@@ -536,36 +663,54 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         count: changedCount,
       });
       // Group entries by their parent directory (like IDEA's Changes view).
-      // Only insert a folder header when ≥2 files share the same directory.
-      const groups = new Map<string, SourceControlFileEntry[]>();
-      for (const entry of scm.fileEntries) {
-        const dir = dirname(entry.path);
-        const bucket = groups.get(dir);
-        if (bucket) bucket.push(entry);
-        else groups.set(dir, [entry]);
-      }
-      const sortedDirs = [...groups.keys()].sort((a, b) => {
-        if (a === "" && b !== "") return -1;
-        if (b === "" && a !== "") return 1;
-        return a.localeCompare(b);
-      });
-      for (const dir of sortedDirs) {
-        const entries = groups.get(dir)!;
-        if (entries.length > 1) {
+      // Only insert a folder header when >=2 files share the same directory.
+      const pushByFolder = (files: SourceControlFileEntry[]) => {
+        const groups = new Map<string, SourceControlFileEntry[]>();
+        for (const entry of files) {
+          const dir = dirname(entry.path);
+          const bucket = groups.get(dir);
+          if (bucket) bucket.push(entry);
+          else groups.set(dir, [entry]);
+        }
+        const sortedDirs = [...groups.keys()].sort((a, b) => {
+          if (a === "" && b !== "") return -1;
+          if (b === "" && a !== "") return 1;
+          return a.localeCompare(b);
+        });
+        for (const dir of sortedDirs) {
+          const entries = groups.get(dir)!;
+          if (entries.length > 1) {
+            result.push({
+              kind: "folder-header",
+              key: `folder:${dir}`,
+              label: dir || "(root)",
+              count: entries.length,
+            });
+          }
+          for (const entry of entries) {
+            result.push({ kind: "entry", key: entry.key, entry });
+          }
+        }
+      };
+
+      // Multi-repo: a repo header above each repo's own folder grouping, so a
+      // path that exists in several repos is never ambiguous.
+      if (scm.repoGroups.length > 0) {
+        for (const group of scm.repoGroups) {
           result.push({
-            kind: "folder-header",
-            key: `folder:${dir}`,
-            label: dir || "(root)",
-            count: entries.length,
+            kind: "repo-header",
+            key: `repo:${group.repoRoot}`,
+            label: group.name,
+            count: group.files.length,
           });
+          pushByFolder(group.files);
         }
-        for (const entry of entries) {
-          result.push({ kind: "entry", key: entry.key, entry });
-        }
+      } else {
+        pushByFolder(scm.fileEntries);
       }
     }
     return result;
-  }, [changedCount, isDiverged, scm.fileEntries]);
+  }, [changedCount, isDiverged, scm.fileEntries, scm.repoGroups]);
 
   const rowKeyToIndex = useMemo(() => {
     const map = new Map<string, number>();
@@ -597,6 +742,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           return ROW_HEIGHTS.banner;
         case "list-header":
           return ROW_HEIGHTS.header;
+        case "repo-header":
+          return ROW_HEIGHTS.repo;
         case "folder-header":
           return ROW_HEIGHTS.folder;
         case "entry":
@@ -713,21 +860,23 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 pb-2.5 pt-3">
           <div className="flex min-w-0 items-center gap-1.5">
             {headerExtra}
-            <BranchDropdown
-              repoRoot={
-                fixedTargetPending ? null : (scm.repo?.repoRoot ?? null)
-              }
-              repoLabel={repoLabel}
-              displayRepoRoot={
-                repositoryTarget.mode === "fixed"
-                  ? repositoryTarget.repoRoot
-                  : (scm.repo?.repoRoot ?? null)
-              }
-              repositoryTarget={repositoryTarget}
-              onFollowRepositoryContext={onFollowRepositoryContext}
-              onNavigateToPath={onNavigateToPath}
-              onRefresh={handleRefresh}
-            />
+            {repoList.length > 1 ? null : (
+              <BranchDropdown
+                repoRoot={
+                  fixedTargetPending ? null : (scm.repo?.repoRoot ?? null)
+                }
+                repoLabel={repoLabel}
+                displayRepoRoot={
+                  repositoryTarget.mode === "fixed"
+                    ? repositoryTarget.repoRoot
+                    : (scm.repo?.repoRoot ?? null)
+                }
+                repositoryTarget={repositoryTarget}
+                onFollowRepositoryContext={onFollowRepositoryContext}
+                onNavigateToPath={onNavigateToPath}
+                onRefresh={handleRefresh}
+              />
+            )}
             {scm.status && (scm.status.ahead > 0 || scm.status.behind > 0) ? (
               <div className="flex shrink-0 items-center gap-0.5 text-[10px] font-semibold tabular-nums leading-none text-muted-foreground">
                 {scm.status.ahead > 0 ? (
@@ -826,6 +975,12 @@ export const SourceControlPanel = memo(function SourceControlPanel({
             </IconActionButton>
           </div>
         </header>
+        {syncProgress && syncProgress.items.length > 1 ? (
+          <SyncProgressList
+            progress={syncProgress}
+            onDismiss={onDismissSyncProgress}
+          />
+        ) : null}
 
         {onOpenGitGraph ? (
           <button
@@ -971,7 +1126,11 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       disabled={!canCommit}
                       onClick={() => void scm.commit()}
                     >
-                      {scm.actionBusy === "commit" ? "Committing…" : "Commit"}
+                      {scm.actionBusy === "commit"
+                        ? "Committing…"
+                        : stagedRepoCount > 1
+                          ? `Commit to ${stagedRepoCount} repos`
+                          : "Commit"}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent
@@ -991,11 +1150,30 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       variant="secondary"
                       className="h-7 cursor-pointer text-[11.5px] font-medium disabled:cursor-not-allowed"
                       disabled={
-                        !scm.canPush || fixedTargetPending || !!scm.actionBusy
+                        (!scm.canPush && repoList.length <= 1) ||
+                        fixedTargetPending ||
+                        !!scm.actionBusy ||
+                        planLoading
                       }
-                      onClick={() => void scm.push()}
+                      onClick={() => {
+                        // Multi-repo pushes go through a preview: sending
+                        // commits to several remotes is not something to fire
+                        // off a single click without showing what goes where.
+                        if (repoList.length > 1 && buildPushPlan) {
+                          setPlanLoading(true);
+                          void buildPushPlan()
+                            .then(setPushPlan)
+                            .finally(() => setPlanLoading(false));
+                          return;
+                        }
+                        void scm.push();
+                      }}
                     >
-                      {scm.actionBusy === "push" ? "Pushing…" : "Push"}
+                      {planLoading
+                        ? "Checking…"
+                        : scm.actionBusy === "push"
+                          ? "Pushing…"
+                          : "Push"}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent
@@ -1077,6 +1255,99 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           </>
         ) : null}
       </aside>
+
+      <AlertDialog
+        open={pushPlan !== null}
+        onOpenChange={(o) => {
+          if (!o) setPushPlan(null);
+        }}
+      >
+        <AlertDialogContent className="max-w-lg">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pushPlan && pushPlan.entries.length > 0
+                ? `Push to ${pushPlan.entries.length} ${
+                    pushPlan.entries.length === 1
+                      ? "repository"
+                      : "repositories"
+                  }?`
+                : "Nothing to push"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pushPlan && pushPlan.entries.length > 0
+                ? "Repositories are pushed one at a time, in this order."
+                : "No repository has local commits ready for its upstream."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="max-h-72 overflow-y-auto">
+            {pushPlan?.entries.map((entry) => (
+              <div
+                key={entry.repoRoot}
+                className="mb-2 rounded-lg border border-border/50 px-2.5 py-2"
+              >
+                <div className="flex items-baseline gap-2">
+                  <span className="truncate text-[12px] font-medium">
+                    {entry.name}
+                  </span>
+                  <span className="truncate text-[10.5px] text-muted-foreground">
+                    {entry.branch} → {entry.upstream}
+                  </span>
+                  <span className="ml-auto shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                    ↑{entry.ahead}
+                  </span>
+                </div>
+                <ul className="mt-1 flex flex-col gap-0.5">
+                  {entry.commits.map((c) => (
+                    <li
+                      key={c.sha}
+                      className="flex items-baseline gap-2 text-[10.5px]"
+                    >
+                      <code className="shrink-0 text-muted-foreground/70">
+                        {c.shortSha}
+                      </code>
+                      <span className="min-w-0 flex-1 truncate">
+                        {c.subject}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {pushPlan && pushPlan.skipped.length > 0 ? (
+              <div className="mt-1 rounded-lg bg-muted/40 px-2.5 py-2">
+                <div className="mb-1 text-[10.5px] font-medium text-muted-foreground">
+                  Skipped
+                </div>
+                <ul className="flex flex-col gap-0.5">
+                  {pushPlan.skipped.map((sk) => (
+                    <li
+                      key={sk.name}
+                      className="flex items-baseline gap-2 text-[10.5px] text-muted-foreground"
+                    >
+                      <span className="min-w-0 flex-1 truncate">{sk.name}</span>
+                      <span className="shrink-0">{sk.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            {pushPlan && pushPlan.entries.length > 0 ? (
+              <AlertDialogAction
+                onClick={() => {
+                  const plan = pushPlan;
+                  setPushPlan(null);
+                  if (plan && pushAll) void pushAll(plan);
+                }}
+              >
+                Push
+              </AlertDialogAction>
+            ) : null}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={scm.pendingDiscard !== null}
@@ -1173,6 +1444,8 @@ const RowRenderer = memo(function RowRenderer(props: RowRendererProps) {
       return <DivergedBanner />;
     case "list-header":
       return <ListHeader {...props} row={row} />;
+    case "repo-header":
+      return <RepoHeader row={row} />;
     case "folder-header":
       return <FolderHeader row={row} />;
     case "entry":
@@ -1194,6 +1467,29 @@ function DivergedBanner() {
           Diverged from upstream
         </span>
         <span className="ml-1 opacity-75">— resolve in terminal</span>
+      </span>
+    </div>
+  );
+}
+
+function RepoHeader({
+  row,
+}: {
+  row: Extract<RowDescriptor, { kind: "repo-header" }>;
+}) {
+  return (
+    <div className="flex h-[26px] items-center gap-2 border-t border-border/40 px-2.5 pt-1">
+      <HugeiconsIcon
+        icon={FolderGitTwoIcon}
+        size={12}
+        strokeWidth={2}
+        className="shrink-0 text-muted-foreground"
+      />
+      <span className="truncate text-[11px] font-semibold text-foreground/85">
+        {row.label}
+      </span>
+      <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground/[0.07] px-1 text-[9px] tabular-nums text-muted-foreground">
+        {row.count}
       </span>
     </div>
   );

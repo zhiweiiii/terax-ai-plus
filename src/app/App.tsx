@@ -67,7 +67,7 @@ import {
   useSidebarPanel,
 } from "@/modules/sidebar";
 import {
-  RepoSelector,
+  RepoBranchSelector,
   SourceControlPanel,
   useRepositoryTargeting,
   useSourceControlContext,
@@ -1621,7 +1621,11 @@ export default function App() {
                       <SourceControlPanel
                         open={sidebarOpen}
                         sourceControl={sourceControl}
-                        repoCount={multiRepo.repos.length}
+                        repos={multiRepo.repos}
+                        syncProgress={multiRepo.syncProgress}
+                        onDismissSyncProgress={multiRepo.clearSyncProgress}
+                        buildPushPlan={multiRepo.buildPushPlan}
+                        pushAll={multiRepo.pushAll}
                         onOpenDiff={openGitDiffTab}
                         onOpenGitGraph={openGitGraphFromContext}
                         onOpenFile={handleOpenFile}
@@ -1631,11 +1635,19 @@ export default function App() {
                           handleFollowRepositoryContext
                         }
                         headerExtra={
-                          <RepoSelector
+                          <RepoBranchSelector
                             repos={multiRepo.repos}
                             activeRepo={multiRepo.activeRepo}
+                            activeBranch={
+                              multiRepo.summary.status?.branch ?? null
+                            }
                             onChangeRepo={multiRepo.setActiveRepo}
-                            onRefresh={multiRepo.scanRepos}
+                            onRescan={multiRepo.scanRepos}
+                            onCheckedOut={() =>
+                              void multiRepo.summary.refresh({
+                                remote: "never",
+                              })
+                            }
                           />
                         }
                       />

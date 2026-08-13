@@ -36,14 +36,8 @@ export function RepoSelector({
   onRefresh,
   changedCount,
 }: Props) {
-  // TEMP: always render for debugging
-  if (repos.length === 0) {
-    return (
-      <span className="shrink-0 rounded bg-yellow-500/15 px-2 py-0.5 text-[10px] text-yellow-600">
-        No repos found under scan root
-      </span>
-    );
-  }
+  // A selector over a single repo is just noise.
+  if (repos.length <= 1) return null;
 
   const activeName = activeRepo
     ? (repos
