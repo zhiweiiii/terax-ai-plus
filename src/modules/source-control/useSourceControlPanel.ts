@@ -1,38 +1,27 @@
 import {
-  modelSupportsTemperature,
-  providerNeedsKey,
-  resolveModel,
-} from "@/modules/ai/config";
-import {
   type GitChangedFile,
+  type GitCommitResult,
   type GitDiscardEntry,
+  type GitLogEntry,
   type GitRepoHead,
   type GitRepoInfo,
   type GitStatusSnapshot,
   native,
-} from "@/modules/ai/lib/native";
-import { useChatStore } from "@/modules/ai/store/chatStore";
+} from "@/lib/native";
 import {
   invalidateDiff,
   invalidateRepoDiffs,
   workingDiffKey,
 } from "@/modules/editor/lib/diffCache";
-import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { repoDisplayName, useRepoStatuses } from "./useRepoStatuses";
+import { repoDisplayName, type RepoStatusEntry } from "./useRepoStatuses";
 import type { SourceControlSummary } from "./useSourceControl";
 
 type PanelState = "closed" | "loading" | "no-repo" | "ready" | "error";
 type DiffMode = "+" | "-";
 type SelectionTransition = "none" | "moved-group" | "reset";
 
-const COMMIT_DIFF_CHAR_LIMIT = 60_000;
-const COMMIT_MESSAGE_MAX_OUTPUT_TOKENS = 1024;
 const RECONCILE_DEBOUNCE_MS = 180;
-const CONVENTIONAL_PREFIX =
-  /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?: .+/;
-const COMMIT_MESSAGE_SYSTEM_PROMPT =
-  "You write concise Conventional Commit subject lines in English. Return exactly one complete line, with no markdown, no quotes, no body, and no explanation.";
 
 export type DiffSelection = {
   path: string;
@@ -101,13 +90,31 @@ type SourceControlPanelState = {
   allClean: boolean;
   canPush: boolean;
   pushHint: string | null;
-  canGenerateCommitMessage: boolean;
-  generateCommitMessageHint: string;
   selectionTransition: SelectionTransition;
   stagedEmptyText: string;
   unstagedEmptyText: string;
   pendingDiscard: PendingDiscard | null;
   setCommitMessage: (value: string) => void;
+  amendEnabled: boolean;
+  setAmendEnabled: (value: boolean) => void;
+  amendTargetSha: string | null;
+  setAmendTargetSha: (value: string | null) => void;
+  recentCommits: GitLogEntry[];
+  refreshRecentCommits: () => Promise<void>;
+  /** Specific-commit amend only makes sense on a single repository. */
+  amendSpecificSupported: boolean;
+  commitAndPush: () => Promise<void>;
+  preCommitWarnings: string[] | null;
+  confirmPreCommitWarnings: () => Promise<void>;
+  cancelPreCommitWarnings: () => void;
+  /** Active repo root when the last commit succeeded, enabling Reword. */
+  rewordTarget: string | null;
+  rewordOpen: boolean;
+  rewordMessage: string;
+  setRewordMessage: (value: string) => void;
+  openReword: () => void;
+  cancelReword: () => void;
+  confirmReword: () => Promise<void>;
   refresh: () => Promise<void>;
   selectEntry: (entry: SourceControlEntry) => Promise<void>;
   selectFile: (entry: SourceControlFileEntry) => Promise<void>;
@@ -122,7 +129,6 @@ type SourceControlPanelState = {
   cancelPendingDiscard: () => void;
   stageAllEntries: () => Promise<void>;
   unstageAllEntries: () => Promise<void>;
-  generateCommitMessage: () => Promise<void>;
   commit: () => Promise<void>;
   push: () => Promise<void>;
 };
@@ -187,83 +193,6 @@ function sameSelection(
   b: DiffSelection | null,
 ): boolean {
   return !!a && !!b && a.path === b.path && a.mode === b.mode;
-}
-
-function stagedFilesSummary(entries: SourceControlEntry[]): string {
-  return entries
-    .map((entry) => {
-      const status = entry.originalPath
-        ? `R ${entry.originalPath} -> ${entry.path}`
-        : `${entry.statusCode} ${entry.path}`;
-      return `- ${status}`;
-    })
-    .join("\n");
-}
-
-function truncateDiff(diff: string): { text: string; truncated: boolean } {
-  if (diff.length <= COMMIT_DIFF_CHAR_LIMIT) {
-    return { text: diff, truncated: false };
-  }
-  return { text: diff.slice(0, COMMIT_DIFF_CHAR_LIMIT), truncated: true };
-}
-
-function cleanCommitMessage(raw: string): string {
-  let text = raw.trim();
-  const fence = text.match(/^```[a-zA-Z0-9_-]*\n([\s\S]*?)\n```\s*$/);
-  if (fence) text = fence[1].trim();
-  const firstLine = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (!firstLine) return "";
-  return firstLine.replace(/^["'`]+|["'`]+$/g, "").trim();
-}
-
-function isValidCommitMessage(message: string): boolean {
-  return CONVENTIONAL_PREFIX.test(message);
-}
-
-function buildCommitMessagePrompt(
-  entries: SourceControlEntry[],
-  diffText: string,
-  truncated: boolean,
-): string {
-  return [
-    "Generate one complete commit message for the staged changes only.",
-    "Format: type(scope): subject",
-    "Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.",
-    "Examples:",
-    "- feat(source-control): generate commit messages",
-    "- fix(git): handle staged diff errors",
-    "- chore: update project metadata",
-    "Use a short lowercase subject in imperative mood. Omit the scope if it would be vague.",
-    "Do not stop after the type or an opening parenthesis; the line must include a subject after ': '.",
-    truncated
-      ? "The diff below was truncated; infer from the visible staged changes only."
-      : "The full staged diff is included below.",
-    "",
-    "Staged files:",
-    stagedFilesSummary(entries),
-    "",
-    "Staged diff:",
-    diffText || "(No textual diff available.)",
-  ].join("\n");
-}
-
-function buildRepairCommitMessagePrompt(
-  invalidMessage: string,
-  entries: SourceControlEntry[],
-): string {
-  return [
-    "Repair this invalid Conventional Commit subject line.",
-    `Invalid line: ${invalidMessage || "(empty)"}`,
-    "Return exactly one complete valid line in this format: type(scope): subject",
-    "Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.",
-    "If the scope is unclear, omit it and use: type: subject",
-    "",
-    "Staged files:",
-    stagedFilesSummary(entries),
-  ].join("\n");
 }
 
 function optimisticStage(
@@ -372,6 +301,23 @@ function optimisticDiscard(
   return { ...status, changedFiles: next };
 }
 
+export type RepoStatusBundle = {
+  entries: RepoStatusEntry[];
+  applyStatus: (
+    repoRoot: string,
+    updater: (status: GitStatusSnapshot) => GitStatusSnapshot,
+  ) => void;
+  refreshRepo: (repoRoot: string) => Promise<void>;
+  refreshAll: () => Promise<void>;
+};
+
+const NOOP_REPO_STATUSES: RepoStatusBundle = {
+  entries: [],
+  applyStatus: () => {},
+  refreshRepo: async () => {},
+  refreshAll: async () => {},
+};
+
 export function useSourceControlPanel(
   isOpen: boolean,
   summary: SourceControlSummary,
@@ -385,25 +331,8 @@ export function useSourceControlPanel(
       }) => void)
     | null,
   repos: GitRepoHead[] = [],
+  repoStatuses: RepoStatusBundle = NOOP_REPO_STATUSES,
 ): SourceControlPanelState {
-  const selectedModelId = useChatStore((state) => state.selectedModelId);
-  const agentStatus = useChatStore((state) => state.agentMeta.status);
-  const hasApiKeyForSelected = useChatStore((state) => {
-    const model = resolveModel(state.selectedModelId);
-    return !providerNeedsKey(model.provider) || !!state.apiKeys[model.provider];
-  });
-  const lmstudioModelId = usePreferencesStore((state) => state.lmstudioModelId);
-  const mlxModelId = usePreferencesStore((state) => state.mlxModelId);
-  const ollamaModelId = usePreferencesStore((state) => state.ollamaModelId);
-  const openaiCompatibleBaseURL = usePreferencesStore(
-    (state) => state.openaiCompatibleBaseURL,
-  );
-  const openaiCompatibleModelId = usePreferencesStore(
-    (state) => state.openaiCompatibleModelId,
-  );
-  const openrouterModelId = usePreferencesStore(
-    (state) => state.openrouterModelId,
-  );
   const [panelState, setPanelState] = useState<PanelState>("closed");
   const [repo, setRepo] = useState<GitRepoInfo | null>(null);
   const [status, setStatus] = useState<GitStatusSnapshot | null>(null);
@@ -419,8 +348,21 @@ export function useSourceControlPanel(
     | { scope: "all"; entries: SourceControlEntry[] }
     | null
   >(null);
+  const [amendEnabled, setAmendEnabled] = useState(false);
+  const [amendTargetSha, setAmendTargetSha] = useState<string | null>(null);
+  const [recentCommits, setRecentCommits] = useState<GitLogEntry[]>([]);
+  const [preCommitWarnings, setPreCommitWarnings] = useState<string[] | null>(
+    null,
+  );
+  const [pendingCommitAndPush, setPendingCommitAndPush] = useState(false);
+  const [rewordTarget, setRewordTarget] = useState<string | null>(null);
+  const [rewordOpen, setRewordOpen] = useState(false);
+  const [rewordMessage, setRewordMessage] = useState("");
   const selectedRef = useRef<DiffSelection | null>(null);
   const reconcileTimerRef = useRef(0);
+  const recentCommitsRequestRef = useRef(0);
+  const repoRootRef = useRef<string | null>(null);
+  const branchRef = useRef<string | null>(null);
 
   useEffect(() => {
     selectedRef.current = selected;
@@ -443,20 +385,16 @@ export function useSourceControlPanel(
   );
 
   // Every repo in the workspace, so the change list is not limited to whichever
-  // one the selector happens to point at. The active repo's snapshot comes from
-  // `summary`; the rest are fetched by useRepoStatuses.
+  // one the selector happens to point at. Statuses are owned by the multi-repo
+  // layer (useMultiRepoSourceControl) so the badge, the list and the explorer
+  // decorations all read the same numbers.
   const multiRepo = repos.length > 1;
   const {
     entries: repoStatusEntries,
     applyStatus: applyOtherStatus,
     refreshRepo: refreshOtherRepo,
     refreshAll: refreshOtherRepos,
-  } = useRepoStatuses(
-    repos,
-    multiRepo && isOpen,
-    repo?.repoRoot ?? null,
-    status,
-  );
+  } = repoStatuses;
 
   const activeRepoRoot = repo?.repoRoot ?? null;
 
@@ -523,57 +461,6 @@ export function useSourceControlPanel(
   // into the "nothing to commit" hint while other repos had changes waiting.
   const allClean = fileEntries.length === 0;
   const canPush = !!status?.upstream && status.behind === 0;
-  const selectedModel = resolveModel(selectedModelId);
-  const selectedModelSupportsTemperature = modelSupportsTemperature(
-    selectedModel.provider,
-    selectedModel.id,
-  );
-  const aiBusy = agentStatus !== "idle" && agentStatus !== "error";
-  const anyActionBusy = localActionBusy !== null || summary.busyAction !== null;
-  const aiUnavailableReason = useMemo(() => {
-    if (stagedEntries.length === 0) {
-      return "Stage changes to generate a commit message";
-    }
-    if (!hasApiKeyForSelected) {
-      return "Connect an AI provider to generate commit messages";
-    }
-    if (selectedModel.id === "lmstudio-local" && !lmstudioModelId.trim()) {
-      return "Connect an AI provider to generate commit messages";
-    }
-    if (selectedModel.id === "mlx-local" && !mlxModelId.trim()) {
-      return "Connect an AI provider to generate commit messages";
-    }
-    if (selectedModel.id === "ollama-local" && !ollamaModelId.trim()) {
-      return "Connect an AI provider to generate commit messages";
-    }
-    if (
-      selectedModel.id === "openai-compatible-custom" &&
-      (!openaiCompatibleBaseURL.trim() || !openaiCompatibleModelId.trim())
-    ) {
-      return "Connect an AI provider to generate commit messages";
-    }
-    if (selectedModel.id === "openrouter-custom" && !openrouterModelId.trim()) {
-      return "Connect an AI provider to generate commit messages";
-    }
-    return null;
-  }, [
-    hasApiKeyForSelected,
-    lmstudioModelId,
-    mlxModelId,
-    ollamaModelId,
-    openaiCompatibleBaseURL,
-    openaiCompatibleModelId,
-    openrouterModelId,
-    selectedModel,
-    stagedEntries.length,
-  ]);
-  const canGenerateCommitMessage =
-    stagedEntries.length > 0 && !anyActionBusy && !aiBusy && !!repo;
-  const generateCommitMessageHint = aiUnavailableReason
-    ? aiUnavailableReason
-    : aiBusy
-      ? "Wait for the current AI action to finish"
-      : "Generate commit message";
   const pushHint = useMemo(() => {
     if (!status) return null;
     if (!status.upstream) {
@@ -649,6 +536,12 @@ export function useSourceControlPanel(
       setSelected(null);
       setPanelState("no-repo");
       setSelectionTransition("none");
+      if (repoRootRef.current !== null) {
+        repoRootRef.current = null;
+        branchRef.current = null;
+        setAmendTargetSha(null);
+        setRewordTarget(null);
+      }
       return;
     }
     if (summary.localError && !summary.status) {
@@ -669,6 +562,17 @@ export function useSourceControlPanel(
     setRepo(summary.repo);
     setStatus(summary.status);
     setPanelState("ready");
+
+    if (repoRootRef.current !== summary.repo.repoRoot) {
+      repoRootRef.current = summary.repo.repoRoot;
+      setAmendTargetSha(null);
+      setRewordTarget(null);
+    }
+    if (branchRef.current !== summary.status.branch) {
+      branchRef.current = summary.status.branch;
+      setAmendTargetSha(null);
+      setRewordTarget(null);
+    }
 
     const current = selectedRef.current;
     const exists =
@@ -984,137 +888,204 @@ export function useSourceControlPanel(
     [repo, summary.busyAction],
   );
 
-  const generateCommitMessage = useCallback(async () => {
-    if (!repo || stagedEntries.length === 0) return;
-    if (aiBusy) {
-      setActionError("Wait for the current AI action to finish");
-      return;
-    }
-    if (aiUnavailableReason) {
-      setActionError(aiUnavailableReason);
-      return;
-    }
-    setLocalActionBusy("generate-message");
-    setActionMessage(null);
+  const runCommit = useCallback(
+    async (andPush: boolean, skipChecks: boolean) => {
+      if (summary.busyAction) return;
+
+      const targetSha = amendEnabled ? (amendTargetSha ?? "") : "";
+      const specificAmend = targetSha !== "";
+      // Repos with nothing staged are skipped rather than erroring: "commit
+      // everything I checked" should not fail because some group is untouched.
+      const targets = specificAmend
+        ? repo
+          ? [{ repoRoot: repo.repoRoot, name: repoDisplayName(repo.repoRoot) }]
+          : []
+        : multiRepo
+          ? repoGroups
+              .filter((g) => g.files.some((f) => f.staged))
+              .map((g) => ({ repoRoot: g.repoRoot, name: g.name }))
+          : repo
+            ? [
+                {
+                  repoRoot: repo.repoRoot,
+                  name: repoDisplayName(repo.repoRoot),
+                },
+              ]
+            : [];
+      if (targets.length === 0) return;
+
+      if (!skipChecks) {
+        try {
+          const checks = await Promise.all(
+            targets.map((target) => native.gitPreCommitChecks(target.repoRoot)),
+          );
+          const warnings = [
+            ...new Set(
+              checks.flatMap((check, index) =>
+                multiRepo
+                  ? check.warnings.map(
+                      (warning) => `${targets[index].name}: ${warning}`,
+                    )
+                  : check.warnings,
+              ),
+            ),
+          ];
+          if (warnings.length > 0) {
+            setPendingCommitAndPush(andPush);
+            setPreCommitWarnings(warnings);
+            return;
+          }
+        } catch {
+          // Pre-commit check tooling missing: the commit proceeds unchanged.
+        }
+      }
+
+      setLocalActionBusy(andPush ? "commit-and-push" : "commit");
+      setActionMessage(null);
+      setActionError(null);
+      setRewordTarget(null);
+      const done: string[] = [];
+      const failed: { name: string; error: string }[] = [];
+      try {
+        // Amend reuses the previous message when the box is empty, mirroring
+        // `git commit --amend --no-edit`.
+        let effectiveMessage = commitMessage.trim();
+        if (!effectiveMessage && amendEnabled) {
+          if (specificAmend) {
+            effectiveMessage =
+              recentCommits.find((c) => c.sha === targetSha)?.subject ?? "";
+          } else {
+            const log = await native.gitLog(targets[0].repoRoot, { limit: 1 });
+            effectiveMessage = log[0]?.subject ?? "";
+          }
+        }
+        // Sequential: a shared commit message still means N independent commits,
+        // and stopping mid-way has to leave a legible record of how far it got.
+        for (const target of targets) {
+          try {
+            const result: GitCommitResult = specificAmend
+              ? await native.gitAmendSpecificCommit(
+                  target.repoRoot,
+                  targetSha,
+                  effectiveMessage,
+                )
+              : await native.gitCommitAdvanced(
+                  target.repoRoot,
+                  effectiveMessage,
+                  {
+                    amend: amendEnabled,
+                  },
+                );
+            invalidateRepoDiffs(target.repoRoot);
+            done.push(`${target.name} ${result.commitSha.slice(0, 7)}`);
+          } catch (error) {
+            failed.push({ name: target.name, error: normalizeError(error) });
+          }
+        }
+        let pushError: string | null = null;
+        if (andPush && failed.length === 0) {
+          const pushResult = await summary.runRemoteAction("push");
+          if (!pushResult.ok && pushResult.error) pushError = pushResult.error;
+        }
+        if (failed.length === 0) {
+          setCommitMessage("");
+          if (!multiRepo && targets.length === 1) {
+            setRewordTarget(targets[0].repoRoot);
+          }
+        }
+        if (done.length > 0) {
+          const base =
+            targets.length === 1
+              ? `Committed ${done[0]}`
+              : `Committed ${done.length}/${targets.length} repos: ${done.join(", ")}`;
+          const message = amendEnabled
+            ? specificAmend
+              ? `${base} (merged into ${targetSha.slice(0, 7)})`
+              : `${base} (merged into recent commit)`
+            : base;
+          setActionMessage(
+            andPush && !pushError
+              ? `${message} and pushed${
+                  summary.status?.upstream
+                    ? ` to ${summary.status.upstream}`
+                    : ""
+                }`
+              : message,
+          );
+        }
+        if (failed.length > 0) {
+          setActionError(failed.map((f) => `${f.name}: ${f.error}`).join("; "));
+        }
+        if (pushError) setActionError(pushError);
+        await summary.refresh({ remote: "never" });
+        if (multiRepo) await refreshOtherRepos();
+      } finally {
+        setLocalActionBusy(null);
+      }
+    },
+    [
+      amendEnabled,
+      amendTargetSha,
+      commitMessage,
+      multiRepo,
+      recentCommits,
+      refreshOtherRepos,
+      repo,
+      repoGroups,
+      summary,
+    ],
+  );
+
+  const commit = useCallback(async () => {
+    await runCommit(false, false);
+  }, [runCommit]);
+
+  const commitAndPush = useCallback(async () => {
+    await runCommit(true, false);
+  }, [runCommit]);
+
+  const confirmPreCommitWarnings = useCallback(async () => {
+    setPreCommitWarnings(null);
+    await runCommit(pendingCommitAndPush, true);
+  }, [pendingCommitAndPush, runCommit]);
+
+  const cancelPreCommitWarnings = useCallback(() => {
+    setPreCommitWarnings(null);
+    setPendingCommitAndPush(false);
+  }, []);
+
+  const openReword = useCallback(() => {
+    if (!rewordTarget || summary.busyAction) return;
+    setRewordMessage("");
+    setActionError(null);
+    setRewordOpen(true);
+  }, [rewordTarget, summary.busyAction]);
+
+  const cancelReword = useCallback(() => {
+    setRewordOpen(false);
+    setRewordMessage("");
+  }, []);
+
+  const confirmReword = useCallback(async () => {
+    if (!rewordTarget || summary.busyAction) return;
+    const message = rewordMessage.trim();
+    if (!message) return;
+    setLocalActionBusy("reword");
     setActionError(null);
     try {
-      const [{ buildConfiguredLanguageModel }, { generateText }, diff] =
-        await Promise.all([
-          import("@/modules/ai/lib/agent"),
-          import("ai"),
-          native.gitDiff(repo.repoRoot, null, true),
-        ]);
-      const { text: diffText, truncated } = truncateDiff(diff.diffText);
-      const chatState = useChatStore.getState();
-      const prefs = usePreferencesStore.getState();
-      const model = await buildConfiguredLanguageModel(
-        selectedModelId,
-        chatState.apiKeys,
-        {
-          lmstudioBaseURL: prefs.lmstudioBaseURL,
-          lmstudioModelId,
-          mlxBaseURL: prefs.mlxBaseURL,
-          mlxModelId,
-          ollamaBaseURL: prefs.ollamaBaseURL,
-          ollamaModelId,
-          openaiCompatibleBaseURL,
-          openaiCompatibleModelId,
-          openrouterModelId,
-        },
-      );
-      const result = await generateText({
-        model,
-        system: COMMIT_MESSAGE_SYSTEM_PROMPT,
-        prompt: buildCommitMessagePrompt(stagedEntries, diffText, truncated),
-        maxOutputTokens: COMMIT_MESSAGE_MAX_OUTPUT_TOKENS,
-        ...(selectedModelSupportsTemperature ? { temperature: 0.2 } : {}),
-      });
-      let message = cleanCommitMessage(result.text);
-      if (!isValidCommitMessage(message)) {
-        const repair = await generateText({
-          model,
-          system: COMMIT_MESSAGE_SYSTEM_PROMPT,
-          prompt: buildRepairCommitMessagePrompt(message, stagedEntries),
-          maxOutputTokens: COMMIT_MESSAGE_MAX_OUTPUT_TOKENS,
-          ...(selectedModelSupportsTemperature ? { temperature: 0 } : {}),
-        });
-        message = cleanCommitMessage(repair.text);
-      }
-      if (!isValidCommitMessage(message)) {
-        throw new Error(
-          "AI returned an invalid commit message. Try again or switch models.",
-        );
-      }
-      setCommitMessage(message);
-      setActionMessage(null);
+      await native.gitCommitReword(rewordTarget, message);
+      invalidateRepoDiffs(rewordTarget);
+      setRewordOpen(false);
+      setRewordMessage("");
+      setActionMessage("Reworded the commit message");
+      await summary.refresh({ remote: "never" });
+      if (multiRepo) await refreshOtherRepos();
     } catch (error) {
       setActionError(normalizeError(error));
     } finally {
       setLocalActionBusy(null);
     }
-  }, [
-    aiUnavailableReason,
-    aiBusy,
-    lmstudioModelId,
-    mlxModelId,
-    ollamaModelId,
-    openaiCompatibleBaseURL,
-    openaiCompatibleModelId,
-    openrouterModelId,
-    repo,
-    selectedModelId,
-    selectedModelSupportsTemperature,
-    stagedEntries,
-  ]);
-
-  const commit = useCallback(async () => {
-    if (summary.busyAction) return;
-
-    // Repos with nothing staged are skipped rather than erroring: "commit
-    // everything I checked" should not fail because some group is untouched.
-    const targets = multiRepo
-      ? repoGroups
-          .filter((g) => g.files.some((f) => f.staged))
-          .map((g) => ({ repoRoot: g.repoRoot, name: g.name }))
-      : repo
-        ? [{ repoRoot: repo.repoRoot, name: repoDisplayName(repo.repoRoot) }]
-        : [];
-    if (targets.length === 0) return;
-
-    setLocalActionBusy("commit");
-    setActionMessage(null);
-    setActionError(null);
-    const done: string[] = [];
-    const failed: { name: string; error: string }[] = [];
-    try {
-      // Sequential: a shared commit message still means N independent commits,
-      // and stopping mid-way has to leave a legible record of how far it got.
-      for (const target of targets) {
-        try {
-          const result = await native.gitCommit(target.repoRoot, commitMessage);
-          invalidateRepoDiffs(target.repoRoot);
-          done.push(`${target.name} ${result.commitSha.slice(0, 7)}`);
-        } catch (error) {
-          failed.push({ name: target.name, error: normalizeError(error) });
-        }
-      }
-      if (failed.length === 0) setCommitMessage("");
-      if (done.length > 0) {
-        setActionMessage(
-          targets.length === 1
-            ? `Committed ${done[0]}`
-            : `Committed ${done.length}/${targets.length} repos: ${done.join(", ")}`,
-        );
-      }
-      if (failed.length > 0) {
-        setActionError(failed.map((f) => `${f.name}: ${f.error}`).join("; "));
-      }
-      await summary.refresh({ remote: "never" });
-      if (multiRepo) await refreshOtherRepos();
-    } finally {
-      setLocalActionBusy(null);
-    }
-  }, [commitMessage, multiRepo, refreshOtherRepos, repo, repoGroups, summary]);
+  }, [multiRepo, refreshOtherRepos, rewordMessage, rewordTarget, summary]);
 
   const push = useCallback(async () => {
     if (!repo) return;
@@ -1131,6 +1102,25 @@ export function useSourceControlPanel(
       setActionError(result.error);
     }
   }, [repo, status?.upstream, summary]);
+
+  const refreshRecentCommits = useCallback(async () => {
+    if (!repo) {
+      setRecentCommits([]);
+      return;
+    }
+    const id = ++recentCommitsRequestRef.current;
+    try {
+      const log = await native.gitLog(repo.repoRoot, { limit: 30 });
+      if (id !== recentCommitsRequestRef.current) return;
+      setRecentCommits(log);
+    } catch {
+      if (id === recentCommitsRequestRef.current) setRecentCommits([]);
+    }
+  }, [repo]);
+
+  useEffect(() => {
+    if (amendEnabled) void refreshRecentCommits();
+  }, [amendEnabled, refreshRecentCommits]);
 
   const pendingDiscardView = useMemo<PendingDiscard | null>(() => {
     if (!pendingDiscard) return null;
@@ -1169,13 +1159,29 @@ export function useSourceControlPanel(
     allClean,
     canPush,
     pushHint,
-    canGenerateCommitMessage,
-    generateCommitMessageHint,
     selectionTransition,
     stagedEmptyText,
     unstagedEmptyText,
     pendingDiscard: pendingDiscardView,
     setCommitMessage,
+    amendEnabled,
+    setAmendEnabled,
+    amendTargetSha,
+    setAmendTargetSha,
+    recentCommits,
+    refreshRecentCommits,
+    amendSpecificSupported: !multiRepo,
+    commitAndPush,
+    preCommitWarnings,
+    confirmPreCommitWarnings,
+    cancelPreCommitWarnings,
+    rewordTarget,
+    rewordOpen,
+    rewordMessage,
+    setRewordMessage,
+    openReword,
+    cancelReword,
+    confirmReword,
     refresh,
     selectEntry,
     selectFile,
@@ -1190,7 +1196,6 @@ export function useSourceControlPanel(
     cancelPendingDiscard,
     stageAllEntries,
     unstageAllEntries,
-    generateCommitMessage,
     commit,
     push,
   };

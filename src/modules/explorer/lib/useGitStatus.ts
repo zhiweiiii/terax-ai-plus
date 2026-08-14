@@ -1,21 +1,25 @@
-import { native, type GitStatusSnapshot } from "@/modules/ai/lib/native";
+import { native, type GitStatusSnapshot } from "@/lib/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   bubbleUpDirectoryStatuses,
   buildGitStatusMap,
+  containingRepoRoot,
   lookupGitStatus,
   normalizePath,
   type GitStatusCode,
 } from "./gitStatusUtils";
 
-const EMPTY = new Map<string, GitStatusCode>();
+function rootsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
 
-// Decorations ride the always-resident SC snapshot: no fetch, no watcher. When
-// the shared status does not cover the explorer root, nothing is shown rather
-// than triggering git work of our own.
+// Decorations ride the always-resident SC snapshots: no fetch, no watcher. When
+// no status covers the explorer root, nothing is shown rather than triggering
+// git work of our own. Accepts one snapshot per repo so a multi-repo workspace
+// decorates every file by whichever repo contains it.
 export function useGitStatus(
   workspaceRoot: string | null,
-  status: GitStatusSnapshot | null | undefined,
+  statuses: GitStatusSnapshot[] | null | undefined,
   enabled: boolean,
 ) {
   const [canonicalRoot, setCanonicalRoot] = useState<string | null>(null);
@@ -50,34 +54,37 @@ export function useGitStatus(
     return out;
   }, [workspaceRoot, canonicalRoot]);
 
-  // The explorer root and the snapshot's repo overlap in either nesting
-  // direction; lookups still return null for paths outside the repo.
-  const repoRoot0 = status ? normalizePath(status.repoRoot) : null;
-  const covers =
-    enabled &&
-    !!status &&
-    !!repoRoot0 &&
-    aliases.some((a) => {
-      const t = normalizePath(a);
-      return (
-        t === repoRoot0 ||
-        t.startsWith(`${repoRoot0}/`) ||
-        repoRoot0.startsWith(`${t}/`)
-      );
-    });
-
-  const map = useMemo(() => {
-    if (!covers || !status) return EMPTY;
-    const m = buildGitStatusMap(status);
-    bubbleUpDirectoryStatuses(m);
-    return m;
-  }, [covers, status]);
-  const repoRoot = covers && status ? status.repoRoot : null;
+  // Keep the snapshots whose repo overlaps the explorer root in either nesting
+  // direction; lookups still return null for paths outside their repo.
+  const repos = useMemo(() => {
+    if (!enabled || !statuses || statuses.length === 0) return [];
+    const out: { root: string; map: Map<string, GitStatusCode> }[] = [];
+    for (const status of statuses) {
+      if (!status?.repoRoot) continue;
+      const root = normalizePath(status.repoRoot);
+      const covered = aliases.some((a) => rootsOverlap(normalizePath(a), root));
+      if (!covered) continue;
+      const map = buildGitStatusMap(status);
+      bubbleUpDirectoryStatuses(map);
+      out.push({ root, map });
+    }
+    return out;
+  }, [enabled, statuses, aliases]);
 
   const lookup = useCallback(
-    (path: string): GitStatusCode | null =>
-      repoRoot ? lookupGitStatus(map, repoRoot, path, aliases) : null,
-    [repoRoot, map, aliases],
+    (path: string): GitStatusCode | null => {
+      if (repos.length === 0) return null;
+      const abs = normalizePath(path);
+      // Deepest containing repo wins: its snapshot is the one the path belongs
+      // to when several repos sit under one workspace.
+      const root = containingRepoRoot(
+        repos.map((r) => r.root),
+        abs,
+      );
+      const repo = root ? repos.find((r) => r.root === root) : null;
+      return repo ? lookupGitStatus(repo.map, repo.root, path, aliases) : null;
+    },
+    [repos, aliases],
   );
 
   return { lookup };

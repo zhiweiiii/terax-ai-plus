@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { GitLogEntry } from "@/modules/ai/lib/native";
-import { LANE_COLORS, laneColor, layoutGraph } from "./graph";
+import type { GitLogEntry } from "@/lib/native";
+import {
+  applyFirstParent,
+  LANE_COLORS,
+  laneColor,
+  layoutGraph,
+} from "./graph";
 
 function commit(sha: string, parents: string[]): GitLogEntry {
   return { sha, parents } as unknown as GitLogEntry;
@@ -106,5 +111,92 @@ describe("layoutGraph", () => {
       );
       expect(paged).toEqual(whole);
     }
+  });
+
+  it("places a parentless root on a fresh lane with no incoming edge", () => {
+    const { rows, state } = layoutGraph([commit("A", [])]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].lane).toBe(0);
+    expect(rows[0].topEdges).toEqual([]);
+    expect(rows[0].bottomEdges).toEqual([]);
+    expect(rows[0].laneCount).toBe(1);
+    expect(state.lanes).toEqual([]);
+  });
+
+  it("fans out a third lane for a three-parent merge", () => {
+    const { rows } = layoutGraph([
+      commit("M", ["A", "B", "C"]),
+      commit("A", []),
+      commit("B", []),
+      commit("C", []),
+    ]);
+    expect(rows.map((r) => `${r.sha}:${r.lane}`)).toEqual([
+      "M:0",
+      "A:0",
+      "B:1",
+      "C:2",
+    ]);
+    const branches = (
+      rows.find((r) => r.sha === "M")?.bottomEdges ?? []
+    ).filter((edge) => edge.kind === "branch");
+    expect(branches).toHaveLength(2);
+    expect(branches.map((e) => (e as { toLane: number }).toLane)).toEqual([
+      1, 2,
+    ]);
+  });
+
+  it("lets a merge row carry both straight and branch bottom edges", () => {
+    const { rows } = layoutGraph([
+      commit("M", ["A", "B"]),
+      commit("A", ["P"]),
+      commit("B", ["P"]),
+      commit("P", []),
+    ]);
+    const kinds = (
+      rows.find((r) => r.sha === "M")?.bottomEdges ?? []
+    )
+      .map((e) => e.kind)
+      .sort();
+    expect(kinds).toEqual(["branch", "straight"]);
+  });
+});
+
+describe("applyFirstParent", () => {
+  it("returns an empty array for no input", () => {
+    expect(applyFirstParent([])).toEqual([]);
+  });
+
+  it("keeps commits with 0 or 1 parents unchanged by reference", () => {
+    const linear = [commit("c", ["b"]), commit("b", [])];
+    expect(applyFirstParent(linear)).toEqual(linear);
+    expect(applyFirstParent(linear)[0]).toBe(linear[0]);
+  });
+
+  it("truncates merge commits to their first parent", () => {
+    const merge = commit("m", ["main", "feature"]);
+    expect(applyFirstParent([merge])[0].parents).toEqual(["main"]);
+  });
+
+  it("does not mutate the input commits", () => {
+    const input = [commit("m", ["main", "feature"])];
+    applyFirstParent(input);
+    expect(input[0].parents).toEqual(["main", "feature"]);
+  });
+
+  it("stops merge commits from fanning out a second lane", () => {
+    const log = [
+      commit("E", ["D"]),
+      commit("D", ["C", "B"]),
+      commit("C", ["A"]),
+      commit("B", ["A"]),
+      commit("A", []),
+    ];
+    const { rows } = layoutGraph(applyFirstParent(log));
+    const mergeRow = rows.find((r) => r.sha === "D");
+    expect(
+      mergeRow?.bottomEdges.some(
+        (edge) => edge.kind === "branch",
+      ),
+    ).toBe(false);
   });
 });

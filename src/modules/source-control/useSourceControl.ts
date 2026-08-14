@@ -2,7 +2,7 @@ import {
   type GitRepoInfo,
   type GitStatusSnapshot,
   native,
-} from "@/modules/ai/lib/native";
+} from "@/lib/native";
 import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";

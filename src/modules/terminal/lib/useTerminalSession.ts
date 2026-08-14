@@ -1,7 +1,6 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { invoke } from "@tauri-apps/api/core";
-import type { SearchAddon } from "@xterm/addon-search";
 import {
   useCallback,
   useEffect,
@@ -53,7 +52,6 @@ import {
 import { useTerminalFont } from "./useTerminalFont";
 
 type Callbacks = {
-  onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
 };
@@ -74,7 +72,6 @@ type Session = {
   rows: number;
   container: HTMLDivElement | null;
   snapshot: string | null;
-  searchQuery: string | null;
   dormantRing: DormantRing;
   pendingInput: string;
   hasSlot: boolean;
@@ -482,7 +479,6 @@ function ensureSession(
     rows: 0,
     container: null,
     snapshot: null,
-    searchQuery: null,
     dormantRing: new DormantRing(),
     pendingInput: "",
     hasSlot: false,
@@ -655,7 +651,6 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     drainRing: (write) => s.dormantRing.drain(write),
     // Keep stdin alive on a parked pane so Enter can trigger the retry.
     shellExited: s.shellExited && !s.awaitingRestart,
-    searchQuery: s.searchQuery,
     cols: s.cols,
     rows: s.rows,
     registerOsc: (term) => {
@@ -709,7 +704,6 @@ function bindLeafToSlot(leafId: number, s: Session): void {
       const osc52 = registerOsc52ClipboardHandler(term);
       return [prompt.dispose, cwd, osc52];
     },
-    onSearchReady: (addon) => s.callbacks.onSearchReady?.(addon),
   });
   s.snapshot = null;
   s.hasSlot = true;
@@ -875,7 +869,6 @@ type Options = {
   focused?: boolean;
   initialCwd?: string;
   blocks?: boolean;
-  onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
 };
@@ -887,12 +880,11 @@ export function useTerminalSession({
   focused = true,
   initialCwd,
   blocks = false,
-  onSearchReady,
   onExit,
   onCwd,
 }: Options) {
-  const cbRef = useRef({ onSearchReady, onExit, onCwd });
-  cbRef.current = { onSearchReady, onExit, onCwd };
+  const cbRef = useRef({ onExit, onCwd });
+  cbRef.current = { onExit, onCwd };
 
   // initialCwd seeds the first PTY spawn only. It must NOT be an effect dep:
   // OSC 7 updates the leaf cwd on every `cd`, and re-running the bind effect
@@ -908,7 +900,6 @@ export function useTerminalSession({
       const node = container.current;
       if (!node) return;
       attachSession(leafId, node, {
-        onSearchReady: (a) => cbRef.current.onSearchReady?.(a),
         onExit: (c) => cbRef.current.onExit?.(c),
         onCwd: (c) => cbRef.current.onCwd?.(c),
       });

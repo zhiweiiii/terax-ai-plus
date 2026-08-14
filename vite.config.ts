@@ -153,7 +153,9 @@ export default defineConfig(async ({ mode }): Promise<UserConfig> => ({
         }
       : undefined,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      // rebased/ is a 900MB+ analysis snapshot; watching it hangs the
+      // watcher and stalls the dev server before the first HTTP request.
+      ignored: ["**/src-tauri/**", "**/rebased/**"],
     },
   },
 }));

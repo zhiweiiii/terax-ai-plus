@@ -17,7 +17,6 @@ import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { ThemePref } from "@/modules/settings/store";
 import {
-  setAgentNotifications,
   setAutostart,
   setDefaultWorkspaceEnv,
   setExplorerGitDecorations,
@@ -104,7 +103,6 @@ export function GeneralSection() {
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
-  const agentNotifications = usePreferencesStore((s) => s.agentNotifications);
 
   useEffect(() => {
     let alive = true;
@@ -454,19 +452,6 @@ export function GeneralSection() {
               ))}
             </SelectContent>
           </Select>
-        </SettingRow>
-      </div>
-
-      <div className="flex flex-col gap-2">
-        <Label>智能体</Label>
-        <SettingRow
-          title="编码智能体通知"
-          description="当终端中运行的 Claude Code 或 Codex 需要你输入或已完成时提醒。Terax 未聚焦时发送桌面通知，否则在应用内提示。"
-        >
-          <Switch
-            checked={agentNotifications}
-            onCheckedChange={(v) => void setAgentNotifications(v)}
-          />
         </SettingRow>
       </div>
 

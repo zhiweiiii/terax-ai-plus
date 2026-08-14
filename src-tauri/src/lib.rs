@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{agent, control, fs, git, history, lsp, net, pty, secrets, shell, workspace};
+use modules::{control, fs, git, history, lsp, pty, shell, workspace};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -229,21 +229,6 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(windows)]
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if args.get(1).map(String::as_str) == Some("__terax_notify") {
-            if let (Some(agent), Some(event)) = (args.get(2), args.get(3)) {
-                agent::emit_conout_marker(agent, event);
-            }
-            use std::io::Write;
-            let mut out = std::io::stdout();
-            let _ = out.write_all(b"{}");
-            let _ = out.flush();
-            std::process::exit(0);
-        }
-    }
-
     let (launch, launch_command) = parse_launch_target();
     let cli_dir = launch.dir.clone();
     workspace::init_launch_cwd(cli_dir.as_deref());
@@ -298,8 +283,6 @@ pub fn run() {
         })
         .manage(pty::PtyState::default())
         .manage(control_state)
-        .manage(shell::ShellState::default())
-        .manage(secrets::SecretsState::default())
         .manage(fs::watch::FsWatchState::default())
         .manage(history::HistoryState::default())
         .manage(lsp::LspState::default())
@@ -347,10 +330,7 @@ pub fn run() {
             lsp::lsp_send,
             lsp::lsp_kill,
             fs::search::fs_search,
-            fs::search::fs_list_files,
-            fs::grep::fs_grep,
             fs::grep::fs_grep_interactive,
-            fs::grep::fs_glob,
             git::commands::git_resolve_repo,
             git::commands::git_panel_snapshot,
             git::commands::git_status,
@@ -364,6 +344,7 @@ pub fn run() {
             git::commands::git_pull_ff_only,
             git::commands::git_push,
             git::commands::git_log,
+            git::commands::git_log_file,
             git::commands::git_show_commit,
             git::commands::git_commit_files,
             git::commands::git_commit_file_diff,
@@ -373,14 +354,41 @@ pub fn run() {
             git::commands::git_scan_repos,
             git::commands::git_workspace_snapshot,
             git::commands::git_fetch_all,
+            git::commands::git_commit_advanced,
+            git::commands::git_amend_specific_commit,
+            git::commands::git_commit_reword,
+            git::commands::git_pre_commit_checks,
+            git::commands::git_config_user,
+            git::commands::git_create_branch,
+            git::commands::git_rename_branch,
+            git::commands::git_delete_branch,
+            git::commands::git_merge,
+            git::commands::git_rebase,
+            git::commands::git_tag_create,
+            git::commands::git_diff_with_ref,
+            git::commands::git_compare_branches,
+            git::commands::git_pull_advanced,
+            git::commands::git_push_advanced,
+            git::commands::git_push_up_to_commit,
+            git::commands::git_remote_list,
+            git::commands::git_remote_add,
+            git::commands::git_remote_remove,
+            git::commands::git_remote_set_url,
+            git::commands::git_clone,
+            git::commands::git_fetch_unshallow,
+            git::commands::git_log_filtered,
+            git::commands::git_reset,
+            git::commands::git_revert_commit,
+            git::commands::git_cherry_pick,
+            git::commands::git_reword_commit,
+            git::commands::git_fixup_commit,
+            git::commands::git_squash_commit,
+            git::commands::git_drop_commit,
+            git::commands::git_diff_range,
+            git::commands::git_diff_commit_vs_worktree,
+            git::commands::git_create_patch,
+            git::commands::git_branches_containing,
             shell::shell_run_command,
-            shell::shell_session_open,
-            shell::shell_session_run,
-            shell::shell_session_close,
-            shell::shell_bg_spawn,
-            shell::shell_bg_logs,
-            shell::shell_bg_kill,
-            shell::shell_bg_list,
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,
@@ -392,15 +400,6 @@ pub fn run() {
             get_launch_files,
             get_launch_command,
             open_settings_window,
-            agent::agent_enable_hooks,
-            agent::agent_hooks_status,
-            secrets::secrets_get,
-            secrets::secrets_set,
-            secrets::secrets_delete,
-            secrets::secrets_get_all,
-            net::lm_ping,
-            net::ai_http_request,
-            net::ai_http_stream,
             history::history_suggest,
             history::history_commands,
             history::history_record,

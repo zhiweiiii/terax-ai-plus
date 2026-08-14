@@ -39,44 +39,47 @@ describe("capEditorTabs", () => {
   it("closes the oldest editor tabs first, oldest = earliest in tab order", () => {
     const tabs: Tab[] = [
       terminal,
-      ...[1, 2, 3, 4, 5, 6, 7].map((i) => editor(i)),
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((i) => editor(i)),
     ];
-    const next = capEditorTabs(tabs, "one", [7]);
-    expect(ids(next)).toEqual([100, 3, 4, 5, 6, 7]);
+    const next = capEditorTabs(tabs, "one", [12]);
+    expect(ids(next)).toEqual([100, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 
   it("never closes tabs named in keepIds", () => {
-    const tabs: Tab[] = [terminal, ...[1, 2, 3, 4, 5, 6].map((i) => editor(i))];
+    const tabs: Tab[] = [
+      terminal,
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((i) => editor(i)),
+    ];
     // 1 is the oldest but is being kept, so 2 goes instead.
-    const next = capEditorTabs(tabs, "one", [6, 1]);
-    expect(ids(next)).toEqual([100, 1, 3, 4, 5, 6]);
+    const next = capEditorTabs(tabs, "one", [11, 1]);
+    expect(ids(next)).toEqual([100, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   });
 
   it("never closes a tab with unsaved edits, even past the cap", () => {
     const tabs: Tab[] = [
       editor(1, "one", true),
       editor(2, "one", true),
-      ...[3, 4, 5, 6, 7].map((i) => editor(i)),
+      ...[3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((i) => editor(i)),
     ];
-    const next = capEditorTabs(tabs, "one", [7]);
+    const next = capEditorTabs(tabs, "one", [12]);
     // Two over: the dirty pair is skipped and the budget falls on 3 and 4.
-    expect(ids(next)).toEqual([1, 2, 5, 6, 7]);
+    expect(ids(next)).toEqual([1, 2, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 
   it("keeps every tab when the whole overflow is dirty", () => {
-    const tabs: Tab[] = [1, 2, 3, 4, 5, 6].map((i) =>
-      editor(i, "one", i !== 6),
+    const tabs: Tab[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((i) =>
+      editor(i, "one", i !== 11),
     );
-    expect(capEditorTabs(tabs, "one", [6])).toBe(tabs);
+    expect(capEditorTabs(tabs, "one", [11])).toBe(tabs);
   });
 
   it("counts and evicts only within the target space", () => {
     const tabs: Tab[] = [
       ...[1, 2, 3, 4].map((i) => editor(i, "other")),
-      ...[5, 6, 7, 8, 9, 10].map((i) => editor(i, "one")),
+      ...[5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((i) => editor(i, "one")),
     ];
-    const next = capEditorTabs(tabs, "one", [10]);
-    expect(ids(next)).toEqual([1, 2, 3, 4, 6, 7, 8, 9, 10]);
+    const next = capEditorTabs(tabs, "one", [15]);
+    expect(ids(next)).toEqual([1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
   });
 
   it("ignores non-editor tabs when counting", () => {

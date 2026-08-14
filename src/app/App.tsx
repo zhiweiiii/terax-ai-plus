@@ -11,28 +11,9 @@ import {
   getLaunchDir,
 } from "@/lib/launchDir";
 import { quoteShellArg } from "@/lib/shellQuote";
-import { usePresence } from "@/lib/usePresence";
 import { useZoom } from "@/lib/useZoom";
 import { isMarkdownPath } from "@/lib/utils";
-import {
-  type AgentLaunchRequest,
-  AgentNotificationsBridge,
-  findAgentLauncher,
-  nextAttentionTarget,
-  validateAgentLaunchCommand,
-} from "@/modules/agents";
-import {
-  AgentRunBridge,
-  AiMiniWindow,
-  LocalAgentNotificationsBridge,
-  SelectionAskAi,
-  useAiBootstrap,
-  useAiLiveBridge,
-  useChatStore,
-  useSelectionAskAi,
-} from "@/modules/ai";
-import { AiComposerProvider } from "@/modules/ai/lib/composer";
-import { native } from "@/modules/ai/lib/native";
+import { native } from "@/lib/native";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import { useControlBridge } from "@/modules/control";
 import {
@@ -42,14 +23,11 @@ import {
   useEditorFileSync,
 } from "@/modules/editor";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
-import type { GitHistorySearchHandle } from "@/modules/git-history";
 import {
   Header,
   type SearchInlineHandle,
-  type SearchTarget,
 } from "@/modules/header";
 import { setLspNavigator } from "@/modules/lsp";
-import type { MarkdownPreviewHandle } from "@/modules/markdown";
 import type { PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -67,11 +45,14 @@ import {
   useSidebarPanel,
 } from "@/modules/sidebar";
 import {
+  CloneRepositoryDialog,
+  RemoteManagerDialog,
   RepoBranchSelector,
   SourceControlPanel,
   useRepositoryTargeting,
   useSourceControlContext,
 } from "@/modules/source-control";
+import { FileHistoryDialog } from "@/modules/git-history";
 import {
   GroupSwitcher,
   useSpacePersistence,
@@ -111,10 +92,8 @@ import {
   type WorkspaceEnv,
   workspaceScopeKey,
 } from "@/modules/workspace";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { SearchAddon } from "@xterm/addon-search";
 import {
   useCallback,
   useEffect,
@@ -148,6 +127,7 @@ function HeaderTabs({
       label: "版本",
       badge: sourceControlChanged,
     },
+    { id: "open-files", label: "窗口" },
   ];
   return (
     <>
@@ -191,8 +171,7 @@ export default function App() {
     setActiveSpaceForNewTabs,
     newTab,
     newBlockTab,
-    newAgentTab,
-    newAgentGroupTab,
+    newCommandTab,
     newPrivateTab,
     openFileTab,
     pinTab,
@@ -200,8 +179,6 @@ export default function App() {
     newMarkdownTab,
     setMarkdownView,
     setOverrideLanguage,
-    openAiDiffTab,
-    closeAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,
     openCommitFileDiffTab,
@@ -229,20 +206,10 @@ export default function App() {
   }, [tabs, activeId]);
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
 
-  const searchAddons = useRef<Map<number, SearchAddon>>(new Map());
-  const [activeSearchAddon, setActiveSearchAddon] =
-    useState<SearchAddon | null>(null);
   const searchInlineRef = useRef<SearchInlineHandle | null>(null);
   const terminalRefs = useRef<Map<number, TerminalPaneHandle>>(new Map());
   const editorRefs = useRef<Map<number, EditorPaneHandle>>(new Map());
-  const markdownRefs = useRef<Map<number, MarkdownPreviewHandle>>(new Map());
-  const [activeMarkdownHandle, setActiveMarkdownHandle] =
-    useState<MarkdownPreviewHandle | null>(null);
   const previewRefs = useRef<Map<number, PreviewPaneHandle>>(new Map());
-  const [activeEditorHandle, setActiveEditorHandle] =
-    useState<EditorPaneHandle | null>(null);
-  const [gitHistoryHandle, setGitHistoryHandle] =
-    useState<GitHistorySearchHandle | null>(null);
   const { zoomIn, zoomOut, zoomReset } = useZoom();
   useApplyEditorFontSize();
   const terminalPathDropTarget = useTerminalFileDrop();
@@ -254,12 +221,9 @@ export default function App() {
 
   const clearWorkspaceState = useCallback(() => {
     for (const id of liveLeavesRef.current) disposeSession(id);
-    searchAddons.current.clear();
     terminalRefs.current.clear();
     editorRefs.current.clear();
     previewRefs.current.clear();
-    setActiveSearchAddon(null);
-    setActiveEditorHandle(null);
   }, []);
 
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
@@ -397,24 +361,10 @@ export default function App() {
     },
     [],
   );
-  const miniOpen = useChatStore((s) => s.mini.open);
-  const miniPresence = usePresence(miniOpen, 200);
-  const openMini = useChatStore((s) => s.openMini);
-  const toggleMini = useChatStore((s) => s.toggleMini);
-  const focusInput = useChatStore((s) => s.focusInput);
-  const openPanel = useChatStore((s) => s.openPanel);
-  const panelOpen = useChatStore((s) => s.panelOpen);
-  const setLive = useChatStore((s) => s.setLive);
-  const respondToApproval = useChatStore((s) => s.respondToApproval);
-
-  const { hasComposer, keysLoaded } = useAiBootstrap();
 
   const activeTab = tabs.find((t) => t.id === activeId);
   const isTerminalTab = activeTab?.kind === "terminal";
   const isBlockTab = activeTerminalTab?.blocks === true;
-  const isEditorTab = activeTab?.kind === "editor";
-  const isMarkdownTab = activeTab?.kind === "markdown";
-  const isGitHistoryTab = activeTab?.kind === "git-history";
 
   useEditorFileSync({ tabs, tabsRef, editorRefs });
   useThemeFileEditing({ tabsRef, openFileTab });
@@ -427,40 +377,11 @@ export default function App() {
 
   useWindowTitle(activeTab, explorerRoot);
 
-  useEffect(() => {
-    setActiveSearchAddon(
-      activeLeafId !== null
-        ? (searchAddons.current.get(activeLeafId) ?? null)
-        : null,
-    );
-    setActiveEditorHandle(editorRefs.current.get(activeId) ?? null);
-    setActiveMarkdownHandle(markdownRefs.current.get(activeId) ?? null);
-  }, [activeId, activeLeafId]);
-
-  const registerMarkdownHandle = useCallback(
-    (id: number, h: MarkdownPreviewHandle | null) => {
-      if (h) markdownRefs.current.set(id, h);
-      else markdownRefs.current.delete(id);
-      // The pane mounts lazily (Suspense), so the handle can land after the
-      // activation effect already ran — publish it when it does.
-      if (id === activeIdRef.current) setActiveMarkdownHandle(h);
-    },
-    [],
-  );
-
-  const handleSearchReady = useCallback(
-    (leafId: number, addon: SearchAddon) => {
-      searchAddons.current.set(leafId, addon);
-      if (leafId === activeLeafId) setActiveSearchAddon(addon);
-    },
-    [activeLeafId],
-  );
-
   const disposeTab = useCallback(
     (id: number) => {
-      // Terminal-leaf-keyed maps (terminalRefs/searchAddons) are pruned by
-      // the effect below as the pane tree changes; only the tab-id-keyed
-      // handles need explicit cleanup here.
+      // Terminal-leaf-keyed maps (terminalRefs) are pruned by the effect
+      // below as the pane tree changes; only the tab-id-keyed handles need
+      // explicit cleanup here.
       editorRefs.current.delete(id);
       previewRefs.current.delete(id);
       closeTab(id);
@@ -498,8 +419,6 @@ export default function App() {
     liveLeavesRef.current = live;
     for (const k of [...terminalRefs.current.keys()])
       if (!live.has(k)) terminalRefs.current.delete(k);
-    for (const k of [...searchAddons.current.keys()])
-      if (!live.has(k)) searchAddons.current.delete(k);
   }, [tabs]);
 
   useEffect(() => {
@@ -556,19 +475,6 @@ export default function App() {
     }
     return null;
   }, [tabs, activeId]);
-
-  const togglePanelAndFocus = useCallback(() => {
-    if (!hasComposer) {
-      void openSettingsWindow("models");
-      return;
-    }
-    if (panelOpen) {
-      useChatStore.getState().closePanel();
-    } else {
-      openPanel();
-      focusInput(null);
-    }
-  }, [hasComposer, panelOpen, openPanel, focusInput]);
 
   // Pick the terminal leaf to receive a selection. With several Claude Code
   // panes open, the right one is whichever runs in the directory that contains
@@ -711,12 +617,6 @@ export default function App() {
     focusPane,
   ]);
 
-  const { askPopup, setAskPopup, onAskFromSelection } = useSelectionAskAi({
-    captureActiveSelection,
-    askFromSelection: sendSelectionToClaude,
-  });
-  const askPresence = usePresence(Boolean(askPopup), 120);
-
   const openNewTab = useCallback(() => {
     newTab(inheritedCwdForNewTab());
   }, [newTab, inheritedCwdForNewTab]);
@@ -728,45 +628,6 @@ export default function App() {
   const openNewBlockTab = useCallback(() => {
     newBlockTab(inheritedCwdForNewTab());
   }, [newBlockTab, inheritedCwdForNewTab]);
-
-  const launchAgentGroup = useCallback(
-    (request: AgentLaunchRequest) => {
-      const command = validateAgentLaunchCommand(request.command);
-      if (!command.ok) return;
-      const launcher = findAgentLauncher(request.agent);
-      const title =
-        request.instances === 1
-          ? launcher.label
-          : `${launcher.label} × ${request.instances}`;
-      const { leafIds: agentLeafIds } = newAgentGroupTab(
-        inheritedCwdForNewTab(),
-        title,
-        request.instances,
-      );
-      const hooksReady = launcher.supportsHooks
-        ? invoke("agent_enable_hooks", {
-            agent: request.agent,
-          }).catch((error) => {
-            console.warn(
-              `[terax] could not enable ${request.agent} notifications:`,
-              error,
-            );
-          })
-        : Promise.resolve();
-
-      for (const leafId of agentLeafIds) {
-        void (async () => {
-          await Promise.all([whenSessionReady(leafId), hooksReady]);
-          if (!writeToSession(leafId, `${command.command}\r`)) {
-            console.error(
-              `[terax] agent terminal ${leafId} closed before launch`,
-            );
-          }
-        })();
-      }
-    },
-    [inheritedCwdForNewTab, newAgentGroupTab],
-  );
 
   const sendCd = useCallback(
     (path: string) => {
@@ -852,9 +713,7 @@ export default function App() {
     void (async () => {
       const command = await consumeLaunchCommand();
       if (!command) return;
-      const { leafIds } = newAgentGroupTab(getLaunchDir(), command, 1);
-      const leafId = leafIds[0];
-      if (leafId === undefined) return;
+      const { leafId } = newCommandTab(getLaunchDir());
       await whenSessionReady(leafId);
       if (!writeToSession(leafId, `${command}\r`)) {
         console.error(
@@ -862,7 +721,7 @@ export default function App() {
         );
       }
     })();
-  }, [booted, newAgentGroupTab]);
+  }, [booted, newCommandTab]);
 
   const handlePathRenamed = useCallback(
     (from: string, to: string) => {
@@ -932,6 +791,13 @@ export default function App() {
   const openSourceControl = useCallback(() => {
     openSidebarView("source-control");
   }, [openSidebarView]);
+  const [remoteManagerOpen, setRemoteManagerOpen] = useState(false);
+  const [cloneRepositoryOpen, setCloneRepositoryOpen] = useState(false);
+  // File-history dialog target; null keeps the dialog closed.
+  const [fileHistory, setFileHistory] = useState<{
+    repoRoot: string;
+    path: string;
+  } | null>(null);
   const {
     repositoryTarget: sourceControlRepositoryTarget,
     openInSourceControl: handleOpenRepositoryInSourceControl,
@@ -944,6 +810,18 @@ export default function App() {
     openSourceControl,
     openCommitHistoryTab,
   });
+  const handleOpenFileHistory = useCallback(async (path: string) => {
+    const repo = await native.gitResolveRepo(path).catch(() => null);
+    if (!repo) {
+      toast.info("No Git repository contains this file.");
+      return;
+    }
+    const relative = path
+      .slice(repo.repoRoot.length)
+      .replace(/^[\\/]+/, "")
+      .replace(/\\/g, "/");
+    setFileHistory({ repoRoot: repo.repoRoot, path: relative });
+  }, []);
   const {
     sourceControl,
     multiRepo,
@@ -965,6 +843,29 @@ export default function App() {
   const explorerGitDecorations = usePreferencesStore(
     (s) => s.explorerGitDecorations,
   );
+  // Switch which repo an open history tab shows without opening a new tab; the
+  // pane reloads off the changed repoRoot and the title follows the branch.
+  const handleSwitchHistoryRepo = useCallback(
+    (tabId: number, repoRoot: string, branch: string | null) => {
+      updateTab(tabId, {
+        repoRoot,
+        title: branch ? `History · ${branch}` : "Git History",
+      });
+    },
+    [updateTab],
+  );
+  // Decorations take every repo's snapshot: each file is colored by whichever
+  // repo contains it. The active repo's snapshot already rides inside
+  // repoStatusEntries when multi-repo; the merge only matters for the
+  // single-repo case where the scan found nothing but the context resolved one.
+  const explorerGitStatuses = useMemo(() => {
+    const entries = multiRepo.repoStatusEntries.map((e) => e.status);
+    const active = sourceControl.status;
+    if (!active || entries.some((s) => s.repoRoot === active.repoRoot)) {
+      return entries;
+    }
+    return [active, ...entries];
+  }, [multiRepo.repoStatusEntries, sourceControl.status]);
 
   const openPreviewTab = useCallback(
     (url: string) => {
@@ -1020,20 +921,6 @@ export default function App() {
 
   const [zenMode, setZenMode] = useState(false);
 
-  // Focus an agent's tab, switching to its space first so the header and tab
-  // strip don't end up showing a different space than the focused pane.
-  const activateAgentTarget = useCallback(
-    (tabId: number, leafId: number) => {
-      const space = tabsRef.current.find((t) => t.id === tabId)?.spaceId;
-      if (space && space !== useSpaces.getState().activeId) {
-        useSpaces.getState().setActive(space);
-      }
-      setActiveId(tabId);
-      focusPane(tabId, leafId);
-    },
-    [setActiveId, focusPane],
-  );
-
   const shortcutHandlers = useMemo<ShortcutHandlers>(
     () => ({
       "commandPalette.open": () => openCommandPalette("commands"),
@@ -1072,19 +959,7 @@ export default function App() {
         if (editor) editor.openSearch();
         else searchInlineRef.current?.focus();
       },
-      "ai.toggle": togglePanelAndFocus,
-      "ai.toggleMini": () => {
-        if (!hasComposer) {
-          void openSettingsWindow("models");
-          return;
-        }
-        toggleMini();
-      },
-      "ai.askSelection": onAskFromSelection,
-      "agent.focusAttention": () => {
-        const t = nextAttentionTarget();
-        if (t) activateAgentTarget(t.tabId, t.leafId);
-      },
+      "selection.sendToAgent": sendSelectionToClaude,
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
       "explorer.focus": toggleExplorerFocus,
@@ -1094,10 +969,6 @@ export default function App() {
       "view.zenMode": () => setZenMode((v) => !v),
       "editor.undo": () => editorRefs.current.get(activeId)?.undo(),
       "editor.redo": () => editorRefs.current.get(activeId)?.redo(),
-      "editor.aiComplete": () =>
-        editorRefs.current.get(activeId)?.triggerAiComplete(),
-      "editor.codeComplete": () =>
-        editorRefs.current.get(activeId)?.triggerCodeComplete(),
     }),
     [
       activeId,
@@ -1114,16 +985,12 @@ export default function App() {
       focusNextPaneInTab,
       swapActivePane,
       toggleSourceControl,
-      hasComposer,
-      togglePanelAndFocus,
-      toggleMini,
-      onAskFromSelection,
+      sendSelectionToClaude,
       toggleSidebar,
       toggleExplorerFocus,
       zoomIn,
       zoomOut,
       zoomReset,
-      activateAgentTarget,
     ],
   );
 
@@ -1134,15 +1001,10 @@ export default function App() {
           ? leafIds(activeTab.paneTree).length
           : null;
       if (shouldDisablePaneSwapShortcut(id, terminalPaneCount)) return true;
-      if (
-        id === "editor.undo" ||
-        id === "editor.redo" ||
-        id === "editor.aiComplete" ||
-        id === "editor.codeComplete"
-      ) {
+      if (id === "editor.undo" || id === "editor.redo") {
         return activeTab?.kind !== "editor";
       }
-      if (id === "ai.askSelection") {
+      if (id === "selection.sendToAgent") {
         const target =
           (e.target as HTMLElement | null) ?? document.activeElement;
         const inTerminal = !!(target as HTMLElement | null)?.closest?.(
@@ -1207,9 +1069,8 @@ export default function App() {
       } else {
         editorRefs.current.delete(id);
       }
-      if (id === activeId) setActiveEditorHandle(h);
     },
-    [activeId],
+    [],
   );
 
   const registerPreviewHandle = useCallback(
@@ -1244,13 +1105,6 @@ export default function App() {
     [focusPane],
   );
 
-  const onActivateAgent = activateAgentTarget;
-
-  const onActivateLocalAgent = useCallback(() => {
-    openPanel();
-    focusInput(null);
-  }, [openPanel, focusInput]);
-
   const handleLeafExit = useCallback(
     (leafId: number, _code: number) => {
       const all = tabsRef.current;
@@ -1278,43 +1132,7 @@ export default function App() {
     [updateTab],
   );
 
-  const searchTarget = useMemo<SearchTarget>(() => {
-    if (isTerminalTab && activeLeafId !== null && activeSearchAddon)
-      return {
-        kind: "terminal",
-        addon: activeSearchAddon,
-        focus: () => terminalRefs.current.get(activeLeafId)?.focus(),
-      };
-    if (isEditorTab && activeEditorHandle)
-      return {
-        kind: "editor",
-        handle: activeEditorHandle,
-        focus: () => activeEditorHandle.focus(),
-      };
-    if (isMarkdownTab && activeMarkdownHandle)
-      return {
-        kind: "markdown",
-        handle: activeMarkdownHandle,
-        focus: () => activeMarkdownHandle.focus(),
-      };
-    if (isGitHistoryTab && gitHistoryHandle)
-      return {
-        kind: "git-history",
-        handle: gitHistoryHandle,
-        focus: () => {},
-      };
-    return null;
-  }, [
-    isTerminalTab,
-    isEditorTab,
-    isMarkdownTab,
-    activeMarkdownHandle,
-    isGitHistoryTab,
-    activeLeafId,
-    activeSearchAddon,
-    activeEditorHandle,
-    gitHistoryHandle,
-  ]);
+  const searchRoot = explorerRoot;
 
   const activeCwd = activeTerminalLeafCwd;
 
@@ -1362,7 +1180,7 @@ export default function App() {
         ? createCommandItems({
             tabs,
             activeId,
-            searchTarget,
+            searchRoot,
             explorerRoot,
             home,
             openNewTab,
@@ -1378,8 +1196,6 @@ export default function App() {
             focusSearch: () => searchInlineRef.current?.focus(),
             focusExplorerSearch: () => explorerRef.current?.focusSearch(),
             toggleSidebar,
-            toggleAi: togglePanelAndFocus,
-            askAiSelection: sendSelectionToClaude,
             openSettings: () => void openSettingsWindow(),
             openKeyboardShortcuts: () => void openSettingsWindow("shortcuts"),
           })
@@ -1388,7 +1204,7 @@ export default function App() {
       commandPaletteOpen,
       tabs,
       activeId,
-      searchTarget,
+      searchRoot,
       explorerRoot,
       home,
       openNewTab,
@@ -1400,7 +1216,6 @@ export default function App() {
       handleCloseTabOrPane,
       splitActivePaneInActiveTab,
       toggleSidebar,
-      togglePanelAndFocus,
       sendSelectionToClaude,
     ],
   );
@@ -1475,19 +1290,7 @@ export default function App() {
     [isTerminalTab, activeLeafId],
   );
 
-  useAiLiveBridge({
-    setLive,
-    activeId,
-    tabs,
-    explorerRoot,
-    launchCwd,
-    home,
-    openPreviewTab,
-    newAgentTab,
-    terminalRefs,
-  });
-
-  const shell = (
+  return (
     <ThemeProvider>
       <TooltipProvider>
         <div className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground">
@@ -1502,17 +1305,15 @@ export default function App() {
               onNewPreview={() => openPreviewTab("")}
               onNewEditor={() => setNewEditorOpen(true)}
               onNewGitGraph={openGitGraphFromContext}
-              onLaunchAgents={launchAgentGroup}
               onClose={handleClose}
               onPin={pinTab}
               onRename={handleRenameTab}
               onReorder={reorderTabByGap}
               onOverrideLanguage={setOverrideLanguage}
               onOpenCommandPalette={() => openCommandPalette("commands")}
-              onActivateAgent={onActivateAgent}
-              onActivateLocalAgent={onActivateLocalAgent}
               onOpenSettings={() => void openSettingsWindow()}
-              searchTarget={searchTarget}
+              searchRoot={searchRoot}
+              onSearchOpenHit={openContentHit}
               searchRef={searchInlineRef}
               groupSwitcher={
                 <GroupSwitcher
@@ -1537,7 +1338,11 @@ export default function App() {
               headerTabs={
                 <HeaderTabs
                   active={sidebarOpen ? sidebarView : null}
-                  sourceControlChanged={sourceControl.changedCount}
+                  sourceControlChanged={
+                    multiRepo.repos.length > 0
+                      ? multiRepo.aggregatedChanges
+                      : sourceControl.changedCount
+                  }
                   onSelect={(id) => {
                     if (sidebarView === id && sidebarOpen) {
                       sidebarRef.current?.collapse();
@@ -1601,8 +1406,8 @@ export default function App() {
                       <FileExplorer
                         ref={explorerRef}
                         rootPath={explorerRoot}
-                        gitStatus={
-                          explorerGitDecorations ? sourceControl.status : null
+                        gitStatuses={
+                          explorerGitDecorations ? explorerGitStatuses : null
                         }
                         activeFilePath={explorerActiveFilePath}
                         openFilePaths={explorerOpenFilePaths}
@@ -1614,6 +1419,7 @@ export default function App() {
                           handleOpenRepositoryInSourceControl
                         }
                         onOpenGitHistory={handleOpenGitHistoryForPath}
+                        onOpenFileHistory={handleOpenFileHistory}
                         onAttachToAgent={handleAttachFileToAgent}
                         pathDropTarget={terminalPathDropTarget}
                       />
@@ -1622,10 +1428,18 @@ export default function App() {
                         open={sidebarOpen}
                         sourceControl={sourceControl}
                         repos={multiRepo.repos}
+                        repoStatusEntries={multiRepo.repoStatusEntries}
+                        applyRepoStatus={multiRepo.applyRepoStatus}
+                        refreshRepoStatus={multiRepo.refreshRepoStatus}
+                        refreshAllRepoStatuses={
+                          multiRepo.refreshAllRepoStatuses
+                        }
                         syncProgress={multiRepo.syncProgress}
                         onDismissSyncProgress={multiRepo.clearSyncProgress}
                         buildPushPlan={multiRepo.buildPushPlan}
-                        pushAll={multiRepo.pushAll}
+                        pushAllAdvanced={multiRepo.pushAllAdvanced}
+                        onManageRemotes={() => setRemoteManagerOpen(true)}
+                        onCloneRepository={() => setCloneRepositoryOpen(true)}
                         onOpenDiff={openGitDiffTab}
                         onOpenGitGraph={openGitGraphFromContext}
                         onOpenFile={handleOpenFile}
@@ -1648,6 +1462,7 @@ export default function App() {
                                 remote: "never",
                               })
                             }
+                            onOpenPath={cdInNewTab}
                           />
                         }
                       />
@@ -1664,7 +1479,6 @@ export default function App() {
                       activeId={activeId}
                       activeTab={activeTab}
                       registerTerminalHandle={registerTerminalHandle}
-                      onSearchReady={handleSearchReady}
                       onCwd={handleTerminalCwd}
                       onExit={handleLeafExit}
                       onFocusLeaf={handleFocusLeaf}
@@ -1673,12 +1487,10 @@ export default function App() {
                       onEditorCloseTab={disposeTab}
                       registerPreviewHandle={registerPreviewHandle}
                       onPreviewUrlChange={handlePreviewUrl}
-                      onAiDiffAccept={(id) => respondToApproval(id, true)}
-                      onAiDiffReject={(id) => respondToApproval(id, false)}
                       onOpenCommitFile={openCommitFileDiffTab}
-                      onGitHistorySearchHandle={setGitHistoryHandle}
+                      gitHistoryRepos={multiRepo.repos}
+                      onSwitchGitHistoryRepo={handleSwitchHistoryRepo}
                       onSetMarkdownView={setMarkdownView}
-                      registerMarkdownHandle={registerMarkdownHandle}
                     />
                   </div>
 
@@ -1688,10 +1500,6 @@ export default function App() {
                     activeLeafId={activeLeafId}
                     cwd={activeCwd}
                     home={home}
-                    hasComposer={hasComposer}
-                    panelOpen={panelOpen}
-                    keysLoaded={keysLoaded}
-                    onConnect={() => void openSettingsWindow("models")}
                   />
                 </div>
               </ResizablePanel>
@@ -1705,44 +1513,13 @@ export default function App() {
               home={home}
               onCd={sendCd}
               onWorkspaceChange={handleWorkspaceChange}
-              onOpenMini={openMini}
-              onOpenAi={togglePanelAndFocus}
-              hasComposer={hasComposer}
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true
               }
             />
           )}
 
-          <AgentNotificationsBridge
-            tabs={tabs}
-            activeId={activeId}
-            onActivate={onActivateAgent}
-          />
           <Toaster position="bottom-right" />
-
-          {hasComposer ? (
-            <>
-              <AgentRunBridge
-                openAiDiffTab={openAiDiffTab}
-                closeAiDiffTab={closeAiDiffTab}
-              />
-              <LocalAgentNotificationsBridge />
-            </>
-          ) : null}
-
-          {hasComposer && miniPresence.mounted ? (
-            <AiMiniWindow state={miniPresence.state} />
-          ) : null}
-          {askPresence.mounted ? (
-            <SelectionAskAi
-              state={askPresence.state}
-              x={askPopup?.x ?? 0}
-              y={askPopup?.y ?? 0}
-              onAsk={onAskFromSelection}
-              onDismiss={() => setAskPopup(null)}
-            />
-          ) : null}
 
           {switcherState && (
             <TabSwitcherHud tabs={spaceTabs} state={switcherState} />
@@ -1763,6 +1540,40 @@ export default function App() {
             onOpenChange={setNewEditorOpen}
             rootPath={explorerRoot ?? home}
             onCreated={(path) => openFileTab(path)}
+          />
+
+          <RemoteManagerDialog
+            open={remoteManagerOpen}
+            onOpenChange={setRemoteManagerOpen}
+            repoRoot={multiRepo.activeRepo}
+            onAdd={multiRepo.addRemote}
+            onRemove={multiRepo.removeRemote}
+            onSetUrl={multiRepo.setRemoteUrl}
+          />
+
+          <CloneRepositoryDialog
+            open={cloneRepositoryOpen}
+            onOpenChange={setCloneRepositoryOpen}
+            defaultTargetDir={explorerRoot ?? home ?? null}
+            onClone={multiRepo.cloneRepository}
+            onCloned={() => {
+              void multiRepo.scanRepos().then(() => {
+                sourceControl.refresh({ remote: "never" });
+              });
+            }}
+          />
+
+          <FileHistoryDialog
+            open={fileHistory !== null}
+            onOpenChange={(open) => {
+              if (!open) setFileHistory(null);
+            }}
+            repoRoot={fileHistory?.repoRoot ?? ""}
+            path={fileHistory?.path ?? ""}
+            onOpenCommitFile={(input) => {
+              setFileHistory(null);
+              openCommitFileDiffTab(input);
+            }}
           />
 
           <UpdaterDialog />
@@ -1786,6 +1597,4 @@ export default function App() {
       </TooltipProvider>
     </ThemeProvider>
   );
-
-  return <AiComposerProvider>{shell}</AiComposerProvider>;
 }

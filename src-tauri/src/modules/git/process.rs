@@ -91,7 +91,7 @@ pub fn ensure_git_available(workspace: &WorkspaceEnv) -> Result<()> {
 }
 
 fn check_git_availability(workspace: &WorkspaceEnv) -> Availability {
-    let output = match run_git_uncached(workspace, None, ["--version"], 10) {
+    let output = match run_git_uncached(workspace, None, ["--version"], &[], None, 10) {
         Ok(o) => o,
         Err(_) => return Availability::NotInstalled,
     };
@@ -231,13 +231,53 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_git_uncached(workspace, cwd, args, timeout_secs)
+    run_git_uncached(workspace, cwd, args, &[], None, timeout_secs)
+}
+
+/// Like `run_git`, with extra environment variables. Used for editor hooks
+/// (GIT_SEQUENCE_EDITOR / GIT_EDITOR) in scripted rebases.
+pub fn run_git_with_env<I, S, E, K, V>(
+    workspace: &WorkspaceEnv,
+    cwd: Option<&str>,
+    args: I,
+    envs: E,
+    timeout_secs: u64,
+) -> Result<GitOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    E: IntoIterator<Item = (K, V)>,
+    K: AsRef<OsStr>,
+    V: AsRef<OsStr>,
+{
+    let envs: Vec<(OsString, OsString)> = envs
+        .into_iter()
+        .map(|(k, v)| (k.as_ref().to_os_string(), v.as_ref().to_os_string()))
+        .collect();
+    run_git_uncached(workspace, cwd, args, &envs, None, timeout_secs)
+}
+
+/// Like `run_git`, with bytes piped to stdin (e.g. `git cat-file --batch-check`).
+pub fn run_git_with_input<I, S>(
+    workspace: &WorkspaceEnv,
+    cwd: Option<&str>,
+    args: I,
+    stdin: &[u8],
+    timeout_secs: u64,
+) -> Result<GitOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_git_uncached(workspace, cwd, args, &[], Some(stdin), timeout_secs)
 }
 
 fn run_git_uncached<I, S>(
     workspace: &WorkspaceEnv,
     cwd: Option<&str>,
     args: I,
+    extra_env: &[(OsString, OsString)],
+    stdin: Option<&[u8]>,
     timeout_secs: u64,
 ) -> Result<GitOutput>
 where
@@ -257,12 +297,24 @@ where
         .env("GCM_INTERACTIVE", "Never")
         .env("GCM_PROVIDER", "")
         .env("LC_ALL", "C")
-        .stdin(Stdio::null())
+        .envs(extra_env.iter().cloned())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::modules::proc::hide_console(&mut cmd);
 
     let child = Arc::new(SharedChild::spawn(&mut cmd).map_err(|e| GitError::Spawn(e.to_string()))?);
+    if let Some(bytes) = stdin {
+        if let Some(mut pipe) = child.take_stdin() {
+            use std::io::Write;
+            let _ = pipe.write_all(bytes);
+            drop(pipe);
+        }
+    }
     let mut stdout_pipe = child
         .take_stdout()
         .ok_or_else(|| GitError::Spawn("no stdout pipe".into()))?;

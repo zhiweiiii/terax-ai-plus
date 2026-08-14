@@ -7,7 +7,7 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
-import type { GitStatusSnapshot } from "@/modules/ai/lib/native";
+import type { GitStatusSnapshot } from "@/lib/native";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 import type { TerminalPathDropTarget } from "@/modules/terminal";
@@ -64,9 +64,11 @@ type Props = {
   onRevealInTerminal?: (path: string) => void;
   onOpenInSourceControl?: (path: string) => void;
   onOpenGitHistory?: (path: string) => void;
+  onOpenFileHistory?: (path: string) => void;
   onAttachToAgent?: (path: string) => void;
   pathDropTarget?: TerminalPathDropTarget;
-  gitStatus?: GitStatusSnapshot | null;
+  /** One snapshot per repo; each file is decorated by its containing repo. */
+  gitStatuses?: GitStatusSnapshot[] | null;
 };
 
 type Row =
@@ -205,9 +207,10 @@ export const FileExplorer = memo(
       onRevealInTerminal,
       onOpenInSourceControl,
       onOpenGitHistory,
+      onOpenFileHistory,
       onAttachToAgent,
       pathDropTarget,
-      gitStatus,
+      gitStatuses,
     },
     ref,
   ) {
@@ -215,7 +218,7 @@ export const FileExplorer = memo(
     const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
     const { lookup: lookupGitStatus } = useGitStatus(
       rootPath,
-      gitDecorations ? gitStatus : null,
+      gitDecorations ? gitStatuses : null,
       gitDecorations,
     );
     const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -740,6 +743,14 @@ export const FileExplorer = memo(
                       onSelect={() => onOpenGitHistory(menuTarget.path)}
                     >
                       查看提交历史
+                    </ContextMenuItem>
+                  )}
+                  {!menuTarget.isDir && onOpenFileHistory && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onOpenFileHistory(menuTarget.path)}
+                    >
+                      Git 历史
                     </ContextMenuItem>
                   )}
                   {!menuTarget.isDir && (

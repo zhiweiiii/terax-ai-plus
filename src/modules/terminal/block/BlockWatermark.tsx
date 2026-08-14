@@ -55,7 +55,6 @@ export function BlockWatermark({ leafId, subscribe }: Props) {
           label="Switch between Shell and AI"
           shortcut="terminal.toggleInput"
         />
-        <Hint label="Open the AI assistant" shortcut="ai.toggle" />
       </div>
     </div>
   );

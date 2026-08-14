@@ -15,7 +15,7 @@
 // Lane colors are stable per slot index. This keeps the rail readable when
 // you load more pages, since lane indices don't shift retroactively.
 
-import type { GitLogEntry } from "@/modules/ai/lib/native";
+import type { GitLogEntry } from "@/lib/native";
 
 export type LaneColor = string;
 
@@ -59,6 +59,21 @@ export type GraphState = {
 };
 
 export const EMPTY_GRAPH_STATE: GraphState = { lanes: [] };
+
+/**
+ * First-parent view: truncates every commit to its first parent so the rail
+ * and the list only trace the main line. The original entries are untouched;
+ * commits with 0 or 1 parents pass through by reference.
+ */
+export function applyFirstParent(
+  entries: readonly GitLogEntry[],
+): GitLogEntry[] {
+  return entries.map((entry) =>
+    entry.parents.length > 1
+      ? { ...entry, parents: [entry.parents[0]] }
+      : entry,
+  );
+}
 
 function trimTrailing(lanes: (string | null)[]): (string | null)[] {
   let end = lanes.length;

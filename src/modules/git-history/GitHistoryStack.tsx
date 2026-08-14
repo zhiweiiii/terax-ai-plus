@@ -1,5 +1,6 @@
+import type { GitRepoHead } from "@/lib/native";
 import type { GitHistoryTab, Tab } from "@/modules/tabs";
-import { GitHistoryPane, type GitHistorySearchHandle } from "./GitHistoryPane";
+import { GitHistoryPane } from "./GitHistoryPane";
 
 type CommitFileDiffOpenInput = {
   repoRoot: string;
@@ -13,15 +14,23 @@ type CommitFileDiffOpenInput = {
 type Props = {
   tabs: Tab[];
   activeId: number;
+  /** Workspace repos; >1 enables switching the active history tab in place. */
+  repos?: GitRepoHead[];
+  /** Re-target the active git-history tab to another repo. */
+  onSwitchRepo?: (
+    tabId: number,
+    repoRoot: string,
+    branch: string | null,
+  ) => void;
   onOpenCommitFile: (input: CommitFileDiffOpenInput) => void;
-  onSearchHandle?: (handle: GitHistorySearchHandle | null) => void;
 };
 
 export function GitHistoryStack({
   tabs,
   activeId,
+  repos,
+  onSwitchRepo,
   onOpenCommitFile,
-  onSearchHandle,
 }: Props) {
   const active = tabs.find(
     (t): t is GitHistoryTab => t.kind === "git-history" && t.id === activeId,
@@ -31,8 +40,13 @@ export function GitHistoryStack({
     <GitHistoryPane
       key={active.id}
       repoRoot={active.repoRoot}
+      repos={repos}
+      onSwitchRepo={
+        onSwitchRepo
+          ? (repoRoot, branch) => onSwitchRepo(active.id, repoRoot, branch)
+          : undefined
+      }
       onOpenCommitFile={onOpenCommitFile}
-      onSearchHandle={onSearchHandle}
     />
   );
 }

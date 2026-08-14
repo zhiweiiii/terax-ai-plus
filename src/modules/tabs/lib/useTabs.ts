@@ -1,9 +1,5 @@
 import { isMarkdownPath } from "@/lib/utils";
 import {
-  type AgentInstanceCount,
-  createAgentPanePlan,
-} from "@/modules/agents/lib/launcher";
-import {
   findLeafCwd,
   hasLeaf,
   leafIds,
@@ -73,22 +69,6 @@ export type MarkdownTab = TabBase & {
   path: string;
 };
 
-export type AiDiffStatus = "pending" | "approved" | "rejected";
-
-export type AiDiffTab = TabBase & {
-  id: number;
-  kind: "ai-diff";
-  title: string;
-  path: string;
-  /** "" for newly created files. */
-  originalContent: string;
-  proposedContent: string;
-  /** Tool-call approval id used to resolve the AI SDK approval. */
-  approvalId: string;
-  status: AiDiffStatus;
-  isNewFile: boolean;
-};
-
 export type GitDiffTab = TabBase & {
   id: number;
   kind: "git-diff";
@@ -124,7 +104,6 @@ export type Tab =
   | EditorTab
   | PreviewTab
   | MarkdownTab
-  | AiDiffTab
   | GitDiffTab
   | GitHistoryTab
   | GitCommitFileDiffTab;
@@ -138,6 +117,8 @@ export type TabPatch = Partial<{
   /** Empty string resets a terminal tab to its cwd-derived name. */
   customTitle: string;
   overrideLanguage: string | null;
+  /** Only honored on git tab kinds (git-history). */
+  repoRoot: string;
 }>;
 
 export type GitDiffOpenInput = {
@@ -264,7 +245,7 @@ export function planFileTabOpen(
 }
 
 /** Editor tabs a single space keeps open; opening past it closes the oldest. */
-export const MAX_EDITOR_TABS_PER_SPACE = 5;
+export const MAX_EDITOR_TABS_PER_SPACE = 10;
 
 /**
  * Trims a space back to MAX_EDITOR_TABS_PER_SPACE editor tabs, closing them in
@@ -718,41 +699,6 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     ).__teraxNewBlockTab = newBlockTab;
   }, [newBlockTab]);
 
-  const newAgentGroupTab = useCallback(
-    (cwd: string | undefined, title: string, instances: AgentInstanceCount) => {
-      const tabId = nextIdRef.current++;
-      const { paneTree, leafIds: agentLeafIds } = createAgentPanePlan(
-        instances,
-        () => nextIdRef.current++,
-        cwd,
-      );
-      setTabs((t) => [
-        ...t,
-        {
-          id: tabId,
-          kind: "terminal",
-          spaceId: activeSpaceIdRef.current,
-          title,
-          customTitle: title,
-          cwd,
-          paneTree,
-          activeLeafId: agentLeafIds[0],
-        },
-      ]);
-      setActiveId(tabId);
-      return { tabId, leafIds: agentLeafIds };
-    },
-    [],
-  );
-
-  const newAgentTab = useCallback(
-    (cwd: string | undefined, title: string) => {
-      const { tabId, leafIds: agentLeafIds } = newAgentGroupTab(cwd, title, 1);
-      return { tabId, leafId: agentLeafIds[0] };
-    },
-    [newAgentGroupTab],
-  );
-
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
     const leafId = nextIdRef.current++;
@@ -771,6 +717,27 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     ]);
     setActiveId(tabId);
     return tabId;
+  }, []);
+
+  /** Single-leaf terminal tab; returns the leaf so callers can type into it. */
+  const newCommandTab = useCallback((cwd?: string, title = "shell") => {
+    const tabId = nextIdRef.current++;
+    const leafId = nextIdRef.current++;
+    setTabs((t) => [
+      ...t,
+      {
+        id: tabId,
+        kind: "terminal",
+        spaceId: activeSpaceIdRef.current,
+        title,
+        customTitle: title,
+        cwd,
+        paneTree: { kind: "leaf", id: leafId, cwd },
+        activeLeafId: leafId,
+      },
+    ]);
+    setActiveId(tabId);
+    return { tabId, leafId };
   }, []);
 
   /**
@@ -820,81 +787,6 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         return t;
       }),
     );
-  }, []);
-
-  const openAiDiffTab = useCallback(
-    (input: {
-      path: string;
-      originalContent: string;
-      proposedContent: string;
-      approvalId: string;
-      isNewFile: boolean;
-    }) => {
-      let targetId: number | null = null;
-      setTabs((curr) => {
-        const existing = curr.find(
-          (t) => t.kind === "ai-diff" && t.approvalId === input.approvalId,
-        );
-        if (existing) {
-          targetId = existing.id;
-          return curr;
-        }
-        const id = nextIdRef.current++;
-        targetId = id;
-        const title = `${basename(input.path)} (AI diff)`;
-        return [
-          ...curr,
-          {
-            id,
-            kind: "ai-diff",
-            spaceId: activeSpaceIdRef.current,
-            title,
-            path: input.path,
-            originalContent: input.originalContent,
-            proposedContent: input.proposedContent,
-            approvalId: input.approvalId,
-            status: "pending",
-            isNewFile: input.isNewFile,
-          },
-        ];
-      });
-      if (targetId !== null) setActiveId(targetId);
-      return targetId as number | null;
-    },
-    [],
-  );
-
-  const setAiDiffStatus = useCallback(
-    (approvalId: string, status: AiDiffStatus) => {
-      setTabs((curr) =>
-        curr.map((t) =>
-          t.kind === "ai-diff" && t.approvalId === approvalId
-            ? { ...t, status }
-            : t,
-        ),
-      );
-    },
-    [],
-  );
-
-  const closeAiDiffTab = useCallback((approvalId: string) => {
-    setTabs((curr) => {
-      const target = curr.find(
-        (t) => t.kind === "ai-diff" && t.approvalId === approvalId,
-      );
-      if (!target) return curr;
-      const fallback = nextActiveInSpace(curr, target.id);
-      if (fallback === null) {
-        return curr.map((t) =>
-          t.kind === "ai-diff" && t.approvalId === approvalId
-            ? { ...t, status: "approved" as AiDiffStatus }
-            : t,
-        );
-      }
-      const next = curr.filter((t) => t.id !== target.id);
-      setActiveId((active) => (target.id === active ? fallback : active));
-      return next;
-    });
   }, []);
 
   const newPreviewTab = useCallback((url: string) => {
@@ -1123,6 +1015,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           return {
             ...x,
             ...(patch.title !== undefined && { title: patch.title }),
+          };
+        }
+        if (x.kind === "git-history") {
+          return {
+            ...x,
+            ...(patch.title !== undefined && { title: patch.title }),
+            ...(patch.repoRoot !== undefined && { repoRoot: patch.repoRoot }),
           };
         }
         // editor tab: auto-promote from preview the moment the file becomes dirty.
@@ -1354,20 +1253,16 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     setOverrideLanguage,
     newTab,
     newBlockTab,
-    newAgentTab,
-    newAgentGroupTab,
+    newCommandTab,
     newPrivateTab,
     openFileTab,
     pinTab,
     newPreviewTab,
     newMarkdownTab,
     setMarkdownView,
-    openAiDiffTab,
     openGitDiffTab,
     openCommitHistoryTab,
     openCommitFileDiffTab,
-    setAiDiffStatus,
-    closeAiDiffTab,
     closeTab,
     updateTab,
     selectByIndex,

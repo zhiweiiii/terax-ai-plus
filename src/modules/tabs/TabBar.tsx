@@ -14,8 +14,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
-import { AgentIcon } from "@/modules/agents/lib/agentIcon";
-import type { AgentLaunchRequest } from "@/modules/agents/lib/launcher";
 import {
   ALL_LANGUAGES,
   EXPOSED_LANGUAGES,
@@ -32,6 +30,7 @@ import {
   Cancel01Icon,
   CheckmarkCircle01Icon,
   Clock01Icon,
+  CommandLineIcon,
   ComputerTerminal02Icon,
   GitCompareIcon,
   Globe02Icon,
@@ -63,7 +62,6 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
-  onLaunchAgents: (request: AgentLaunchRequest) => void;
   onClose: (id: number) => void;
   /** Pin (promote) a preview tab to persistent on double-click. */
   onPin: (id: number) => void;
@@ -85,7 +83,6 @@ export function TabBar({
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
-  onLaunchAgents,
   onClose,
   onPin,
   onRename,
@@ -558,7 +555,6 @@ export function TabBar({
           onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
           onNewGitGraph={onNewGitGraph}
-          onLaunchAgents={onLaunchAgents}
         />
       </div>
     </div>
@@ -619,16 +615,6 @@ export function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
-  if (tab.kind === "ai-diff") {
-    return (
-      <HugeiconsIcon
-        icon={GitCompareIcon}
-        size={14}
-        strokeWidth={2}
-        className="shrink-0"
-      />
-    );
-  }
   if (tab.kind === "terminal" && tab.private) {
     return (
       <HugeiconsIcon
@@ -681,7 +667,12 @@ export function TabIcon({ tab }: { tab: Tab }) {
   }
   if (agentStatus.state === "working" && agentStatus.agent) {
     return (
-      <AgentIcon agent={agentStatus.agent} size={14} className="shrink-0" />
+      <HugeiconsIcon
+        icon={CommandLineIcon}
+        size={14}
+        strokeWidth={2}
+        className="shrink-0"
+      />
     );
   }
   return (

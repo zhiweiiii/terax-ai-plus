@@ -13,6 +13,10 @@ dist-ssr
 *.local
 stats.html
 
+# Temporary analysis snapshot, not part of the repo
+rebased/
+rebased
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

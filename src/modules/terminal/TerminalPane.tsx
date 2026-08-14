@@ -1,5 +1,4 @@
 import { useTheme } from "@/modules/theme";
-import type { SearchAddon } from "@xterm/addon-search";
 import {
   forwardRef,
   memo,
@@ -32,7 +31,6 @@ type Props = {
   initialCwd?: string;
   /** Enable command-block decorations (OSC 133) for this terminal. */
   blocks?: boolean;
-  onSearchReady?: (leafId: number, addon: SearchAddon) => void;
   onExit?: (leafId: number, code: number) => void;
   onCwd?: (leafId: number, cwd: string) => void;
 };
@@ -45,7 +43,6 @@ export const TerminalPane = memo(
       focused = true,
       initialCwd,
       blocks = false,
-      onSearchReady,
       onExit,
       onCwd,
     },
@@ -62,7 +59,6 @@ export const TerminalPane = memo(
       focused,
       initialCwd,
       blocks,
-      onSearchReady: (a) => onSearchReady?.(leafId, a),
       onExit: (c) => onExit?.(leafId, c),
       onCwd: (c) => onCwd?.(leafId, c),
     });

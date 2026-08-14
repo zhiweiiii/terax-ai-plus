@@ -27,8 +27,7 @@ export function OpenFilesPanel({ tabs, activeId, onSelectTab, onCloseTab }: Prop
       t.kind === "editor" ||
       t.kind === "markdown" ||
       t.kind === "preview" ||
-      t.kind === "git-diff" ||
-      t.kind === "ai-diff",
+      t.kind === "git-diff",
   );
 
   if (fileTabs.length === 0) {
@@ -72,7 +71,7 @@ export function OpenFilesPanel({ tabs, activeId, onSelectTab, onCloseTab }: Prop
           <img src={iconUrl} alt="" className="size-3.5 shrink-0" />
         ) : tab.kind === "preview" ? (
           <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-        ) : tab.kind === "git-diff" || tab.kind === "ai-diff" ? (
+        ) : tab.kind === "git-diff" ? (
           <HugeiconsIcon icon={GitCompareIcon} size={14} strokeWidth={1.75} className="shrink-0" />
         ) : tab.kind === "editor" ? (
           <HugeiconsIcon icon={PencilEdit02Icon} size={14} strokeWidth={1.75} className="shrink-0" />

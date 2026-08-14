@@ -1,7 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
-import { NotificationBell } from "@/modules/agents";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import {
@@ -9,11 +8,10 @@ import {
   Settings01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type ReactNode, type RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import {
   SearchInline,
   type SearchInlineHandle,
-  type SearchTarget,
 } from "./SearchInline";
 
 type Props = {
@@ -26,17 +24,15 @@ type Props = {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
-  onLaunchAgents: (request: any) => void;
   onClose: (id: number) => void;
   onPin: (id: number) => void;
   onRename: (id: number, title: string) => void;
   onReorder: (fromId: number, toGapIndex: number) => void;
   onOverrideLanguage?: (id: number, lang: string | null) => void;
   onOpenCommandPalette: () => void;
-  onActivateAgent: (tabId: number, leafId: number) => void;
-  onActivateLocalAgent: () => void;
   onOpenSettings: () => void;
-  searchTarget: SearchTarget;
+  searchRoot: string | null;
+  onSearchOpenHit: (path: string, line: number) => void;
   searchRef: RefObject<SearchInlineHandle | null>;
   headerTabs?: ReactNode;
   /** Group (space) switcher rendered before the tab strip. */
@@ -55,17 +51,15 @@ export function Header({
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
-  onLaunchAgents,
   onClose,
   onPin,
   onRename,
   onReorder,
   onOverrideLanguage,
   onOpenCommandPalette,
-  onActivateAgent,
-  onActivateLocalAgent,
   onOpenSettings,
-  searchTarget,
+  searchRoot,
+  onSearchOpenHit,
   searchRef,
   headerTabs,
   groupSwitcher,
@@ -104,12 +98,6 @@ export function Header({
           <HugeiconsIcon icon={CommandIcon} size={14} strokeWidth={1.75} />
         </Button>
 
-        {!IS_MAC && (
-          <NotificationBell
-            onActivate={onActivateAgent}
-            onActivateLocal={onActivateLocalAgent}
-          />
-        )}
         {onLaunchClaude && (
           <Button
             variant="ghost"
@@ -152,7 +140,6 @@ export function Header({
           onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
           onNewGitGraph={onNewGitGraph}
-          onLaunchAgents={onLaunchAgents}
           onClose={onClose}
           onPin={onPin}
           onRename={onRename}
@@ -162,17 +149,14 @@ export function Header({
         <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
       </div>
 
-      <SearchInline ref={searchRef} target={searchTarget} compact={false} />
+      <SearchInline
+        ref={searchRef}
+        root={searchRoot}
+        onOpenHit={onSearchOpenHit}
+        compact={false}
+      />
 
-      {IS_MAC && (
-        <>
-          <NotificationBell
-            onActivate={onActivateAgent}
-            onActivateLocal={onActivateLocalAgent}
-          />
-          {settingsButton}
-        </>
-      )}
+      {IS_MAC && settingsButton}
 
       {!IS_MAC && settingsButton}
 

@@ -3,7 +3,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::Serialize;
 
-use super::to_canon;
+use super::{blocking, to_canon};
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 #[derive(Serialize, Clone)]
@@ -45,7 +45,17 @@ const PRUNE_DIRS: &[&str] = &[
 ];
 
 #[tauri::command]
-pub fn fs_search(
+pub async fn fs_search(
+    root: String,
+    query: String,
+    limit: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    show_hidden: Option<bool>,
+) -> Result<SearchResult, String> {
+    blocking(move || fs_search_impl(root, query, limit, workspace, show_hidden)).await
+}
+
+pub fn fs_search_impl(
     root: String,
     query: String,
     limit: Option<usize>,
@@ -154,7 +164,17 @@ pub struct ListFilesResult {
 }
 
 #[tauri::command]
-pub fn fs_list_files(
+pub async fn fs_list_files(
+    root: String,
+    limit: Option<usize>,
+    max_depth: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    show_hidden: Option<bool>,
+) -> Result<ListFilesResult, String> {
+    blocking(move || fs_list_files_impl(root, limit, max_depth, workspace, show_hidden)).await
+}
+
+pub fn fs_list_files_impl(
     root: String,
     limit: Option<usize>,
     max_depth: Option<usize>,

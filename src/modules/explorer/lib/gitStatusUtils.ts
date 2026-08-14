@@ -1,4 +1,7 @@
-import type { GitChangedFile, GitStatusSnapshot } from "@/modules/ai/lib/native";
+import type {
+  GitChangedFile,
+  GitStatusSnapshot,
+} from "@/lib/native";
 
 export type GitStatusCode = "M" | "A" | "D" | "U" | "R";
 
@@ -103,4 +106,23 @@ export function lookupGitStatus(
   const rel = repoRelativePath(absolutePath, [repoRoot, ...alternateRoots]);
   if (rel === null) return null;
   return map.get(rel) ?? null;
+}
+
+/**
+ * Pick the repo whose root contains `absolutePath`, deepest one wins. Returns
+ * null when no repo covers the path. Repos and the path are expected to be
+ * already normalized (forward slashes, no trailing slash).
+ */
+export function containingRepoRoot(
+  repos: string[],
+  absolutePath: string,
+): string | null {
+  if (repos.length === 0) return null;
+  const abs = normalizePath(absolutePath);
+  let best: string | null = null;
+  for (const root of uniqueRoots(repos)) {
+    if (abs !== root && !abs.startsWith(`${root}/`)) continue;
+    if (best === null || root.length > best.length) best = root;
+  }
+  return best;
 }

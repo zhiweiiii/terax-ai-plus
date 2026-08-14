@@ -88,29 +88,12 @@ All git commands are gated through the workspace authorization registry.
 
 ### Shell (`src-tauri/src/modules/shell/`)
 
-Three distinct surfaces:
-
-- `shell_run_command` - one-shot subshell exec for AI tools
-- `shell_session_open` / `shell_session_run` / `shell_session_close` - persistent agent shell with state across calls
-- `shell_bg_spawn` / `shell_bg_logs` / `shell_bg_kill` / `shell_bg_list` - long-running background processes with bounded ring-buffer log capture
+- `shell_run_command` - one-shot subshell exec (used by the VCS worktree feature); not the user's interactive terminal
 
 ### Workspace (`src-tauri/src/modules/workspace.rs`)
 
-- `workspace_authorize` / `workspace_current_dir` - the spawn/git/AI cwd authorization registry
+- `workspace_authorize` / `workspace_current_dir` - the spawn/git cwd authorization registry
 - `wsl_list_distros` / `wsl_default_distro` / `wsl_home` - WSL bridge
-
-### Network (`src-tauri/src/modules/net.rs`)
-
-- `ai_http_request` / `ai_http_stream` - AI HTTP proxy with SSRF guard
-- `lm_ping` - local-model ping
-
-### Secrets (`src-tauri/src/modules/secrets.rs`)
-
-- `secrets_get` / `secrets_set` / `secrets_delete` / `secrets_get_all` - OS keychain access, service `terax-ai`
-
-### Agent hooks (`src-tauri/src/modules/agent.rs`)
-
-- `agent_enable_hooks` / `agent_hooks_status` - install/status terminal coding-agent hooks (Claude Code, Codex, Gemini CLI)
 
 ### History (`src-tauri/src/modules/history/`)
 
@@ -130,8 +113,8 @@ See [CLI control plane](cli-control.md) for the local protocol and packaging mod
 
 ## Invariants
 
-- The webview must not spawn processes, read files, or make network calls except through the commands above.
-- New commands must be registered in `lib.rs` and guarded at the boundary (workspace auth, deny-list, SSRF, approval flow).
+- The webview must not spawn processes or read files except through the commands above.
+- New commands must be registered in `lib.rs` and guarded at the boundary (workspace auth, IPC allowlist).
 - Plugin permissions must be added to `src-tauri/capabilities/default.json` if the command uses a plugin API.
 
 ## See also

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { GitChangedFile, GitStatusSnapshot } from "@/modules/ai/lib/native";
+import type { GitChangedFile, GitStatusSnapshot } from "@/lib/native";
 import {
   buildGitStatusMap,
+  containingRepoRoot,
   lookupGitStatus,
   repoRelativePath,
   statusCodeForFile,
@@ -110,5 +111,35 @@ describe("lookupGitStatus", () => {
   it("returns null for unchanged and out-of-repo paths", () => {
     expect(lookupGitStatus(map, "/repo", "/repo/src/b.ts")).toBeNull();
     expect(lookupGitStatus(map, "/repo", "/elsewhere/a.ts")).toBeNull();
+  });
+});
+
+describe("containingRepoRoot", () => {
+  it("picks the deepest repo containing the path", () => {
+    expect(
+      containingRepoRoot(["/ws", "/ws/repo-b", "/ws/repo-a"], "/ws/repo-a/x.ts"),
+    ).toBe("/ws/repo-a");
+  });
+
+  it("returns null when no repo covers the path", () => {
+    expect(containingRepoRoot(["/ws/repo-a"], "/other/x.ts")).toBeNull();
+  });
+
+  it("treats the repo root itself as contained", () => {
+    expect(containingRepoRoot(["/ws/repo-a"], "/ws/repo-a")).toBe(
+      "/ws/repo-a",
+    );
+  });
+
+  it("never matches a repo that is merely a path prefix", () => {
+    expect(
+      containingRepoRoot(["/ws/repo"], "/ws/repo-other/x.ts"),
+    ).toBeNull();
+  });
+
+  it("normalizes backslashes on the queried path", () => {
+    expect(
+      containingRepoRoot(["C:/ws/repo-a"], "C:\\ws\\repo-a\\x.ts"),
+    ).toBe("C:/ws/repo-a");
   });
 });

@@ -1,5 +1,4 @@
 import type { Tab } from "@/modules/tabs";
-import type { SearchAddon } from "@xterm/addon-search";
 import { useEffect, useMemo, useRef } from "react";
 import { selectLiveTerminals } from "./lib/liveTerminals";
 import { leafIds } from "./lib/panes";
@@ -11,7 +10,6 @@ type Props = {
   activeId: number;
   /** Register/unregister handle by leaf id (not tab id). */
   registerHandle: (leafId: number, handle: TerminalPaneHandle | null) => void;
-  onSearchReady: (leafId: number, addon: SearchAddon) => void;
   onCwd: (leafId: number, cwd: string) => void;
   onExit: (leafId: number, code: number) => void;
   onFocusLeaf: (tabId: number, leafId: number) => void;
@@ -19,7 +17,6 @@ type Props = {
 
 type Bundle = {
   setRef: (h: TerminalPaneHandle | null) => void;
-  onSearchReady: (leafId: number, addon: SearchAddon) => void;
   onCwd: (leafId: number, cwd: string) => void;
   onExit: (leafId: number, code: number) => void;
 };
@@ -28,7 +25,6 @@ export function TerminalStack({
   tabs,
   activeId,
   registerHandle,
-  onSearchReady,
   onCwd,
   onExit,
   onFocusLeaf,
@@ -36,15 +32,11 @@ export function TerminalStack({
   const terminals = useMemo(() => selectLiveTerminals(tabs), [tabs]);
 
   const registerRef = useRef(registerHandle);
-  const searchReadyRef = useRef(onSearchReady);
   const cwdRef = useRef(onCwd);
   const exitRef = useRef(onExit);
   useEffect(() => {
     registerRef.current = registerHandle;
   }, [registerHandle]);
-  useEffect(() => {
-    searchReadyRef.current = onSearchReady;
-  }, [onSearchReady]);
   useEffect(() => {
     cwdRef.current = onCwd;
   }, [onCwd]);
@@ -58,7 +50,6 @@ export function TerminalStack({
     if (!b) {
       b = {
         setRef: (h) => registerRef.current(leafId, h),
-        onSearchReady: (id, addon) => searchReadyRef.current(id, addon),
         onCwd: (id, cwd) => cwdRef.current(id, cwd),
         onExit: (id, code) => exitRef.current(id, code),
       };

@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 30;
 pub(crate) const NETWORK_TIMEOUT_SECS: u64 = 120;
@@ -172,16 +172,110 @@ pub struct GitPushResult {
 #[serde(rename_all = "camelCase")]
 pub struct GitBranchEntry {
     pub name: String,
-    pub kind: String, // "local" | "worktree"
+    pub kind: String, // "local" | "worktree" | "remote"
     pub worktree_path: Option<String>,
     pub is_head: bool,
     pub is_detached: bool,
+    /// Local entries only: the remote branch this local one tracks, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    /// Remote entries only: a local branch with the same short name exists.
+    pub has_local: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranchListResult {
     pub branches: Vec<GitBranchEntry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GitCommitOptions {
+    pub amend: bool,
+    pub no_verify: bool,
+    pub allow_empty: bool,
+    pub gpg_sign: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPreCommitChecksResult {
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitConfigUserResult {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitMergeResult {
+    pub merged: bool,
+    pub up_to_date: bool,
+    pub conflicts: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRebaseResult {
+    pub ok: bool,
+    pub conflict: bool,
+    pub message: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GitTagCreateOptions {
+    pub annotated: bool,
+    pub message: Option<String>,
+    pub force: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCompareResult {
+    pub left_only: Vec<GitLogEntry>,
+    pub right_only: Vec<GitLogEntry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GitPushOptions {
+    pub force: bool,
+    pub no_verify: bool,
+    pub tags: Option<String>,
+    pub remote: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRemoteEntry {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GitCloneOptions {
+    pub shallow: bool,
+    pub recurse_submodules: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GitLogFilterOptions {
+    pub branch: Option<String>,
+    pub author: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub no_merges: bool,
+    pub max_count: Option<u32>,
+    pub skip: Option<u32>,
 }
 
 pub(crate) struct GitOutput {

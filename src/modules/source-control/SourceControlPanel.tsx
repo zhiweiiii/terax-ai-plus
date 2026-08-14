@@ -26,6 +26,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -38,9 +39,11 @@ import { IS_MAC } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import {
   type GitBranchEntry,
+  type GitLogEntry,
   type GitRepoHead,
+  type GitStatusSnapshot,
   native,
-} from "@/modules/ai/lib/native";
+} from "@/lib/native";
 import {
   copyToClipboard,
   revealInFinder,
@@ -52,19 +55,21 @@ import {
 } from "@/modules/explorer/lib/menuItemClass";
 import { joinPath } from "@/modules/explorer/lib/useFileTree";
 import {
-  AiContentGenerator02Icon,
   Alert02Icon,
   ArrowDown01Icon,
   ArrowRight01Icon,
   ArrowUp01Icon,
   CheckmarkCircle01Icon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CloudDownloadIcon,
   Download01Icon,
+  Edit02Icon,
   Folder01Icon,
   FolderCloudIcon,
   FolderGitTwoIcon,
   GitBranchIcon,
   Refresh01Icon,
-  RemoveSquareIcon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -80,15 +85,23 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
+import { PushDialog } from "./PushDialog";
+import {
+  defaultLocalNameForRemote,
+  RemoteCheckoutRow,
+} from "./RemoteCheckoutRow";
 import {
   repositoryTargetIsPending,
   type SourceControlRepositoryTarget,
 } from "./repositoryTarget";
 import type {
+  PushAdvancedOptions,
+  PushAllResult,
   PushPlan,
   RepoSyncItem,
   SyncProgress,
 } from "./useMultiRepoSourceControl";
+import type { RepoStatusEntry } from "./useRepoStatuses";
 import type { SourceControlSummary } from "./useSourceControl";
 import {
   type CheckState,
@@ -115,12 +128,28 @@ type Props = {
   headerExtra?: ReactNode;
   /** Repos discovered in the workspace; >1 groups Changes and batches Sync. */
   repos?: GitRepoHead[];
+  /** Per-repo snapshots owned by the multi-repo layer (grouped list + badges). */
+  repoStatusEntries?: RepoStatusEntry[];
+  applyRepoStatus?: (
+    repoRoot: string,
+    updater: (status: GitStatusSnapshot) => GitStatusSnapshot,
+  ) => void;
+  refreshRepoStatus?: (repoRoot: string) => Promise<void>;
+  refreshAllRepoStatuses?: () => Promise<void>;
   /** Live per-repo Sync state; rendered above the change list while present. */
   syncProgress?: SyncProgress | null;
   onDismissSyncProgress?: () => void;
   /** Survey what a push would send, for the confirmation dialog. */
   buildPushPlan?: () => Promise<PushPlan>;
-  pushAll?: (plan: PushPlan) => Promise<void>;
+  /** Push with options (force) via the advanced push dialog. */
+  pushAllAdvanced?: (
+    plan: PushPlan,
+    options: PushAdvancedOptions,
+  ) => Promise<PushAllResult>;
+  /** Open the remote manager for the active repo. */
+  onManageRemotes?: () => void;
+  /** Open the clone dialog (used from the no-repo state). */
+  onCloneRepository?: () => void;
 };
 
 function syncPhaseText(phase: RepoSyncItem["phase"]): {
@@ -228,9 +257,21 @@ const ROW_HEIGHTS = {
 
 type RowDescriptor =
   | { kind: "banner-diverged"; key: string }
-  | { kind: "repo-header"; key: string; label: string; count: number }
+  | {
+      kind: "repo-header";
+      key: string;
+      label: string;
+      count: number;
+      collapsed: boolean;
+    }
   | { kind: "list-header"; key: string; count: number }
-  | { kind: "folder-header"; key: string; label: string; count: number }
+  | {
+      kind: "folder-header";
+      key: string;
+      label: string;
+      count: number;
+      collapsed: boolean;
+    }
   | { kind: "entry"; key: string; entry: SourceControlFileEntry };
 
 function basename(path: string): string {
@@ -241,6 +282,14 @@ function basename(path: string): string {
 function dirname(path: string): string {
   const normalized = path.replace(/\\/g, "/");
   const index = normalized.lastIndexOf("/");
+  if (index <= 0) return "";
+  return normalized.slice(0, index);
+}
+
+/** First path segment of a repo-relative path; "" for files at the repo root. */
+function topLevelDir(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const index = normalized.indexOf("/");
   if (index <= 0) return "";
   return normalized.slice(0, index);
 }
@@ -295,6 +344,12 @@ function BranchDropdown({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkingOut, setCheckingOut] = useState(false);
+  // Remote branch being checked out as a new local branch, with the editable
+  // local name; null hides the naming row.
+  const [pendingRemote, setPendingRemote] = useState<{
+    remote: string;
+    local: string;
+  } | null>(null);
   const requestRef = useRef(0);
   const checkoutInFlight = useRef(false);
 
@@ -349,8 +404,34 @@ function BranchDropdown({
     [repoRoot, onRefresh],
   );
 
+  const handleRemoteCheckout = useCallback(async () => {
+    if (!repoRoot || !pendingRemote || checkoutInFlight.current) return;
+    checkoutInFlight.current = true;
+    setCheckingOut(true);
+    try {
+      await native.gitCheckoutBranch(
+        repoRoot,
+        pendingRemote.remote,
+        pendingRemote.local.trim(),
+      );
+      setBranches([]);
+      setPendingRemote(null);
+      setOpen(false);
+      onRefresh();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      checkoutInFlight.current = false;
+      setCheckingOut(false);
+    }
+  }, [pendingRemote, repoRoot, onRefresh]);
+
   const localBranches = useMemo(
     () => branches.filter((b) => b.kind === "local"),
+    [branches],
+  );
+  const remotes = useMemo(
+    () => branches.filter((b) => b.kind === "remote"),
     [branches],
   );
   const worktrees = useMemo(
@@ -359,7 +440,13 @@ function BranchDropdown({
   );
 
   return (
-    <DropdownMenu open={open} onOpenChange={setOpen}>
+    <DropdownMenu
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setPendingRemote(null);
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <button
           type="button"
@@ -421,6 +508,23 @@ function BranchDropdown({
           </div>
         ) : (
           <>
+            {pendingRemote ? (
+              <>
+                <RemoteCheckoutRow
+                  remote={pendingRemote.remote}
+                  value={pendingRemote.local}
+                  onChange={(value) =>
+                    setPendingRemote((current) =>
+                      current ? { ...current, local: value } : current,
+                    )
+                  }
+                  busy={checkingOut}
+                  onConfirm={() => void handleRemoteCheckout()}
+                  onCancel={() => setPendingRemote(null)}
+                />
+                <DropdownMenuSeparator className="my-0.5 border-t border-border/30" />
+              </>
+            ) : null}
             {localBranches.length > 0 && (
               <>
                 <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
@@ -443,6 +547,44 @@ function BranchDropdown({
                       ) : (
                         <span className="w-3.5 shrink-0" />
                       )}
+                      <span className="min-w-0 flex-1 truncate">{b.name}</span>
+                      {b.upstream ? (
+                        <span className="shrink-0 truncate text-[10px] text-muted-foreground/60">
+                          → {b.upstream}
+                        </span>
+                      ) : null}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </>
+            )}
+            {remotes.length > 0 && (
+              <>
+                {(localBranches.length > 0 || pendingRemote) && (
+                  <DropdownMenuSeparator />
+                )}
+                <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
+                  Remote Branches — checkout as a new local branch
+                </DropdownMenuLabel>
+                <DropdownMenuGroup>
+                  {remotes.map((b) => (
+                    <DropdownMenuItem
+                      key={b.name}
+                      onSelect={(e) => {
+                        e.preventDefault();
+                        setPendingRemote({
+                          remote: b.name,
+                          local: defaultLocalNameForRemote(b.name),
+                        });
+                      }}
+                      className="flex cursor-pointer items-center gap-2 text-[12px]"
+                    >
+                      <HugeiconsIcon
+                        icon={CloudDownloadIcon}
+                        size={13}
+                        strokeWidth={1.8}
+                        className="shrink-0 text-sky-500/80"
+                      />
                       <span className="min-w-0 flex-1 truncate">{b.name}</span>
                     </DropdownMenuItem>
                   ))}
@@ -508,21 +650,46 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   onFollowRepositoryContext,
   headerExtra,
   repos,
+  repoStatusEntries,
+  applyRepoStatus,
+  refreshRepoStatus,
+  refreshAllRepoStatuses,
   syncProgress,
   onDismissSyncProgress,
   buildPushPlan,
-  pushAll,
+  pushAllAdvanced,
+  onManageRemotes,
+  onCloneRepository,
 }: Props) {
   const repoList = useMemo(() => repos ?? [], [repos]);
   const [pushPlan, setPushPlan] = useState<PushPlan | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
+  const [pullBusy, setPullBusy] = useState(false);
   const repoCount = repoList.length;
-  const scm = useSourceControlPanel(open, sourceControl, onOpenDiff, repoList);
+  const scm = useSourceControlPanel(open, sourceControl, onOpenDiff, repoList, {
+    entries: repoStatusEntries ?? [],
+    applyStatus: applyRepoStatus ?? (() => {}),
+    refreshRepo: refreshRepoStatus ?? (async () => {}),
+    refreshAll: refreshAllRepoStatuses ?? (async () => {}),
+  });
   const refreshAnimationRef = useRef<number | null>(null);
   const [refreshAnimating, setRefreshAnimating] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [focusedRowKey, setFocusedRowKey] = useState<string | null>(null);
+  // Keys of repo/folder groups collapsed in the changes list.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const toggleCollapsedGroup = useCallback((key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -547,7 +714,6 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   }, [fixedTargetPending, scm.status]);
 
   const commitShortcut = IS_MAC ? "⌘↩" : "Ctrl+Enter";
-  const generateShortcut = IS_MAC ? "⌘G" : "Ctrl+G";
   // stagedEntries covers the active repo only; fileEntries spans every repo, so
   // commit stays enabled when the staged work sits in another group.
   const stagedRepoCount =
@@ -558,19 +724,22 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         : 0;
   const canCommit =
     stagedRepoCount > 0 &&
-    scm.commitMessage.trim().length > 0 &&
+    (scm.commitMessage.trim().length > 0 || scm.amendEnabled) &&
     !fixedTargetPending &&
     !scm.actionBusy;
   const commitDisabledReason = scm.actionBusy
     ? "Wait for the current Git action to finish."
     : stagedRepoCount === 0
       ? "Stage changes to enable commit."
-      : scm.commitMessage.trim().length === 0
-        ? "Enter a commit message to enable commit."
+      : scm.commitMessage.trim().length === 0 && !scm.amendEnabled
+        ? "Enter a commit message, or enable Amend to reuse the previous one."
         : null;
   const commitHint = canCommit
     ? `Commit with ${commitShortcut}.`
     : (commitDisabledReason ?? `Commit with ${commitShortcut}.`);
+  const commitAndPushHint = canCommit
+    ? "Commit and push to the upstream branch."
+    : (commitDisabledReason ?? "Commit and push to the upstream branch.");
   const pushHint = scm.pushHint ?? "Push is unavailable right now.";
   const pushDisabledReason = fixedTargetPending
     ? "Wait for the selected repository to finish loading."
@@ -593,7 +762,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     !isDiverged &&
     !fixedTargetPending &&
     !scm.actionBusy &&
-    !sourceControl.busyAction;
+    !sourceControl.busyAction &&
+    !pullBusy;
   const canFetch =
     hasUpstream &&
     !fixedTargetPending &&
@@ -620,14 +790,6 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       void scm.commit();
       return;
     }
-    if (
-      event.key.toLowerCase() === "g" &&
-      (event.metaKey || event.ctrlKey) &&
-      scm.canGenerateCommitMessage
-    ) {
-      event.preventDefault();
-      void scm.generateCommitMessage();
-    }
   };
 
   const handleRefresh = useCallback(() => {
@@ -647,9 +809,44 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     void sourceControl.runRemoteAction("sync");
   }, [sourceControl]);
 
-  const handlePull = useCallback(() => {
-    void sourceControl.runRemoteAction("pull");
-  }, [sourceControl]);
+  const handlePull = useCallback(async () => {
+    if (pullBusy) return;
+    setPullBusy(true);
+    try {
+      if (repoList.length > 1) {
+        const failures: string[] = [];
+        for (const repo of repoList) {
+          try {
+            await native.gitPullAdvanced(repo.repoRoot, "merge");
+          } catch (error) {
+            failures.push(
+              `${basename(repo.repoRoot)}: ${
+                typeof error === "string" ? error : String(error)
+              }`,
+            );
+          }
+        }
+        if (failures.length > 0) {
+          toast.error(
+            failures.length === repoList.length
+              ? `Pull failed for all ${failures.length} repos`
+              : `Pulled ${repoList.length - failures.length}/${repoList.length} repos; ${failures.length} failed`,
+          );
+        }
+        await scm.refresh();
+        await refreshAllRepoStatuses?.();
+      } else {
+        const root = scm.repo?.repoRoot;
+        if (!root) return;
+        await native.gitPullAdvanced(root, "merge");
+        await scm.refresh();
+      }
+    } catch (error) {
+      toast.error(typeof error === "string" ? error : String(error));
+    } finally {
+      setPullBusy(false);
+    }
+  }, [pullBusy, refreshAllRepoStatuses, repoList, scm]);
 
   const rows = useMemo<RowDescriptor[]>(() => {
     const result: RowDescriptor[] = [];
@@ -662,12 +859,12 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         key: "list-header",
         count: changedCount,
       });
-      // Group entries by their parent directory (like IDEA's Changes view).
-      // Only insert a folder header when >=2 files share the same directory.
-      const pushByFolder = (files: SourceControlFileEntry[]) => {
+      // Group entries by their top-level directory (like IDEA's Changes view).
+      // Only insert a folder header when >=2 files share the same folder.
+      const pushByFolder = (files: SourceControlFileEntry[], repoKey: string) => {
         const groups = new Map<string, SourceControlFileEntry[]>();
         for (const entry of files) {
-          const dir = dirname(entry.path);
+          const dir = topLevelDir(entry.path);
           const bucket = groups.get(dir);
           if (bucket) bucket.push(entry);
           else groups.set(dir, [entry]);
@@ -679,14 +876,18 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         });
         for (const dir of sortedDirs) {
           const entries = groups.get(dir)!;
+          const folderKey = `${repoKey}:folder:${dir}`;
+          const collapsed = collapsedGroups.has(folderKey);
           if (entries.length > 1) {
             result.push({
               kind: "folder-header",
-              key: `folder:${dir}`,
+              key: folderKey,
               label: dir || "(root)",
               count: entries.length,
+              collapsed,
             });
           }
+          if (collapsed) continue;
           for (const entry of entries) {
             result.push({ kind: "entry", key: entry.key, entry });
           }
@@ -697,20 +898,30 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       // path that exists in several repos is never ambiguous.
       if (scm.repoGroups.length > 0) {
         for (const group of scm.repoGroups) {
+          const repoKey = `repo:${group.repoRoot}`;
+          const collapsed = collapsedGroups.has(repoKey);
           result.push({
             kind: "repo-header",
-            key: `repo:${group.repoRoot}`,
+            key: repoKey,
             label: group.name,
             count: group.files.length,
+            collapsed,
           });
-          pushByFolder(group.files);
+          if (collapsed) continue;
+          pushByFolder(group.files, repoKey);
         }
       } else {
-        pushByFolder(scm.fileEntries);
+        pushByFolder(scm.fileEntries, "repo:default");
       }
     }
     return result;
-  }, [changedCount, isDiverged, scm.fileEntries, scm.repoGroups]);
+  }, [
+    changedCount,
+    collapsedGroups,
+    isDiverged,
+    scm.fileEntries,
+    scm.repoGroups,
+  ]);
 
   const rowKeyToIndex = useMemo(() => {
     const map = new Map<string, number>();
@@ -852,7 +1063,6 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   if (!open) return null;
 
   const fetchBusy = sourceControl.busyAction === "fetch";
-  const pullBusy = sourceControl.busyAction === "pull";
 
   return (
     <TooltipProvider delayDuration={800} skipDelayDuration={300}>
@@ -860,7 +1070,10 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 pb-2.5 pt-3">
           <div className="flex min-w-0 items-center gap-1.5">
             {headerExtra}
-            {repoList.length > 1 ? null : (
+            {/* RepoBranchSelector already covers the branch axis whenever any
+                repo was discovered; the legacy branch-only button is only the
+                fallback for a context-resolved repo with no scan results. */}
+            {repoList.length > 0 ? null : (
               <BranchDropdown
                 repoRoot={
                   fixedTargetPending ? null : (scm.repo?.repoRoot ?? null)
@@ -940,10 +1153,10 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       ? "No upstream configured"
                       : (scm.status?.behind ?? 0) === 0
                         ? "Already up to date"
-                        : `Pull ${scm.status?.behind ?? 0} commits (fast-forward)`
+                        : `Pull ${scm.status?.behind ?? 0} commits (merge)`
               }
               disabled={!canPull}
-              onClick={handlePull}
+              onClick={() => void handlePull()}
               side="bottom"
             >
               {pullBusy ? (
@@ -973,6 +1186,19 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 />
               )}
             </IconActionButton>
+            {!fixedTargetPending && scm.repo?.repoRoot && onManageRemotes ? (
+              <IconActionButton
+                label="Manage remotes"
+                onClick={onManageRemotes}
+                side="bottom"
+              >
+                <HugeiconsIcon
+                  icon={Edit02Icon}
+                  size={14}
+                  strokeWidth={1.9}
+                />
+              </IconActionButton>
+            ) : null}
           </div>
         </header>
         {syncProgress && syncProgress.items.length > 1 ? (
@@ -1012,6 +1238,13 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           <PanelCenter
             title="No repository"
             body="The active workspace is not inside a Git repository."
+            action={
+              onCloneRepository ? (
+                <Button size="sm" onClick={onCloneRepository}>
+                  Clone repository…
+                </Button>
+              ) : undefined
+            }
           />
         ) : null}
 
@@ -1058,42 +1291,6 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                     </span>
                   )}
                 </div>
-                <div className="absolute right-1 top-1">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        aria-label={`${scm.generateCommitMessageHint} (${generateShortcut})`}
-                        disabled={!scm.canGenerateCommitMessage}
-                        onClick={() => void scm.generateCommitMessage()}
-                        className={cn(
-                          "inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground/65 transition-colors",
-                          "hover:bg-foreground/[0.06] hover:text-foreground",
-                          "disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/65",
-                        )}
-                      >
-                        {scm.actionBusy === "generate-message" ? (
-                          <Spinner className="size-3" />
-                        ) : (
-                          <HugeiconsIcon
-                            icon={AiContentGenerator02Icon}
-                            size={14}
-                            strokeWidth={1.75}
-                          />
-                        )}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent
-                      side="left"
-                      className={cn(
-                        SOURCE_CONTROL_TOOLTIP_CLASS,
-                        "text-[10.5px]",
-                      )}
-                    >
-                      {`${scm.generateCommitMessageHint} (${generateShortcut})`}
-                    </TooltipContent>
-                  </Tooltip>
-                </div>
               </div>
 
               <div className="flex min-w-0 items-center gap-1.5 text-[10.5px] text-muted-foreground">
@@ -1117,6 +1314,41 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 </span>
               </div>
 
+              <div className="flex min-w-0 items-center gap-1.5">
+                <label
+                  htmlFor="scm-amend-toggle"
+                  className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <Checkbox
+                    id="scm-amend-toggle"
+                    aria-label="Amend the most recent commit"
+                    checked={scm.amendEnabled}
+                    disabled={!!scm.actionBusy}
+                    onCheckedChange={(checked) =>
+                      scm.setAmendEnabled(checked === true)
+                    }
+                    className="size-3.5"
+                  />
+                  Amend
+                </label>
+                {scm.amendEnabled && scm.amendSpecificSupported ? (
+                  <AmendCommitDropdown
+                    commits={scm.recentCommits}
+                    selectedSha={scm.amendTargetSha}
+                    disabled={!!scm.actionBusy}
+                    onSelect={scm.setAmendTargetSha}
+                    onOpen={() => void scm.refreshRecentCommits()}
+                  />
+                ) : null}
+                {scm.amendEnabled ? (
+                  <span className="ml-auto truncate text-[10px] text-muted-foreground/60">
+                    {scm.amendTargetSha
+                      ? "Merges changes into the selected commit"
+                      : "Merges changes into the most recent commit"}
+                  </span>
+                ) : null}
+              </div>
+
               <div className="grid w-full grid-cols-2 gap-1.5">
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1126,7 +1358,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       disabled={!canCommit}
                       onClick={() => void scm.commit()}
                     >
-                      {scm.actionBusy === "commit"
+                      {scm.actionBusy === "commit" ||
+                      scm.actionBusy === "commit-and-push"
                         ? "Committing…"
                         : stagedRepoCount > 1
                           ? `Commit to ${stagedRepoCount} repos`
@@ -1149,6 +1382,32 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       size="xs"
                       variant="secondary"
                       className="h-7 cursor-pointer text-[11.5px] font-medium disabled:cursor-not-allowed"
+                      disabled={!canCommit}
+                      onClick={() => void scm.commitAndPush()}
+                    >
+                      {scm.actionBusy === "commit-and-push"
+                        ? "Committing…"
+                        : "Commit & Push"}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="bottom"
+                    className={cn(
+                      SOURCE_CONTROL_TOOLTIP_CLASS,
+                      "text-[10.5px]",
+                    )}
+                  >
+                    {commitAndPushHint}
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+              <div className="grid w-full gap-1.5">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      className="h-7 cursor-pointer text-[11.5px] font-medium disabled:cursor-not-allowed"
                       disabled={
                         (!scm.canPush && repoList.length <= 1) ||
                         fixedTargetPending ||
@@ -1162,7 +1421,9 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                         if (repoList.length > 1 && buildPushPlan) {
                           setPlanLoading(true);
                           void buildPushPlan()
-                            .then(setPushPlan)
+                            .then((plan) => {
+                              setPushPlan(plan);
+                            })
                             .finally(() => setPlanLoading(false));
                           return;
                         }
@@ -1188,7 +1449,11 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 </Tooltip>
               </div>
 
-              <CommitFeedback feedback={footerFeedback} />
+              <CommitFeedback
+                feedback={footerFeedback}
+                rewordable={scm.rewordTarget !== null && !scm.actionBusy}
+                onReword={scm.openReword}
+              />
             </div>
 
             {scm.allClean ? (
@@ -1244,6 +1509,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                             onToggleStageFile={scm.toggleStageFile}
                             onDiscardFile={scm.requestDiscardFile}
                             onOpenFile={onOpenFile}
+                            onToggleGroup={toggleCollapsedGroup}
                           />
                         </div>
                       );
@@ -1256,98 +1522,19 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         ) : null}
       </aside>
 
-      <AlertDialog
+      <PushDialog
         open={pushPlan !== null}
         onOpenChange={(o) => {
           if (!o) setPushPlan(null);
         }}
-      >
-        <AlertDialogContent className="max-w-lg">
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {pushPlan && pushPlan.entries.length > 0
-                ? `Push to ${pushPlan.entries.length} ${
-                    pushPlan.entries.length === 1
-                      ? "repository"
-                      : "repositories"
-                  }?`
-                : "Nothing to push"}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {pushPlan && pushPlan.entries.length > 0
-                ? "Repositories are pushed one at a time, in this order."
-                : "No repository has local commits ready for its upstream."}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="max-h-72 overflow-y-auto">
-            {pushPlan?.entries.map((entry) => (
-              <div
-                key={entry.repoRoot}
-                className="mb-2 rounded-lg border border-border/50 px-2.5 py-2"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className="truncate text-[12px] font-medium">
-                    {entry.name}
-                  </span>
-                  <span className="truncate text-[10.5px] text-muted-foreground">
-                    {entry.branch} → {entry.upstream}
-                  </span>
-                  <span className="ml-auto shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                    ↑{entry.ahead}
-                  </span>
-                </div>
-                <ul className="mt-1 flex flex-col gap-0.5">
-                  {entry.commits.map((c) => (
-                    <li
-                      key={c.sha}
-                      className="flex items-baseline gap-2 text-[10.5px]"
-                    >
-                      <code className="shrink-0 text-muted-foreground/70">
-                        {c.shortSha}
-                      </code>
-                      <span className="min-w-0 flex-1 truncate">
-                        {c.subject}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-            {pushPlan && pushPlan.skipped.length > 0 ? (
-              <div className="mt-1 rounded-lg bg-muted/40 px-2.5 py-2">
-                <div className="mb-1 text-[10.5px] font-medium text-muted-foreground">
-                  Skipped
-                </div>
-                <ul className="flex flex-col gap-0.5">
-                  {pushPlan.skipped.map((sk) => (
-                    <li
-                      key={sk.name}
-                      className="flex items-baseline gap-2 text-[10.5px] text-muted-foreground"
-                    >
-                      <span className="min-w-0 flex-1 truncate">{sk.name}</span>
-                      <span className="shrink-0">{sk.reason}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            {pushPlan && pushPlan.entries.length > 0 ? (
-              <AlertDialogAction
-                onClick={() => {
-                  const plan = pushPlan;
-                  setPushPlan(null);
-                  if (plan && pushAll) void pushAll(plan);
-                }}
-              >
-                Push
-              </AlertDialogAction>
-            ) : null}
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        plan={pushPlan}
+        onPush={(plan, options) =>
+          pushAllAdvanced
+            ? pushAllAdvanced(plan, options)
+            : Promise.resolve({ rejected: [] })
+        }
+        syncProgress={syncProgress}
+      />
 
       <AlertDialog
         open={scm.pendingDiscard !== null}
@@ -1372,6 +1559,89 @@ export const SourceControlPanel = memo(function SourceControlPanel({
             </AlertDialogCancel>
             <AlertDialogAction onClick={() => void scm.confirmPendingDiscard()}>
               Discard
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={scm.preCommitWarnings !== null}
+        onOpenChange={(o) => {
+          if (!o) scm.cancelPreCommitWarnings();
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Pre-commit checks found issues</AlertDialogTitle>
+            <AlertDialogDescription>
+              The repository's pre-commit checks reported the following. Do you
+              still want to commit?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className="flex max-h-48 flex-col gap-1 overflow-y-auto rounded-md border border-border/50 bg-muted/30 px-2.5 py-2">
+            {scm.preCommitWarnings?.map((warning) => (
+              <li
+                key={warning}
+                className="text-[11px] leading-snug text-muted-foreground"
+              >
+                {warning}
+              </li>
+            ))}
+          </ul>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => scm.cancelPreCommitWarnings()}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void scm.confirmPreCommitWarnings()}
+            >
+              Commit anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={scm.rewordOpen}
+        onOpenChange={(o) => {
+          if (!o) scm.cancelReword();
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reword commit</AlertDialogTitle>
+            <AlertDialogDescription>
+              Rewrite the message of the last commit without touching its
+              contents.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <Input
+            value={scm.rewordMessage}
+            onChange={(event) => scm.setRewordMessage(event.target.value)}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                scm.rewordMessage.trim().length > 0
+              ) {
+                event.preventDefault();
+                void scm.confirmReword();
+              }
+            }}
+            placeholder="New commit message"
+            autoFocus
+            className="rounded-xl"
+          />
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => scm.cancelReword()}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                scm.rewordMessage.trim().length === 0 || !!scm.actionBusy
+              }
+              onClick={() => void scm.confirmReword()}
+            >
+              Reword
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1435,6 +1705,7 @@ type RowRendererProps = {
   onToggleStageFile: (entry: SourceControlFileEntry) => Promise<void>;
   onDiscardFile: (entry: SourceControlFileEntry) => void;
   onOpenFile?: (absolutePath: string) => void;
+  onToggleGroup: (key: string) => void;
 };
 
 const RowRenderer = memo(function RowRenderer(props: RowRendererProps) {
@@ -1445,9 +1716,9 @@ const RowRenderer = memo(function RowRenderer(props: RowRendererProps) {
     case "list-header":
       return <ListHeader {...props} row={row} />;
     case "repo-header":
-      return <RepoHeader row={row} />;
+      return <RepoHeader row={row} onToggle={props.onToggleGroup} />;
     case "folder-header":
-      return <FolderHeader row={row} />;
+      return <FolderHeader row={row} onToggle={props.onToggleGroup} />;
     case "entry":
       return <EntryRow {...props} row={row} />;
   }
@@ -1474,11 +1745,24 @@ function DivergedBanner() {
 
 function RepoHeader({
   row,
+  onToggle,
 }: {
   row: Extract<RowDescriptor, { kind: "repo-header" }>;
+  onToggle: (key: string) => void;
 }) {
   return (
-    <div className="flex h-[26px] items-center gap-2 border-t border-border/40 px-2.5 pt-1">
+    <button
+      type="button"
+      onClick={() => onToggle(row.key)}
+      aria-expanded={!row.collapsed}
+      className="flex h-[26px] w-full cursor-pointer items-center gap-2 border-t border-border/40 px-2.5 pt-1 text-left hover:bg-foreground/[0.03]"
+    >
+      <HugeiconsIcon
+        icon={row.collapsed ? ChevronRightIcon : ChevronDownIcon}
+        size={10}
+        strokeWidth={2}
+        className="shrink-0 text-muted-foreground/60"
+      />
       <HugeiconsIcon
         icon={FolderGitTwoIcon}
         size={12}
@@ -1491,17 +1775,30 @@ function RepoHeader({
       <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground/[0.07] px-1 text-[9px] tabular-nums text-muted-foreground">
         {row.count}
       </span>
-    </div>
+    </button>
   );
 }
 
 function FolderHeader({
   row,
+  onToggle,
 }: {
   row: Extract<RowDescriptor, { kind: "folder-header" }>;
+  onToggle: (key: string) => void;
 }) {
   return (
-    <div className="flex h-6 items-center gap-2 px-3">
+    <button
+      type="button"
+      onClick={() => onToggle(row.key)}
+      aria-expanded={!row.collapsed}
+      className="flex h-6 w-full cursor-pointer items-center gap-2 px-3 text-left hover:bg-foreground/[0.03]"
+    >
+      <HugeiconsIcon
+        icon={row.collapsed ? ChevronRightIcon : ChevronDownIcon}
+        size={10}
+        strokeWidth={2}
+        className="shrink-0 text-muted-foreground/50"
+      />
       <HugeiconsIcon
         icon={Folder01Icon}
         size={11}
@@ -1514,7 +1811,7 @@ function FolderHeader({
       <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-border/50 px-1 text-[9px] tabular-nums text-muted-foreground/60">
         {row.count}
       </span>
-    </div>
+    </button>
   );
 }
 
@@ -1566,11 +1863,9 @@ const EntryRow = memo(function EntryRow({
   const isSelected = selectedPath === entry.path;
   const fileName = basename(entry.path);
   const iconUrl = fileIconUrl(fileName);
-  const showDiscard = entry.unstaged;
   const isStageBusy =
     actionBusy === `stage:${entry.path}` ||
     actionBusy === `unstage:${entry.path}`;
-  const isDiscardBusy = actionBusy === `discard:${entry.path}`;
   const disabled = actionBusy !== null;
 
   const absolutePath = repoRoot
@@ -1636,27 +1931,6 @@ const EntryRow = memo(function EntryRow({
             </div>
           </button>
 
-          {showDiscard ? (
-            <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover:opacity-100 data-[focused=true]:opacity-100 data-[selected=true]:opacity-100">
-              <IconActionButton
-                label={`Discard ${entry.path}`}
-                disabled={disabled}
-                side="top"
-                onClick={() => onDiscardFile(entry)}
-              >
-                {isDiscardBusy ? (
-                  <Spinner className="size-3" />
-                ) : (
-                  <HugeiconsIcon
-                    icon={RemoveSquareIcon}
-                    size={11}
-                    strokeWidth={1.9}
-                  />
-                )}
-              </IconActionButton>
-            </div>
-          ) : null}
-
           <span className="flex size-5 shrink-0 items-center justify-center">
             {isStageBusy ? (
               <Spinner className="size-3" />
@@ -1693,25 +1967,19 @@ const EntryRow = memo(function EntryRow({
           </ContextMenuItem>
         ) : null}
 
-        <ContextMenuSeparator />
-
-        {/* Stage / Unstage */}
-        <ContextMenuItem
-          className={COMPACT_ITEM}
-          disabled={disabled}
-          onSelect={() => void onToggleStageFile(entry)}
-        >
-          {entry.checkState === "checked" ? "Unstage" : "Stage"}
-        </ContextMenuItem>
         {entry.unstaged ? (
-          <ContextMenuItem
-            className={COMPACT_ITEM}
-            variant="destructive"
-            disabled={disabled}
-            onSelect={() => onDiscardFile(entry)}
-          >
-            Discard Changes
-          </ContextMenuItem>
+          <>
+            <ContextMenuSeparator />
+
+            <ContextMenuItem
+              className={COMPACT_ITEM}
+              variant="destructive"
+              disabled={disabled}
+              onSelect={() => onDiscardFile(entry)}
+            >
+              Discard Changes
+            </ContextMenuItem>
+          </>
         ) : null}
 
         <ContextMenuSeparator />
@@ -1786,10 +2054,107 @@ function IconActionButton({
   );
 }
 
+function AmendCommitDropdown({
+  commits,
+  selectedSha,
+  disabled,
+  onSelect,
+  onOpen,
+}: {
+  commits: GitLogEntry[];
+  selectedSha: string | null;
+  disabled: boolean;
+  onSelect: (sha: string) => void;
+  onOpen: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = commits.find((c) => c.sha === selectedSha);
+  return (
+    <DropdownMenu
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) onOpen();
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          className={cn(
+            "inline-flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md border border-border/50 bg-foreground/[0.04] px-1.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors",
+            "hover:bg-foreground/[0.08] hover:text-foreground disabled:cursor-default disabled:opacity-60",
+          )}
+        >
+          {selected ? (
+            <>
+              <code className="shrink-0 font-mono text-foreground/80">
+                {selected.shortSha}
+              </code>
+              <span className="max-w-28 truncate">{selected.subject}</span>
+            </>
+          ) : (
+            <span>Merge into commit…</span>
+          )}
+          <HugeiconsIcon
+            icon={ArrowDown01Icon}
+            size={9}
+            strokeWidth={2}
+            className="shrink-0 text-muted-foreground/70"
+          />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        className="max-h-64 w-64 overflow-y-auto"
+      >
+        <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
+          Amend a specific commit
+        </DropdownMenuLabel>
+        <div className="px-2 pb-1.5 text-[10px] text-muted-foreground/60">
+          Merge staged changes into the selected historical commit.
+        </div>
+        {commits.length === 0 ? (
+          <div className="px-3 py-2 text-[11px] text-muted-foreground">
+            No commits found.
+          </div>
+        ) : (
+          <DropdownMenuGroup>
+            {commits.map((c) => (
+              <DropdownMenuItem
+                key={c.sha}
+                onSelect={() => onSelect(c.sha)}
+                className="flex cursor-pointer items-center gap-2 text-[12px]"
+              >
+                <code className="shrink-0 font-mono text-[10.5px] text-muted-foreground/70">
+                  {c.shortSha}
+                </code>
+                <span className="min-w-0 flex-1 truncate">{c.subject}</span>
+                {c.sha === selectedSha ? (
+                  <HugeiconsIcon
+                    icon={Tick02Icon}
+                    size={13}
+                    strokeWidth={2}
+                    className="shrink-0 text-primary"
+                  />
+                ) : null}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuGroup>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function CommitFeedback({
   feedback,
+  rewordable,
+  onReword,
 }: {
   feedback: { tone: "error" | "success"; message: string } | null;
+  rewordable: boolean;
+  onReword: () => void;
 }) {
   const [visibleFeedback, setVisibleFeedback] = useState(feedback);
   const [isVisible, setIsVisible] = useState(false);
@@ -1842,6 +2207,15 @@ function CommitFeedback({
       >
         {visibleFeedback.message}
       </span>
+      {rewordable && !isError ? (
+        <button
+          type="button"
+          onClick={onReword}
+          className="pointer-events-auto ml-auto shrink-0 cursor-pointer rounded-md border border-border/60 px-1.5 py-0.5 text-[10px] font-semibold text-foreground/80 transition-colors hover:bg-foreground/10 hover:text-foreground"
+        >
+          Reword
+        </button>
+      ) : null}
     </div>
   );
 }

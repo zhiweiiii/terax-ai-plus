@@ -5,7 +5,9 @@ use tempfile::TempDir;
 use terax_lib::modules::fs::to_canon;
 use terax_lib::modules::git::errors::GitError;
 use terax_lib::modules::git::operations;
-use terax_lib::modules::git::types::DiscardEntry;
+use terax_lib::modules::git::types::{
+    DiscardEntry, GitCloneOptions, GitCommitOptions, GitLogFilterOptions, GitTagCreateOptions,
+};
 use terax_lib::modules::workspace::{WorkspaceEnv, WorkspaceRegistry};
 
 fn skip_if_no_git() -> bool {
@@ -520,14 +522,36 @@ fn checkout_branch_rejects_unsafe_names() {
     }
     let fx = GitRepoFixture::new();
     
-    let err_empty = operations::checkout_branch(&fx.registry, &fx.repo_str(), "", &fx.workspace).unwrap_err();
+    let err_empty = operations::checkout_branch(&fx.registry, &fx.repo_str(), "", None, &fx.workspace).unwrap_err();
     assert!(matches!(err_empty, GitError::InvalidPath(p) if p.is_empty()));
 
-    let err_dash = operations::checkout_branch(&fx.registry, &fx.repo_str(), "-f", &fx.workspace).unwrap_err();
+    let err_dash = operations::checkout_branch(&fx.registry, &fx.repo_str(), "-f", None, &fx.workspace).unwrap_err();
     assert!(matches!(err_dash, GitError::InvalidPath(p) if p == "-f"));
 
-    let err_dash_long = operations::checkout_branch(&fx.registry, &fx.repo_str(), "--detach", &fx.workspace).unwrap_err();
+    let err_dash_long = operations::checkout_branch(&fx.registry, &fx.repo_str(), "--detach", None, &fx.workspace).unwrap_err();
     assert!(matches!(err_dash_long, GitError::InvalidPath(p) if p == "--detach"));
+}
+
+#[test]
+fn checkout_branch_rejects_unsafe_local_names() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+
+    let err_empty = operations::checkout_branch(&fx.registry, &fx.repo_str(), "main", Some(""), &fx.workspace).unwrap_err();
+    assert!(matches!(err_empty, GitError::InvalidPath(_)));
+
+    let err_whitespace = operations::checkout_branch(&fx.registry, &fx.repo_str(), "main", Some("   "), &fx.workspace).unwrap_err();
+    assert!(matches!(err_whitespace, GitError::InvalidPath(_)));
+
+    let err_dash = operations::checkout_branch(&fx.registry, &fx.repo_str(), "main", Some("-f"), &fx.workspace).unwrap_err();
+    assert!(matches!(err_dash, GitError::InvalidPath(p) if p == "-f"));
+
+    // A local name on a plain local branch is refused: the name only makes
+    // sense when checking out a remote branch as a new local branch.
+    let err_local = operations::checkout_branch(&fx.registry, &fx.repo_str(), "main", Some("custom"), &fx.workspace).unwrap_err();
+    assert!(matches!(err_local, GitError::CommandFailed { .. }));
 }
 
 #[test]
@@ -563,4 +587,971 @@ fn list_branches_keeps_current_branch_local_and_surfaces_worktrees() {
     assert_eq!(feature[0].kind, "worktree");
     assert!(!feature[0].is_head);
     assert!(feature[0].worktree_path.is_some());
+}
+
+#[test]
+fn commit_advanced_with_empty_message_is_rejected() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+
+    let options = GitCommitOptions::default();
+    match operations::commit_advanced(&fx.registry, &fx.repo_str(), "   ", &options, &fx.workspace) {
+        Err(GitError::EmptyCommitMessage) => {}
+        Err(other) => panic!("expected EmptyCommitMessage, got {other}"),
+        Ok(_) => panic!("expected error for empty message"),
+    }
+}
+
+#[test]
+fn commit_advanced_amend_allows_empty_message() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "original"]);
+    fx.write_file("a.txt", "alpha\nbeta\n");
+    fx.run_git(&["add", "a.txt"]);
+
+    let options = GitCommitOptions {
+        amend: true,
+        ..Default::default()
+    };
+    let result = operations::commit_advanced(&fx.registry, &fx.repo_str(), "", &options, &fx.workspace)
+        .expect("amend with no message");
+    assert_eq!(result.summary, "original");
+    assert_eq!(result.commit_sha.len(), 40);
+}
+
+#[test]
+fn commit_advanced_gpg_sign_flag_is_accepted() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+
+    let options = GitCommitOptions {
+        gpg_sign: true,
+        ..Default::default()
+    };
+    // -S with no key fails in git, but the flag must be plumbed through.
+    let err = match operations::commit_advanced(
+        &fx.registry,
+        &fx.repo_str(),
+        "msg",
+        &options,
+        &fx.workspace,
+    ) {
+        Ok(_) => panic!("expected gpg error"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("git commit"), "got: {err}");
+}
+
+#[test]
+fn commit_reword_amends_head_message() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "old subject"]);
+
+    let result = operations::commit_reword(&fx.registry, &fx.repo_str(), "new subject", &fx.workspace)
+        .expect("reword");
+    assert_eq!(result.summary, "new subject");
+    let entries = operations::log(&fx.registry, &fx.repo_str(), 10, None, &fx.workspace).unwrap();
+    assert_eq!(entries[0].subject, "new subject");
+}
+
+#[test]
+fn commit_reword_rejects_empty_message() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    match operations::commit_reword(&fx.registry, &fx.repo_str(), "  ", &fx.workspace) {
+        Err(GitError::EmptyCommitMessage) => {}
+        Err(other) => panic!("expected EmptyCommitMessage, got {other}"),
+        Ok(_) => panic!("expected error"),
+    }
+}
+
+#[test]
+fn pre_commit_checks_flags_missing_user_config() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.run_git(&["config", "--unset", "user.name"]);
+    let result = operations::pre_commit_checks(&fx.registry, &fx.repo_str(), &fx.workspace)
+        .expect("checks");
+    assert!(result.warnings.iter().any(|w| w.contains("user.name")));
+}
+
+#[test]
+fn pre_commit_checks_flags_crlf_and_staged_large_file() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("crlf.txt", "a\r\nb");
+    fx.run_git(&["add", "crlf.txt"]);
+    let mut big = String::with_capacity(3 * 1024 * 1024);
+    for _ in 0..(3 * 1024 * 1024 / 10) {
+        big.push_str("1234567890");
+    }
+    fx.write_file("big.bin", &big);
+    fx.run_git(&["add", "big.bin"]);
+
+    let result = operations::pre_commit_checks(&fx.registry, &fx.repo_str(), &fx.workspace)
+        .expect("checks");
+    assert!(result.warnings.iter().any(|w| w.contains("CRLF")));
+    assert!(result.warnings.iter().any(|w| w.contains("2MB")));
+}
+
+#[test]
+fn pre_commit_checks_flags_in_progress_merge() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.run_git(&["branch", "feature"]);
+    fx.run_git(&["checkout", "-q", "feature"]);
+    fx.write_file("b.txt", "beta\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "feature work"]);
+    fx.run_git(&["checkout", "-q", "main"]);
+    fx.write_file("a.txt", "alpha\nmain\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "main work"]);
+    // Unrelated file conflict to leave a real MERGE_HEAD behind.
+    let _ = git_run_allow_fail(&fx, &["merge", "feature"]);
+    let _ = fx.run_git(&["add", "a.txt"]); // resolve
+
+    let result = operations::pre_commit_checks(&fx.registry, &fx.repo_str(), &fx.workspace)
+        .expect("checks");
+    assert!(
+        result.warnings.iter().any(|w| w.contains("merge")),
+        "got: {:?}",
+        result.warnings
+    );
+    fx.run_git(&["merge", "--abort"]);
+}
+
+#[test]
+fn config_user_reads_configured_values() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    let result = operations::config_user(&fx.registry, &fx.repo_str(), &fx.workspace)
+        .expect("config_user");
+    assert_eq!(result.name.as_deref(), Some("Terax Test"));
+    assert_eq!(result.email.as_deref(), Some("test@terax.local"));
+}
+
+#[test]
+fn create_branch_with_checkout_and_start_point() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+
+    operations::create_branch(
+        &fx.registry,
+        &fx.repo_str(),
+        "feature/x",
+        true,
+        Some("HEAD"),
+        &fx.workspace,
+    )
+    .expect("create");
+    let branch = git_stdout_line(&fx, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(branch, "feature/x");
+}
+
+fn git_stdout_line(fx: &GitRepoFixture, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(&fx.repo_path)
+        .output()
+        .expect("git on PATH");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn create_branch_rejects_dash_names() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    let err = operations::create_branch(
+        &fx.registry,
+        &fx.repo_str(),
+        "--force",
+        false,
+        None,
+        &fx.workspace,
+    )
+    .unwrap_err();
+    assert!(matches!(err, GitError::InvalidPath(_)));
+}
+
+#[test]
+fn rename_and_delete_branch_roundtrip() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.run_git(&["branch", "old-name"]);
+
+    operations::rename_branch(&fx.registry, &fx.repo_str(), "old-name", "new-name", &fx.workspace)
+        .expect("rename");
+    operations::delete_branch(&fx.registry, &fx.repo_str(), "new-name", false, &fx.workspace)
+        .expect("delete");
+    let branches = operations::list_branches(&fx.registry, &fx.repo_str(), &fx.workspace).unwrap();
+    assert!(!branches.branches.iter().any(|b| b.name == "new-name"));
+}
+
+#[test]
+fn merge_reports_up_to_date() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+
+    let result = operations::merge(
+        &fx.registry,
+        &fx.repo_str(),
+        "main",
+        false,
+        false,
+        false,
+        None,
+        false,
+        &fx.workspace,
+    )
+    .expect("merge");
+    assert!(result.up_to_date);
+    assert!(!result.merged);
+}
+
+#[test]
+fn merge_reports_conflict() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.run_git(&["branch", "feature"]);
+    fx.run_git(&["checkout", "-q", "feature"]);
+    fx.write_file("a.txt", "feature\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "feat"]);
+    fx.run_git(&["checkout", "-q", "main"]);
+    fx.write_file("a.txt", "main\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "main"]);
+    let _ = git_run_allow_fail(&fx, &["merge", "feature"]);
+
+    let result = operations::merge(
+        &fx.registry,
+        &fx.repo_str(),
+        "feature",
+        false,
+        false,
+        false,
+        None,
+        false,
+        &fx.workspace,
+    )
+    .expect("merge");
+    assert!(result.conflicts);
+    assert!(!result.merged);
+    fx.run_git(&["merge", "--abort"]);
+}
+
+#[test]
+fn rebase_reports_ok_on_fast_forward() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.run_git(&["checkout", "-q", "-b", "feature"]);
+    fx.write_file("b.txt", "beta\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "feat"]);
+    fx.run_git(&["checkout", "-q", "main"]);
+
+    let result = operations::rebase(&fx.registry, &fx.repo_str(), "feature", &fx.workspace)
+        .expect("rebase");
+    assert!(result.ok);
+    assert!(!result.conflict);
+}
+
+#[test]
+fn rebase_reports_conflict() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.run_git(&["checkout", "-q", "-b", "feature"]);
+    fx.write_file("a.txt", "feature\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "feat"]);
+    fx.run_git(&["checkout", "-q", "main"]);
+    fx.write_file("a.txt", "main\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "main"]);
+    fx.run_git(&["checkout", "-q", "feature"]);
+
+    let result = operations::rebase(&fx.registry, &fx.repo_str(), "main", &fx.workspace)
+        .expect("rebase");
+    assert!(!result.ok);
+    assert!(result.conflict);
+    fx.run_git(&["rebase", "--abort"]);
+}
+
+fn git_run_allow_fail(fx: &GitRepoFixture, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(&fx.repo_path)
+        .output()
+        .expect("git on PATH")
+}
+
+#[test]
+fn tag_create_annotated_requires_message() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    let sha = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+
+    let options = GitTagCreateOptions {
+        annotated: true,
+        message: None,
+        force: false,
+    };
+    assert!(operations::tag_create(
+        &fx.registry,
+        &fx.repo_str(),
+        "v1.0",
+        &sha,
+        &options,
+        &fx.workspace,
+    )
+    .is_err());
+
+    let options = GitTagCreateOptions {
+        annotated: true,
+        message: Some("release".into()),
+        force: false,
+    };
+    operations::tag_create(
+        &fx.registry,
+        &fx.repo_str(),
+        "v1.0",
+        &sha,
+        &options,
+        &fx.workspace,
+    )
+    .expect("annotated tag");
+    let tags = git_stdout_line(&fx, &["tag"]);
+    assert!(tags.contains("v1.0"));
+}
+
+#[test]
+fn tag_create_rejects_invalid_sha() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    let options = GitTagCreateOptions::default();
+    let err = operations::tag_create(
+        &fx.registry,
+        &fx.repo_str(),
+        "v1.0",
+        "not-a-sha",
+        &options,
+        &fx.workspace,
+    )
+    .unwrap_err();
+    assert!(matches!(err, GitError::CommandFailed { .. }));
+}
+
+#[test]
+fn diff_with_ref_and_compare_branches() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.run_git(&["checkout", "-q", "-b", "feature"]);
+    fx.write_file("feat.txt", "feat\n");
+    fx.run_git(&["add", "feat.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "feat commit"]);
+    fx.run_git(&["checkout", "-q", "main"]);
+
+    let diff = operations::diff_with_ref(&fx.registry, &fx.repo_str(), "feature", None, &fx.workspace)
+        .expect("diff_with_ref");
+    assert!(diff.diff_text.contains("feat.txt"));
+
+    let compare = operations::compare_branches(&fx.registry, &fx.repo_str(), "main", "feature", &fx.workspace)
+        .expect("compare");
+    assert_eq!(compare.right_only.len(), 1);
+    assert_eq!(compare.right_only[0].subject, "feat commit");
+    assert!(compare.left_only.is_empty());
+}
+
+#[test]
+fn pull_advanced_rejects_unknown_strategy() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    let err = operations::pull_advanced(&fx.registry, &fx.repo_str(), "sideways", &fx.workspace)
+        .unwrap_err();
+    assert!(err.to_string().contains("sideways"));
+}
+
+#[test]
+fn push_advanced_without_upstream_errors() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+
+    let err = match operations::push_advanced(
+        &fx.registry,
+        &fx.repo_str(),
+        &Default::default(),
+        &fx.workspace,
+    ) {
+        Ok(_) => panic!("expected NoUpstream"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, GitError::NoUpstream));
+}
+
+#[test]
+fn push_advanced_rejects_invalid_remote() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    let options = terax_lib::modules::git::types::GitPushOptions {
+        remote: Some("bad remote".into()),
+        ..Default::default()
+    };
+    let err = match operations::push_advanced(&fx.registry, &fx.repo_str(), &options, &fx.workspace)
+    {
+        Ok(_) => panic!("expected invalid remote error"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("invalid remote name"));
+}
+
+#[test]
+fn remote_add_list_remove_roundtrip() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    operations::remote_add(
+        &fx.registry,
+        &fx.repo_str(),
+        "origin",
+        "https://example.com/x.git",
+        &fx.workspace,
+    )
+    .expect("add");
+    operations::remote_add(
+        &fx.registry,
+        &fx.repo_str(),
+        "upstream",
+        "https://example.com/y.git",
+        &fx.workspace,
+    )
+    .expect("add");
+
+    let remotes = operations::remote_list(&fx.registry, &fx.repo_str(), &fx.workspace)
+        .expect("list");
+    assert_eq!(remotes.len(), 2);
+    assert_eq!(remotes[0].name, "origin");
+    assert_eq!(remotes[0].url, "https://example.com/x.git");
+
+    operations::remote_set_url(
+        &fx.registry,
+        &fx.repo_str(),
+        "origin",
+        "https://example.com/z.git",
+        &fx.workspace,
+    )
+    .expect("set-url");
+    let remotes = operations::remote_list(&fx.registry, &fx.repo_str(), &fx.workspace).unwrap();
+    assert_eq!(remotes.iter().find(|r| r.name == "origin").unwrap().url, "https://example.com/z.git");
+
+    operations::remote_remove(&fx.registry, &fx.repo_str(), "origin", &fx.workspace)
+        .expect("remove");
+    let remotes = operations::remote_list(&fx.registry, &fx.repo_str(), &fx.workspace).unwrap();
+    assert_eq!(remotes.len(), 1);
+}
+
+#[test]
+fn remote_add_rejects_unsafe_name() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    assert!(operations::remote_add(
+        &fx.registry,
+        &fx.repo_str(),
+        "../evil",
+        "https://x.git",
+        &fx.workspace,
+    )
+    .is_err());
+}
+
+#[test]
+fn clone_requires_authorized_parent() {
+    if skip_if_no_git() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let foreign = tmp.path().join("repos");
+    std::fs::create_dir_all(&foreign).unwrap();
+    let registry = WorkspaceRegistry::default();
+    let options = GitCloneOptions::default();
+    let err = operations::clone(
+        &registry,
+        "https://example.com/x.git",
+        &to_canon(&foreign.join("x")),
+        &options,
+        &WorkspaceEnv::Local,
+    )
+    .unwrap_err();
+    assert!(matches!(err, GitError::PathOutsideWorkspace(_)));
+}
+
+#[test]
+fn fetch_unshallow_on_full_repo_is_ok() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    operations::fetch_unshallow(&fx.registry, &fx.repo_str(), &fx.workspace)
+        .expect("unshallow on full repo tolerates the error");
+}
+
+#[test]
+fn log_filtered_filters_by_author_and_branch() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "a\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "one"]);
+    fx.run_git(&["config", "user.name", "Other Person"]);
+    fx.write_file("b.txt", "b\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "two"]);
+
+    let options = GitLogFilterOptions {
+        author: Some("Terax Test".into()),
+        ..Default::default()
+    };
+    let entries =
+        operations::log_filtered(&fx.registry, &fx.repo_str(), &options, &fx.workspace)
+            .expect("filtered");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].subject, "one");
+}
+
+#[test]
+fn log_filtered_rejects_dash_branch() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    let options = GitLogFilterOptions {
+        branch: Some("--all".into()),
+        ..Default::default()
+    };
+    assert!(operations::log_filtered(&fx.registry, &fx.repo_str(), &options, &fx.workspace).is_err());
+}
+
+#[test]
+fn reset_soft_and_hard() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "one"]);
+    fx.write_file("b.txt", "beta\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "two"]);
+
+    let first = git_stdout_line(&fx, &["rev-parse", "HEAD^"]);
+    operations::reset(&fx.registry, &fx.repo_str(), "soft", Some(&first), &fx.workspace)
+        .expect("soft reset");
+    let head = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+    assert_eq!(head, first);
+
+    operations::reset(&fx.registry, &fx.repo_str(), "hard", None, &fx.workspace)
+        .expect("hard reset to HEAD");
+}
+
+#[test]
+fn reset_rejects_unknown_mode_and_bad_sha() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    assert!(operations::reset(
+        &fx.registry,
+        &fx.repo_str(),
+        "extreme",
+        None,
+        &fx.workspace,
+    )
+    .is_err());
+    assert!(operations::reset(
+        &fx.registry,
+        &fx.repo_str(),
+        "hard",
+        Some("not-hex"),
+        &fx.workspace,
+    )
+    .is_err());
+}
+
+#[test]
+fn revert_and_cherry_pick_apply_cleanly() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.write_file("b.txt", "beta\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "add b"]);
+    let sha = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+
+    operations::revert_commit(&fx.registry, &fx.repo_str(), &sha, &fx.workspace)
+        .expect("revert");
+    assert!(!fx.repo_path.join("b.txt").exists());
+
+    fx.run_git(&["checkout", "-q", "-b", "feature", "HEAD~1"]);
+    operations::cherry_pick(&fx.registry, &fx.repo_str(), &sha, &fx.workspace)
+        .expect("cherry-pick");
+    assert!(fx.repo_path.join("b.txt").exists());
+}
+
+#[test]
+fn revert_rejects_invalid_sha() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    assert!(operations::revert_commit(&fx.registry, &fx.repo_str(), "bad-sha", &fx.workspace)
+        .is_err());
+    assert!(operations::cherry_pick(&fx.registry, &fx.repo_str(), "bad-sha", &fx.workspace)
+        .is_err());
+}
+
+#[test]
+fn reword_commit_rewrites_mid_history_message() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    for i in 0..3 {
+        fx.write_file(&format!("f{i}.txt"), &format!("v{i}\n"));
+        fx.run_git(&["add", &format!("f{i}.txt")]);
+        fx.run_git(&["commit", "-q", "-m", &format!("commit {i}")]);
+    }
+    let middle = git_stdout_line(&fx, &["rev-parse", "HEAD~1"]);
+
+    operations::reword_commit(&fx.registry, &fx.repo_str(), &middle, "rewritten", &fx.workspace)
+        .expect("reword");
+    let entries = operations::log(&fx.registry, &fx.repo_str(), 10, None, &fx.workspace).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[1].subject, "rewritten");
+    assert_eq!(entries[1].sha, git_stdout_line(&fx, &["rev-parse", "HEAD~1"]));
+}
+
+#[test]
+fn reword_commit_rejects_empty_message() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "x\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    let sha = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+    match operations::reword_commit(&fx.registry, &fx.repo_str(), &sha, "  ", &fx.workspace) {
+        Err(GitError::EmptyCommitMessage) => {}
+        Err(other) => panic!("expected EmptyCommitMessage, got {other}"),
+        Ok(_) => panic!("expected error"),
+    }
+}
+
+#[test]
+fn reword_commit_rejects_unknown_sha() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "x\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    let err = operations::reword_commit(
+        &fx.registry,
+        &fx.repo_str(),
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        "new",
+        &fx.workspace,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("linear history"), "got: {err}");
+}
+
+#[test]
+fn fixup_and_squash_fold_into_target() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("base.txt", "base\n");
+    fx.run_git(&["add", "base.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "target"]);
+    let target = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+    fx.write_file("fix.txt", "fix\n");
+    fx.run_git(&["add", "fix.txt"]);
+
+    operations::fixup_commit(&fx.registry, &fx.repo_str(), &target, &fx.workspace)
+        .expect("fixup");
+    let entries = operations::log(&fx.registry, &fx.repo_str(), 10, None, &fx.workspace).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].subject, "target");
+    assert!(fx.repo_path.join("fix.txt").exists());
+
+    fx.write_file("squash.txt", "squash\n");
+    fx.run_git(&["add", "squash.txt"]);
+    operations::squash_commit(&fx.registry, &fx.repo_str(), &target, &fx.workspace)
+        .expect("squash");
+    let entries = operations::log(&fx.registry, &fx.repo_str(), 10, None, &fx.workspace).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(fx.repo_path.join("squash.txt").exists());
+}
+
+#[test]
+fn drop_commit_removes_mid_history_commit() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    for i in 0..3 {
+        fx.write_file(&format!("f{i}.txt"), &format!("v{i}\n"));
+        fx.run_git(&["add", &format!("f{i}.txt")]);
+        fx.run_git(&["commit", "-q", "-m", &format!("commit {i}")]);
+    }
+    let middle = git_stdout_line(&fx, &["rev-parse", "HEAD~1"]);
+
+    operations::drop_commit(&fx.registry, &fx.repo_str(), &middle, &fx.workspace)
+        .expect("drop");
+    let entries = operations::log(&fx.registry, &fx.repo_str(), 10, None, &fx.workspace).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|e| e.sha != middle));
+    assert!(!fx.repo_path.join("f1.txt").exists());
+}
+
+#[test]
+fn amend_specific_commit_squashes_into_target() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("base.txt", "base\n");
+    fx.run_git(&["add", "base.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "target commit"]);
+    fx.write_file("b.txt", "beta\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "later"]);
+    let target = git_stdout_line(&fx, &["rev-parse", "HEAD~1"]);
+
+    let result = operations::amend_specific_commit(
+        &fx.registry,
+        &fx.repo_str(),
+        &target,
+        "",
+        &fx.workspace,
+    )
+    .expect("amend specific");
+    assert_eq!(result.commit_sha.len(), 40);
+    let entries = operations::log(&fx.registry, &fx.repo_str(), 10, None, &fx.workspace).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[1].subject, "target commit");
+}
+
+#[test]
+fn diff_range_and_diff_commit_vs_worktree() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "one"]);
+    let first = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+    fx.write_file("b.txt", "beta\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "two"]);
+    let second = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+    fx.write_file("c.txt", "gamma\n");
+
+    let range = operations::diff_range(&fx.registry, &fx.repo_str(), &first, &second, &fx.workspace)
+        .expect("diff_range");
+    assert!(range.diff_text.contains("b.txt"));
+
+    let worktree =
+        operations::diff_commit_vs_worktree(&fx.registry, &fx.repo_str(), &second, &fx.workspace)
+            .expect("diff vs worktree");
+    assert!(worktree.diff_text.contains("c.txt"));
+}
+
+#[test]
+fn create_patch_concatenates_shows() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "one"]);
+    let first = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+    fx.write_file("b.txt", "beta\n");
+    fx.run_git(&["add", "b.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "two"]);
+    let second = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+
+    let patch = operations::create_patch(
+        &fx.registry,
+        &fx.repo_str(),
+        &[first.clone(), second.clone()],
+        &fx.workspace,
+    )
+    .expect("patch");
+    assert!(patch.contains(&first[..12]));
+    assert!(patch.contains(&second[..12]));
+    assert!(patch.contains("a.txt"));
+    assert!(patch.contains("b.txt"));
+}
+
+#[test]
+fn create_patch_rejects_bad_sha() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    assert!(operations::create_patch(
+        &fx.registry,
+        &fx.repo_str(),
+        &["not-a-sha".into()],
+        &fx.workspace,
+    )
+    .is_err());
+}
+
+#[test]
+fn branches_containing_lists_local_and_remote() {
+    if skip_if_no_git() {
+        return;
+    }
+    let fx = GitRepoFixture::new();
+    fx.write_file("a.txt", "alpha\n");
+    fx.run_git(&["add", "a.txt"]);
+    fx.run_git(&["commit", "-q", "-m", "base"]);
+    let sha = git_stdout_line(&fx, &["rev-parse", "HEAD"]);
+    fx.run_git(&["branch", "feature"]);
+
+    let origin = TempDir::new().unwrap();
+    let bare = origin.path().join("origin.git");
+    let _ = std::process::Command::new("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&bare)
+        .output()
+        .expect("git on PATH");
+    let bare_str = to_canon(&bare);
+    let out = std::process::Command::new("git")
+        .args(["push", "-q"])
+        .arg(&bare_str)
+        .arg("main")
+        .current_dir(&fx.repo_path)
+        .output()
+        .expect("git on PATH");
+    assert!(out.status.success(), "seed bare repo");
+    fx.run_git(&["remote", "add", "origin", &bare_str]);
+    fx.run_git(&["fetch", "-q", "origin"]);
+
+    let branches =
+        operations::branches_containing(&fx.registry, &fx.repo_str(), &sha, &fx.workspace)
+            .expect("branches_containing");
+    assert!(branches.iter().any(|b| b == "feature"));
+    assert!(branches.iter().any(|b| b == "main"));
+    assert!(branches.iter().any(|b| b == "remotes/origin/main"));
 }

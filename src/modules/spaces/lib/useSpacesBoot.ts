@@ -1,4 +1,4 @@
-import { native } from "@/modules/ai/lib/native";
+import { native } from "@/lib/native";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { Tab } from "@/modules/tabs";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";

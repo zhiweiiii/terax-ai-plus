@@ -39,16 +39,11 @@ export type ShortcutId =
   | "view.zoomOut"
   | "view.zoomReset"
   | "view.zenMode"
-  | "ai.toggle"
-  | "ai.toggleMini"
-  | "ai.askSelection"
-  | "agent.focusAttention"
+  | "selection.sendToAgent"
   | "settings.open"
   | "sidebar.toggle"
   | "editor.undo"
-  | "editor.redo"
-  | "editor.aiComplete"
-  | "editor.codeComplete";
+  | "editor.redo";
 
 export type ShortcutGroup =
   | "General"
@@ -57,7 +52,6 @@ export type ShortcutGroup =
   | "Panes"
   | "Terminal"
   | "Search"
-  | "AI"
   | "View"
   | "Editor";
 
@@ -262,35 +256,17 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "search.focus",
-    label: "在标签页内查找",
+    label: "搜索工作区文件内容",
     group: "Search",
     defaultBindings: [{ [MOD_PROP]: true, key: "f" }],
   },
   {
-    id: "ai.toggle",
-    label: "切换 AI 智能体",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "i" }],
-  },
-  {
-    id: "ai.toggleMini",
-    label: "切换 AI 对话窗口",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "i" }],
-  },
-  {
-    id: "ai.askSelection",
+    id: "selection.sendToAgent",
     label: "把选中内容发给 Claude Code",
-    group: "AI",
+    group: "Search",
     // Keep Mod+L available to the shell for clear-screen, including when
     // terminal text is selected and this shortcut is otherwise eligible.
     defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
-  },
-  {
-    id: "agent.focusAttention",
-    label: "跳转到需要处理的智能体",
-    group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, shift: true, key: "a" }],
   },
   {
     id: "sidebar.toggle",
@@ -359,18 +335,6 @@ export const SHORTCUTS: Shortcut[] = [
     group: "Editor",
     defaultBindings: [{ [MOD_PROP]: true, key: "y" }],
   },
-  {
-    id: "editor.aiComplete",
-    label: "触发 AI 补全",
-    group: "Editor",
-    defaultBindings: [{ alt: true, key: "\\" }],
-  },
-  {
-    id: "editor.codeComplete",
-    label: "触发代码补全",
-    group: "Editor",
-    defaultBindings: [{ ctrl: true, key: " " }],
-  },
 ];
 
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
@@ -380,7 +344,6 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "Terminal",
   "View",
   "Search",
-  "AI",
   "Editor",
 ];
 
@@ -392,7 +355,6 @@ export const SHORTCUT_GROUP_LABELS: Record<ShortcutGroup, string> = {
   Panes: "窗格",
   Terminal: "终端",
   Search: "搜索",
-  AI: "AI",
   View: "视图",
   Editor: "编辑器",
 };

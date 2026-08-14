@@ -1,4 +1,4 @@
-import { native } from "@/modules/ai/lib/native";
+import { native } from "@/lib/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {

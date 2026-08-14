@@ -1,4 +1,4 @@
-import { type GitRepoHead, native } from "@/modules/ai/lib/native";
+import { type GitRepoHead, native } from "@/lib/native";
 import { useEffect, useRef, useState } from "react";
 
 type UseRepoListResult = {

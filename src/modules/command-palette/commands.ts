@@ -1,4 +1,3 @@
-import type { SearchTarget } from "@/modules/header";
 import { MAX_PANES_PER_TAB, type Tab } from "@/modules/tabs";
 import { leafIds } from "@/modules/terminal";
 import {
@@ -16,7 +15,6 @@ import {
   Settings01Icon,
   SidebarLeftIcon,
   SourceCodeIcon,
-  SparklesIcon,
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import type { PaletteItem } from "./types";
@@ -29,13 +27,12 @@ export const COMMAND_GROUPS = [
   "Git",
   "Search",
   "View",
-  "AI",
 ] as const;
 
 export type CommandPaletteActionContext = {
   tabs: Tab[];
   activeId: number;
-  searchTarget: SearchTarget;
+  searchRoot: string | null;
   explorerRoot: string | null;
   home: string | null;
   openNewTab: () => void;
@@ -51,8 +48,6 @@ export type CommandPaletteActionContext = {
   focusSearch: () => void;
   focusExplorerSearch: () => void;
   toggleSidebar: () => void;
-  toggleAi: () => void;
-  askAiSelection: () => void;
   openSettings: () => void;
   openKeyboardShortcuts: () => void;
   spaces?: { id: string; name: string }[];
@@ -250,12 +245,12 @@ export function createCommandItems(
     },
     {
       id: "search.focus",
-      title: "Find in current tab",
+      title: "Search files in workspace",
       group: "Search",
-      keywords: ["find", "terminal", "editor", "current"],
+      keywords: ["find", "grep", "contents", "workspace", "global"],
       icon: Search01Icon,
       shortcutId: "search.focus",
-      disabledReason: ctx.searchTarget ? undefined : "No searchable view",
+      disabledReason: ctx.searchRoot ? undefined : "No workspace root",
       run: ctx.focusSearch,
     },
     {
@@ -276,24 +271,6 @@ export function createCommandItems(
       icon: SidebarLeftIcon,
       shortcutId: "sidebar.toggle",
       run: ctx.toggleSidebar,
-    },
-    {
-      id: "ai.toggle",
-      title: "Toggle AI agent",
-      group: "AI",
-      keywords: ["assistant", "chat", "agent"],
-      icon: SparklesIcon,
-      shortcutId: "ai.toggle",
-      run: ctx.toggleAi,
-    },
-    {
-      id: "ai.askSelection",
-      title: "Ask AI about selection",
-      group: "AI",
-      keywords: ["selection", "explain", "assistant", "chat"],
-      icon: SparklesIcon,
-      shortcutId: "ai.askSelection",
-      run: ctx.askAiSelection,
     },
   ];
 }

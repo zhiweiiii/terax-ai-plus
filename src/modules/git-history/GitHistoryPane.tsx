@@ -1,5 +1,13 @@
 import { Button } from "@/components/ui/button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Popover,
   PopoverAnchor,
   PopoverContent,
@@ -11,12 +19,18 @@ import {
   native,
   type GitCommitFileChange,
   type GitLogEntry,
-} from "@/modules/ai/lib/native";
+  type GitRepoHead,
+} from "@/lib/native";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
+  ArrowDown01Icon,
+  ChevronDownIcon,
   Copy01Icon,
   File02Icon,
+  FolderGitTwoIcon,
+  GitBranchIcon,
   LinkSquare02Icon,
+  Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -32,8 +46,18 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { CommitContextMenu } from "./CommitContextMenu";
 import { GraphRail, MAX_VISIBLE_LANES, railWidth } from "./GraphRail";
+import { HistoryFilterBar, useHistoryFilters } from "./HistoryFilters";
 import {
+  findMatch,
+  matchCommit,
+  serverFilterOptions,
+  uniqueAuthors,
+  type SearchOptions,
+} from "./lib/filters";
+import {
+  applyFirstParent,
   EMPTY_GRAPH_STATE,
   layoutGraph,
   type GraphRow,
@@ -65,16 +89,13 @@ type CommitFileDiffOpenInput = {
   originalPath: string | null;
 };
 
-export type GitHistorySearchHandle = {
-  setQuery: (query: string) => void;
-  clearQuery: () => void;
-};
-
 type Props = {
   repoRoot: string;
+  /** Workspace repos; >1 renders the in-pane repo switcher. */
+  repos?: GitRepoHead[];
+  /** Re-target this pane to another repo (parent updates the tab state). */
+  onSwitchRepo?: (repoRoot: string, branch: string | null) => void;
   onOpenCommitFile: (input: CommitFileDiffOpenInput) => void;
-  /** Lets the header search bar drive commit filtering for the active pane. */
-  onSearchHandle?: (handle: GitHistorySearchHandle | null) => void;
 };
 
 type LoadStatus = "idle" | "initial" | "more" | "error";
@@ -174,25 +195,30 @@ function statusTone(code: string): string {
   }
 }
 
-function highlight(text: string, query: string): ReactNode {
+function highlight(
+  text: string,
+  query: string,
+  options: SearchOptions,
+): ReactNode {
   if (!query) return text;
-  const idx = text.toLowerCase().indexOf(query.toLowerCase());
-  if (idx === -1) return text;
+  const match = findMatch(text, query, options);
+  if (!match) return text;
   return (
     <>
-      {text.slice(0, idx)}
+      {text.slice(0, match.index)}
       <mark className="rounded-sm bg-primary/25 px-0.5 text-foreground">
-        {text.slice(idx, idx + query.length)}
+        {text.slice(match.index, match.index + match.length)}
       </mark>
-      {text.slice(idx + query.length)}
+      {text.slice(match.index + match.length)}
     </>
   );
 }
 
 export function GitHistoryPane({
   repoRoot,
+  repos,
+  onSwitchRepo,
   onOpenCommitFile,
-  onSearchHandle,
 }: Props) {
   const [commits, setCommits] = useState<GitLogEntry[]>([]);
   const [loadStatus, setLoadStatus] = useState<LoadStatus>("idle");
@@ -203,14 +229,16 @@ export function GitHistoryPane({
   // Require at least 2 characters before filtering to avoid noisy single-char
   // matches and pointless full-list scans on every keystroke.
   const activeSearch = deferredSearch.length >= 2 ? deferredSearch : "";
+  const {
+    filters,
+    searchOptions,
+    updateFilters,
+    updateSearchOptions,
+    clearFilters,
+    serverActive,
+  } = useHistoryFilters();
+  const { author, date, branch, noMerges, firstParent } = filters;
 
-  useEffect(() => {
-    onSearchHandle?.({
-      setQuery: (query: string) => setSearchInput(query),
-      clearQuery: () => setSearchInput(""),
-    });
-    return () => onSearchHandle?.(null);
-  }, [onSearchHandle]);
   const [openAnchor, setOpenAnchor] = useState<{
     sha: string;
     top: number;
@@ -243,9 +271,15 @@ export function GitHistoryPane({
     maxLaneCount: 1,
   });
 
+  // First-parent view only touches the layout input; the list stays intact.
+  const graphInput = useMemo(
+    () => (firstParent ? applyFirstParent(commits) : commits),
+    [commits, firstParent],
+  );
+
   const { graphByCommit, maxLaneCount } = useMemo(() => {
     const cache = graphCacheRef.current;
-    if (commits.length === 0) {
+    if (graphInput.length === 0) {
       cache.rows = [];
       cache.byCommit = new Map();
       cache.tail = EMPTY_GRAPH_STATE;
@@ -254,11 +288,11 @@ export function GitHistoryPane({
       cache.maxLaneCount = 1;
       return { graphByCommit: cache.byCommit, maxLaneCount: 1 };
     }
-    const firstSha = commits[0].sha;
+    const firstSha = graphInput[0].sha;
     const canAppend =
-      cache.firstSha === firstSha && commits.length >= cache.len;
+      cache.firstSha === firstSha && graphInput.length >= cache.len;
     if (!canAppend) {
-      const { rows, state } = layoutGraph(commits);
+      const { rows, state } = layoutGraph(graphInput);
       const byCommit = new Map<string, GraphRow>();
       let max = 1;
       for (const row of rows) {
@@ -269,12 +303,12 @@ export function GitHistoryPane({
       cache.byCommit = byCommit;
       cache.tail = state;
       cache.firstSha = firstSha;
-      cache.len = commits.length;
+      cache.len = graphInput.length;
       cache.maxLaneCount = max;
       return { graphByCommit: byCommit, maxLaneCount: max };
     }
-    if (commits.length > cache.len) {
-      const delta = commits.slice(cache.len);
+    if (graphInput.length > cache.len) {
+      const delta = graphInput.slice(cache.len);
       const { rows: newRows, state } = layoutGraph(delta, cache.tail);
       let max = cache.maxLaneCount;
       for (const row of newRows) {
@@ -283,28 +317,17 @@ export function GitHistoryPane({
       }
       cache.rows = cache.rows.concat(newRows);
       cache.tail = state;
-      cache.len = commits.length;
+      cache.len = graphInput.length;
       cache.maxLaneCount = max;
     }
     return { graphByCommit: cache.byCommit, maxLaneCount: cache.maxLaneCount };
-  }, [commits]);
+  }, [graphInput]);
   const gridTemplate = GRID_TEMPLATE;
 
   const filtered = useMemo(() => {
-    const q = activeSearch.toLowerCase();
-    if (!q) return commits;
-    return commits.filter((c) => {
-      const subject = c.subject.toLowerCase();
-      const author = c.author.toLowerCase();
-      const email = c.authorEmail.toLowerCase();
-      return (
-        subject.includes(q) ||
-        author.includes(q) ||
-        email.includes(q) ||
-        c.shortSha.includes(q)
-      );
-    });
-  }, [commits, activeSearch]);
+    if (!activeSearch) return commits;
+    return commits.filter((c) => matchCommit(c, activeSearch, searchOptions));
+  }, [activeSearch, commits, searchOptions]);
 
   const virtualizer = useVirtualizer({
     count: filtered.length,
@@ -320,7 +343,16 @@ export function GitHistoryPane({
     setError(null);
     setEndReached(false);
     try {
-      const entries = await native.gitLog(repoRoot, { limit: PAGE_SIZE });
+      const options = serverFilterOptions(
+        { author, date, branch, noMerges },
+        Date.now(),
+      );
+      const entries = options
+        ? await native.gitLogFiltered(repoRoot, {
+            ...options,
+            maxCount: PAGE_SIZE,
+          })
+        : await native.gitLog(repoRoot, { limit: PAGE_SIZE });
       if (requestId !== requestIdRef.current) return;
       setCommits(entries);
       setLoadStatus("idle");
@@ -330,7 +362,7 @@ export function GitHistoryPane({
       setError(normalizeError(err));
       setLoadStatus("error");
     }
-  }, [repoRoot]);
+  }, [author, branch, date, noMerges, repoRoot]);
 
   const loadMore = useCallback(async () => {
     if (inflightMoreRef.current || endReached) return;
@@ -339,11 +371,23 @@ export function GitHistoryPane({
     if (!last) return;
     inflightMoreRef.current = true;
     setLoadStatus("more");
+    const requestId = requestIdRef.current;
     try {
-      const entries = await native.gitLog(repoRoot, {
-        limit: PAGE_SIZE,
-        beforeSha: last.sha,
-      });
+      const options = serverFilterOptions(
+        { author, date, branch, noMerges },
+        Date.now(),
+      );
+      const entries = options
+        ? await native.gitLogFiltered(repoRoot, {
+            ...options,
+            maxCount: PAGE_SIZE,
+            skip: commits.length,
+          })
+        : await native.gitLog(repoRoot, {
+            limit: PAGE_SIZE,
+            beforeSha: last.sha,
+          });
+      if (requestId !== requestIdRef.current) return;
       setCommits((prev) => {
         const seen = new Set(prev.map((c) => c.sha));
         const merged = [...prev];
@@ -353,12 +397,22 @@ export function GitHistoryPane({
       if (entries.length < PAGE_SIZE) setEndReached(true);
       setLoadStatus("idle");
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       setError(normalizeError(err));
       setLoadStatus("error");
     } finally {
       inflightMoreRef.current = false;
     }
-  }, [commits, endReached, loadStatus, repoRoot]);
+  }, [
+    author,
+    branch,
+    commits,
+    date,
+    endReached,
+    loadStatus,
+    noMerges,
+    repoRoot,
+  ]);
 
   useEffect(() => {
     filesInflightRef.current.clear();
@@ -507,6 +561,28 @@ export function GitHistoryPane({
   return (
     <TooltipProvider delayDuration={500} skipDelayDuration={200}>
       <div className="flex h-full min-h-0 flex-col bg-background [contain:layout_style]">
+        {repos && repos.length > 1 ? (
+          <HistoryRepoSwitcher
+            repos={repos}
+            repoRoot={repoRoot}
+            onSwitch={(root, branch) => onSwitchRepo?.(root, branch)}
+          />
+        ) : null}
+        <HistoryFilterBar
+          state={{
+            filters,
+            searchOptions,
+            updateFilters,
+            updateSearchOptions,
+            clearFilters,
+            serverActive,
+          }}
+          repoRoot={repoRoot}
+          multiRepo={!!repos && repos.length > 1}
+          authors={uniqueAuthors(commits)}
+          hasSearchQuery={activeSearch.length > 0}
+          onClearSearch={() => setSearchInput("")}
+        />
         {loadStatus === "initial" && commits.length === 0 ? (
           <CenterPlaceholder>
             <Spinner className="size-4" />
@@ -530,7 +606,9 @@ export function GitHistoryPane({
           <CenterPlaceholder>
             <div className="text-[13px] font-medium">No commits yet</div>
             <div className="max-w-md text-[11px] leading-relaxed text-muted-foreground">
-              This branch has no commits.
+              {serverActive || activeSearch
+                ? "No commits match the current filters."
+                : "This branch has no commits."}
             </div>
           </CenterPlaceholder>
         ) : (
@@ -577,15 +655,23 @@ export function GitHistoryPane({
                         transform: `translateY(${virtualRow.start}px)`,
                       }}
                     >
-                      <CommitRow
+                      <CommitContextMenu
+                        repoRoot={repoRoot}
                         commit={commit}
-                        query={activeSearch}
-                        active={openAnchor?.sha === commit.sha}
-                        graphRow={graphByCommit.get(commit.sha) ?? null}
-                        maxLaneCount={maxLaneCount}
-                        gridTemplate={gridTemplate}
-                        onClick={handleRowClick}
-                      />
+                        onRefresh={handleRefresh}
+                      >
+                        <CommitRow
+                          commit={commit}
+                          query={activeSearch}
+                          searchOptions={searchOptions}
+                          active={openAnchor?.sha === commit.sha}
+                          isHead={!activeSearch && virtualRow.index === 0}
+                          graphRow={graphByCommit.get(commit.sha) ?? null}
+                          maxLaneCount={maxLaneCount}
+                          gridTemplate={gridTemplate}
+                          onClick={handleRowClick}
+                        />
+                      </CommitContextMenu>
                     </div>
                   );
                 })}
@@ -659,6 +745,8 @@ export function GitHistoryPane({
                   if (!commit) return null;
                   return (
                     <CommitDetail
+                      key={commit.sha}
+                      repoRoot={repoRoot}
                       commit={commit}
                       filesEntry={openFilesEntry}
                       remoteWeb={remoteWeb}
@@ -684,10 +772,116 @@ function CenterPlaceholder({ children }: { children: ReactNode }) {
   );
 }
 
+function repoShortName(repoRoot: string): string {
+  const parts = repoRoot.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : repoRoot;
+}
+
+/**
+ * Lets a history tab switch which repo it shows without opening a new tab.
+ * The branch shown on the trigger comes from the scanned repo head, which the
+ * source-control layer keeps fresh.
+ */
+function HistoryRepoSwitcher({
+  repos,
+  repoRoot,
+  onSwitch,
+}: {
+  repos: GitRepoHead[];
+  repoRoot: string;
+  onSwitch: (repoRoot: string, branch: string | null) => void;
+}) {
+  const current = repos.find((r) => r.repoRoot === repoRoot);
+  return (
+    <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border/40 px-2.5">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            title={repoRoot}
+            className="inline-flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md bg-foreground/5 px-2 py-1 text-[11.5px] font-medium leading-none text-foreground transition-colors hover:bg-foreground/10"
+          >
+            <HugeiconsIcon
+              icon={FolderGitTwoIcon}
+              size={12}
+              strokeWidth={1.9}
+              className="shrink-0 text-muted-foreground"
+            />
+            <span className="max-w-28 truncate">
+              {repoShortName(current?.repoRoot ?? repoRoot)}
+            </span>
+            {current?.branch ? (
+              <>
+                <span className="shrink-0 text-muted-foreground/40">/</span>
+                <span className="max-w-24 truncate text-foreground/80">
+                  {current.branch}
+                </span>
+              </>
+            ) : null}
+            <HugeiconsIcon
+              icon={ArrowDown01Icon}
+              size={10}
+              strokeWidth={2}
+              className="shrink-0 opacity-60"
+            />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          side="bottom"
+          sideOffset={4}
+          className="max-h-72 w-72 overflow-y-auto rounded-xl border border-border/40 bg-popover/90 p-1 shadow-lg backdrop-blur-md"
+        >
+          <DropdownMenuLabel className="px-2 py-1.5 text-[11px] text-muted-foreground">
+            Repositories ({repos.length})
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator className="my-0.5 border-t border-border/30" />
+          {repos.map((repo) => {
+            const isActive = repo.repoRoot === repoRoot;
+            return (
+              <DropdownMenuItem
+                key={repo.repoRoot}
+                onSelect={() => onSwitch(repo.repoRoot, repo.branch)}
+                className="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5"
+              >
+                <HugeiconsIcon
+                  icon={FolderGitTwoIcon}
+                  size={13}
+                  strokeWidth={1.75}
+                  className="shrink-0 text-muted-foreground"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs">
+                    {repoShortName(repo.repoRoot)}
+                  </div>
+                  <div className="truncate text-[10px] text-muted-foreground">
+                    {repo.branch}
+                  </div>
+                </div>
+                {isActive ? (
+                  <HugeiconsIcon
+                    icon={Tick02Icon}
+                    size={13}
+                    strokeWidth={2.25}
+                    className="shrink-0 text-primary"
+                  />
+                ) : null}
+              </DropdownMenuItem>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
 type CommitRowProps = {
   commit: GitLogEntry;
   query: string;
+  searchOptions: SearchOptions;
   active: boolean;
+  /** The newest commit of the loaded list, shown as the HEAD of the branch. */
+  isHead: boolean;
   graphRow: GraphRow | null;
   maxLaneCount: number;
   gridTemplate: string;
@@ -697,7 +891,9 @@ type CommitRowProps = {
 const CommitRow = memo(function CommitRow({
   commit,
   query,
+  searchOptions,
   active,
+  isHead,
   graphRow,
   maxLaneCount,
   gridTemplate,
@@ -712,6 +908,7 @@ const CommitRow = memo(function CommitRow({
       onClick={(event) => onClick(commit.sha, event)}
       className={cn(
         "group relative grid h-full w-full cursor-pointer items-center gap-3 border-l-2 border-transparent pr-3 text-left transition-colors",
+        isHead && "bg-primary/[0.04]",
         active ? "border-l-primary/70 bg-accent/45" : "hover:bg-accent/25",
       )}
       style={{ gridTemplateColumns: gridTemplate }}
@@ -731,17 +928,24 @@ const CommitRow = memo(function CommitRow({
       </span>
       <span
         className={cn(
-          "min-w-0 truncate text-[12px] leading-tight",
+          "flex min-w-0 items-center gap-1.5",
           active
             ? "font-semibold text-foreground"
             : "font-medium text-foreground/95",
         )}
       >
-        {commit.subject ? (
-          highlight(commit.subject, query)
-        ) : (
-          <span className="text-muted-foreground">(no subject)</span>
-        )}
+        {isHead ? (
+          <span className="shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[8.5px] font-bold uppercase tracking-wider text-primary">
+            HEAD
+          </span>
+        ) : null}
+        <span className="min-w-0 truncate text-[12px] leading-tight">
+          {commit.subject ? (
+            highlight(commit.subject, query, searchOptions)
+          ) : (
+            <span className="text-muted-foreground">(no subject)</span>
+          )}
+        </span>
       </span>
       <span aria-hidden />
       <span
@@ -757,7 +961,9 @@ const CommitRow = memo(function CommitRow({
           {initials}
         </span>
         <span className="min-w-0 truncate">
-          {commit.author ? highlight(commit.author, query) : "Unknown"}
+          {commit.author
+            ? highlight(commit.author, query, searchOptions)
+            : "Unknown"}
         </span>
       </span>
       <span className="text-right font-mono text-[10.5px] tabular-nums text-muted-foreground/75">
@@ -806,6 +1012,7 @@ const CommitRow = memo(function CommitRow({
 });
 
 type CommitDetailProps = {
+  repoRoot: string;
   commit: GitLogEntry;
   filesEntry: FilesEntry | null;
   remoteWeb: RemoteWebInfo | null;
@@ -818,6 +1025,7 @@ type CommitDetailProps = {
 };
 
 function CommitDetail({
+  repoRoot,
   commit,
   filesEntry,
   remoteWeb,
@@ -893,6 +1101,8 @@ function CommitDetail({
         </div>
       </div>
 
+      <ContainedBranches repoRoot={repoRoot} sha={commit.sha} />
+
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <CommitFiles
           commit={commit}
@@ -901,6 +1111,107 @@ function CommitDetail({
           onRetry={onRetryFiles}
         />
       </div>
+    </div>
+  );
+}
+
+function ContainedBranches({
+  repoRoot,
+  sha,
+}: {
+  repoRoot: string;
+  sha: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [status, setStatus] = useState<"idle" | "loading" | "loaded" | "error">(
+    "idle",
+  );
+  const [branches, setBranches] = useState<string[]>([]);
+
+  const load = useCallback(async () => {
+    setStatus("loading");
+    try {
+      const list = await native.gitBranchesContaining(repoRoot, sha);
+      setBranches(list);
+      setStatus("loaded");
+    } catch {
+      setStatus("error");
+    }
+  }, [repoRoot, sha]);
+
+  const toggle = useCallback(() => {
+    setExpanded((current) => {
+      const next = !current;
+      if (next && status === "idle") void load();
+      return next;
+    });
+  }, [load, status]);
+
+  return (
+    <div className="shrink-0 border-b border-border/45 px-3 py-1.5">
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex cursor-pointer items-center gap-1.5 text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
+      >
+        <HugeiconsIcon
+          icon={ChevronDownIcon}
+          size={12}
+          strokeWidth={2}
+          className={cn(
+            "shrink-0 transition-transform",
+            expanded && "rotate-180",
+          )}
+        />
+        Included branches
+        {status === "loaded" && branches.length > 0 ? (
+          <span className="rounded-sm bg-muted/55 px-1 py-px text-[9.5px] tabular-nums text-muted-foreground/85">
+            {branches.length}
+          </span>
+        ) : null}
+      </button>
+      {expanded ? (
+        status === "loading" ? (
+          <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+            <Spinner className="size-3" />
+            Loading branches…
+          </div>
+        ) : status === "error" ? (
+          <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-destructive">
+            <span>Could not load branches</span>
+            <Button
+              size="xs"
+              variant="ghost"
+              className="h-5 cursor-pointer text-[10.5px]"
+              onClick={() => void load()}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : branches.length === 0 ? (
+          <div className="mt-1.5 text-[11px] text-muted-foreground">
+            No branches contain this commit.
+          </div>
+        ) : (
+          <div className="mt-1.5 flex max-h-28 flex-wrap gap-1 overflow-y-auto pb-0.5">
+            {branches.map((name) => (
+              <span
+                key={name}
+                className="inline-flex max-w-full items-center gap-1 rounded-md bg-foreground/6 px-1.5 py-0.5 font-mono text-[9.5px] leading-none text-foreground/80"
+                title={name}
+              >
+                <HugeiconsIcon
+                  icon={GitBranchIcon}
+                  size={9}
+                  strokeWidth={2}
+                  className="shrink-0 text-muted-foreground"
+                />
+                <span className="truncate">{name}</span>
+              </span>
+            ))}
+          </div>
+        )
+      ) : null}
     </div>
   );
 }

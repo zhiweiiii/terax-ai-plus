@@ -1,13 +1,6 @@
-pub mod background;
-pub mod ringbuffer;
-pub mod session;
-
-use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
@@ -17,9 +10,6 @@ use shared_child::SharedChild;
 use crate::modules::workspace::{authorize_spawn_cwd, WorkspaceEnv, WorkspaceRegistry};
 #[cfg(windows)]
 use crate::modules::workspace::validate_wsl_distro_name;
-
-use background::{BackgroundLogResponse, BackgroundProc, BackgroundProcInfo};
-use session::{SessionRunOutput, ShellSession};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 300;
@@ -73,15 +63,6 @@ pub async fn shell_run_command(
     });
 
     rx.recv().map_err(|e| e.to_string())?
-}
-
-pub(crate) fn run_blocking_inner(
-    command: String,
-    cwd: Option<String>,
-    workspace: WorkspaceEnv,
-    dur: Duration,
-) -> Result<CommandOutput, String> {
-    run_blocking(command, cwd, workspace, dur)
 }
 
 fn run_blocking(
@@ -147,139 +128,8 @@ fn run_blocking(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Persistent agent shell state + background process state.
+// One-shot command runner (kept for source-control worktree operations).
 // ──────────────────────────────────────────────────────────────────────────
-
-pub struct ShellState {
-    sessions: RwLock<HashMap<u32, Arc<ShellSession>>>,
-    bg: RwLock<HashMap<u32, Arc<BackgroundProc>>>,
-    next_session_id: AtomicU32,
-    next_bg_id: AtomicU32,
-}
-
-impl Default for ShellState {
-    fn default() -> Self {
-        Self {
-            sessions: RwLock::new(HashMap::new()),
-            bg: RwLock::new(HashMap::new()),
-            next_session_id: AtomicU32::new(1),
-            next_bg_id: AtomicU32::new(1),
-        }
-    }
-}
-
-#[tauri::command]
-pub fn shell_session_open(
-    state: tauri::State<ShellState>,
-    registry: tauri::State<WorkspaceRegistry>,
-    cwd: Option<String>,
-    workspace: Option<WorkspaceEnv>,
-) -> Result<u32, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    authorize_spawn_cwd(&registry, cwd.as_deref(), &workspace)?;
-    let initial = match cwd.as_deref().filter(|s| !s.is_empty()) {
-        Some(c) => c.to_string(),
-        None => {
-            if let WorkspaceEnv::Wsl { distro } = &workspace {
-                crate::modules::workspace::wsl_home(distro.clone())?
-            } else {
-                crate::modules::fs::to_canon(dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")))
-            }
-        }
-    };
-    let session = Arc::new(ShellSession::new(initial, workspace));
-    let id = state.next_session_id.fetch_add(1, Ordering::Relaxed);
-    state.sessions.write().unwrap().insert(id, session);
-    Ok(id)
-}
-
-#[tauri::command]
-pub async fn shell_session_run(
-    state: tauri::State<'_, ShellState>,
-    registry: tauri::State<'_, WorkspaceRegistry>,
-    id: u32,
-    command: String,
-    cwd: Option<String>,
-    timeout_secs: Option<u64>,
-    workspace: Option<WorkspaceEnv>,
-) -> Result<SessionRunOutput, String> {
-    let session = state
-        .sessions
-        .read()
-        .unwrap()
-        .get(&id)
-        .cloned()
-        .ok_or_else(|| "no shell session".to_string())?;
-    let effective_workspace = workspace.clone().unwrap_or_else(|| session.workspace.clone());
-    authorize_spawn_cwd(&registry, cwd.as_deref(), &effective_workspace)?;
-    let dur = Duration::from_secs(
-        timeout_secs
-            .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .clamp(1, MAX_TIMEOUT_SECS),
-    );
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(session.run(command, cwd, workspace, dur));
-    });
-    rx.recv().map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub fn shell_session_close(state: tauri::State<ShellState>, id: u32) -> Result<(), String> {
-    state.sessions.write().unwrap().remove(&id);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn shell_bg_spawn(
-    state: tauri::State<ShellState>,
-    registry: tauri::State<WorkspaceRegistry>,
-    command: String,
-    cwd: Option<String>,
-    workspace: Option<WorkspaceEnv>,
-) -> Result<u32, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    authorize_spawn_cwd(&registry, cwd.as_deref(), &workspace)?;
-    let proc = background::spawn(command, cwd, workspace)?;
-    let id = state.next_bg_id.fetch_add(1, Ordering::Relaxed);
-    state.bg.write().unwrap().insert(id, proc);
-    Ok(id)
-}
-
-#[tauri::command]
-pub fn shell_bg_logs(
-    state: tauri::State<ShellState>,
-    handle: u32,
-    since_offset: Option<u64>,
-) -> Result<BackgroundLogResponse, String> {
-    let proc = state
-        .bg
-        .read()
-        .unwrap()
-        .get(&handle)
-        .cloned()
-        .ok_or_else(|| "no background handle".to_string())?;
-    Ok(proc.read_logs(since_offset.unwrap_or(0)))
-}
-
-#[tauri::command]
-pub fn shell_bg_kill(state: tauri::State<ShellState>, handle: u32) -> Result<(), String> {
-    if let Some(proc) = state.bg.read().unwrap().get(&handle).cloned() {
-        proc.kill();
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn shell_bg_list(state: tauri::State<ShellState>) -> Result<Vec<BackgroundProcInfo>, String> {
-    let map = state.bg.read().unwrap();
-    let mut out = Vec::with_capacity(map.len());
-    for (id, p) in map.iter() {
-        out.push(p.info(*id));
-    }
-    out.sort_by_key(|i| i.handle);
-    Ok(out)
-}
 
 pub(crate) fn build_oneshot_command(
     command: &str,
@@ -360,7 +210,7 @@ mod tests {
     use super::*;
 
     fn run(cmd: &str, timeout_secs: u64) -> CommandOutput {
-        run_blocking_inner(
+        run_blocking(
             cmd.into(),
             None,
             WorkspaceEnv::Local,
