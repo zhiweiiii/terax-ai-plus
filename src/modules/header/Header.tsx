@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
-import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
+import { USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
 import {
@@ -17,6 +17,8 @@ import {
 type Props = {
   tabs: Tab[];
   activeId: number;
+  /** Active file tab's owning terminal, so the command line stays highlighted. */
+  activeOwnerTabId?: number | null;
   onSelect: (id: number) => void;
   onNew: () => void;
   onNewBlock: () => void;
@@ -44,6 +46,7 @@ type Props = {
 export function Header({
   tabs,
   activeId,
+  activeOwnerTabId,
   onSelect,
   onNew,
   onNewBlock,
@@ -82,9 +85,7 @@ export function Header({
   return (
     <div
       data-tauri-drag-region
-      className={`flex h-10 shrink-0 items-center gap-2 border-b border-border/60 bg-card select-none ${
-        IS_MAC ? "pr-2 pl-20" : "pr-0 pl-2"
-      }`}
+      className="flex h-10 shrink-0 items-center gap-2 border-b border-border/60 bg-card select-none pr-0 pl-2"
     >
       <div className="flex shrink-0 items-center gap-0.5">
         {headerTabs}
@@ -122,8 +123,7 @@ export function Header({
         )}
       </div>
 
-      {!IS_MAC && <span className="mx-1 h-full w-px shrink-0 bg-border/70" />}
-      {IS_MAC && <span className="mr-1 h-full w-px shrink-0 bg-border/70" />}
+      <span className="mx-1 h-full w-px shrink-0 bg-border/70" />
 
       <div
         className="flex min-w-0 flex-1 items-center gap-2"
@@ -133,6 +133,7 @@ export function Header({
         <TabBar
           tabs={tabs}
           activeId={activeId}
+          activeOwnerTabId={activeOwnerTabId}
           onSelect={onSelect}
           onNew={onNew}
           onNewBlock={onNewBlock}
@@ -156,9 +157,7 @@ export function Header({
         compact={false}
       />
 
-      {IS_MAC && settingsButton}
-
-      {!IS_MAC && settingsButton}
+      {settingsButton}
 
       {USE_CUSTOM_WINDOW_CONTROLS && (
         <>

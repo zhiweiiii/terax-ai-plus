@@ -14,7 +14,7 @@ use tauri::ipc::{Channel, Response};
 
 use crate::modules::control::ControlState;
 use crate::modules::workspace::{user_spawn_cwd_or_home, WorkspaceEnv, WorkspaceRegistry};
-use session::Session;
+pub(crate) use session::Session;
 
 pub struct PtyState {
     sessions: RwLock<HashMap<u32, Arc<Session>>>,
@@ -35,6 +35,21 @@ impl Default for PtyState {
 impl PtyState {
     pub(super) fn take(&self, id: u32) -> Option<Arc<Session>> {
         self.sessions.write().unwrap().remove(&id)
+    }
+
+    /// Snapshot of live sessions for the web page's list: id + cwd + viewer count.
+    pub fn web_list(&self) -> Vec<(u32, Option<String>, usize)> {
+        self.sessions
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, s)| (*id, s.cwd.clone(), s.web_viewer_count()))
+            .collect()
+    }
+
+    /// Borrow a live session by id for the web layer (write / resize / subscribe).
+    pub fn web_get(&self, id: u32) -> Option<Arc<Session>> {
+        self.sessions.read().unwrap().get(&id).cloned()
     }
 }
 

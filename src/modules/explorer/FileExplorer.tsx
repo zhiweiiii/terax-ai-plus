@@ -59,6 +59,8 @@ type Props = {
   /** Paths with an open editor tab, marked in the tree. */
   openFilePaths?: string[];
   onOpenFile: (path: string, pin?: boolean) => void;
+  /** Open a content-search hit at a specific line. */
+  onOpenSearchHit?: (path: string, line: number) => void;
   onPathRenamed?: (from: string, to: string) => void;
   onPathDeleted?: (path: string) => void;
   onRevealInTerminal?: (path: string) => void;
@@ -202,6 +204,7 @@ export const FileExplorer = memo(
       activeFilePath,
       openFilePaths,
       onOpenFile,
+      onOpenSearchHit,
       onPathRenamed,
       onPathDeleted,
       onRevealInTerminal,
@@ -222,7 +225,6 @@ export const FileExplorer = memo(
       gitDecorations,
     );
     const [selectedPath, setSelectedPath] = useState<string | null>(null);
-    const [isSearchOpen, setIsSearchOpen] = useState(false);
     const [isSearchActive, setIsSearchActive] = useState(false);
     const searchRef = useRef<ExplorerSearchHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -362,7 +364,6 @@ export const FileExplorer = memo(
           return active instanceof Node && c.contains(active);
         },
         focusSearch: () => {
-          setIsSearchOpen(true);
           searchRef.current?.focus();
         },
       }),
@@ -372,10 +373,8 @@ export const FileExplorer = memo(
     useGlobalShortcuts({
       "explorer.search": () => {
         if (searchRef.current?.isFocused()) {
-          setIsSearchOpen(false);
           return;
         }
-        setIsSearchOpen(true);
         searchRef.current?.focus();
       },
     });
@@ -401,7 +400,7 @@ export const FileExplorer = memo(
       tree.pendingCreate?.parentPath === rootPath ? tree.pendingCreate : null;
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (tree.renaming || tree.pendingCreate || isSearchOpen) return;
+      if (tree.renaming || tree.pendingCreate || searchRef.current?.isFocused()) return;
       const target = e.target as HTMLElement;
       if (
         target.tagName === "INPUT" ||
@@ -555,7 +554,7 @@ export const FileExplorer = memo(
             variant="ghost"
             size="icon"
             className="size-6 text-muted-foreground hover:text-foreground"
-            onClick={() => setIsSearchOpen((v) => !v)}
+            onClick={() => searchRef.current?.focus()}
             title="Search files"
             aria-label="Search files"
           >
@@ -594,13 +593,14 @@ export const FileExplorer = memo(
         <ExplorerSearch
           ref={searchRef}
           rootPath={rootPath}
-          onOpenFile={onOpenFile}
-          open={isSearchOpen}
-          onRequestClose={() => setIsSearchOpen(false)}
+          onOpenFile={(path, line) => {
+            if (line !== undefined && onOpenSearchHit) {
+              onOpenSearchHit(path, line);
+            } else {
+              onOpenFile(path);
+            }
+          }}
           onActiveChange={setIsSearchActive}
-          onRevealInTerminal={onRevealInTerminal}
-          onOpenInSourceControl={onOpenInSourceControl}
-          onOpenGitHistory={onOpenGitHistory}
         />
 
         {!isSearchActive ? (

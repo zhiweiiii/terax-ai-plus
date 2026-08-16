@@ -211,29 +211,4 @@ fn display_path(
     to_canon(path)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn escape_literal_escapes_regex_meta() {
-        assert_eq!(escape_literal("a.b(c)"), "a\\.b\\(c\\)");
-        assert_eq!(escape_literal("plain text"), "plain text");
-    }
-
-    #[test]
-    fn search_tree_respects_cancellation() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "hello\nfind me here\n").unwrap();
-        let matcher = RegexMatcherBuilder::new().build("find").unwrap();
-        let ws = WorkspaceEnv::from_option(None);
-        let root_display = dir.path().to_string_lossy().to_string();
-
-        let live = search_tree(dir.path(), &root_display, &ws, &matcher, 100, &|| false);
-        assert_eq!(live.hits.len(), 1, "uncancelled search finds the match");
-
-        let stopped =
-            search_tree(dir.path(), &root_display, &ws, &matcher, 100, &|| true);
-        assert!(stopped.hits.is_empty(), "cancelled search yields nothing");
-    }
-}

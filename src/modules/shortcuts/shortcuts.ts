@@ -1,4 +1,4 @@
-import { IS_MAC, MOD_PROP } from "@/lib/platform";
+import { MOD_PROP } from "@/lib/platform";
 
 /**
  * Single source of truth for keyboard shortcuts.
@@ -185,10 +185,9 @@ export const SHORTCUTS: Shortcut[] = [
     id: "terminal.clear",
     label: "清空终端",
     group: "Terminal",
-    // macOS Terminal's ⌘K (clear scrollback, keep the prompt). Default only on
-    // macOS — on other platforms Ctrl+K is readline's kill-line, so we leave it
-    // unbound and let users assign their own in settings.
-    defaultBindings: IS_MAC ? [{ meta: true, key: "k" }] : [],
+    // Ctrl+K is readline's kill-line, so we leave it unbound and let users
+    // assign their own in settings.
+    defaultBindings: [],
   },
   {
     id: "terminal.toggleInput",
@@ -414,17 +413,10 @@ export function matchBinding(
 export function getBindingTokens(binding?: KeyBinding): string[] {
   if (!binding) return [];
   const tokens: string[] = [];
-  if (IS_MAC) {
-    if (binding.ctrl) tokens.push("⌃");
-    if (binding.alt) tokens.push("⌥");
-    if (binding.shift) tokens.push("⇧");
-    if (binding.meta) tokens.push("⌘");
-  } else {
-    if (binding.ctrl) tokens.push("Ctrl");
-    if (binding.alt) tokens.push("Alt");
-    if (binding.shift) tokens.push("Shift");
-    if (binding.meta) tokens.push("Win");
-  }
+  if (binding.ctrl) tokens.push("Ctrl");
+  if (binding.alt) tokens.push("Alt");
+  if (binding.shift) tokens.push("Shift");
+  if (binding.meta) tokens.push("Win");
 
   let keyLabel = binding.key;
   if (keyLabel === " ") keyLabel = "Space";

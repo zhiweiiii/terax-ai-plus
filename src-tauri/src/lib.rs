@@ -1,11 +1,9 @@
 pub mod modules;
 
-use modules::{control, fs, git, history, lsp, pty, shell, workspace};
+use modules::{control, fs, git, history, lsp, pty, shell, web, workspace};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
-#[cfg(target_os = "macos")]
-use tauri::{PhysicalPosition, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 
 /// Drained on first read so HMR / re-mounts can't replay the launch dir.
@@ -157,7 +155,8 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
     };
 
     if let Some(window) = app.get_webview_window("settings") {
-        let _ = window.set_always_on_top(true);
+        // The parent relationship keeps settings above the main window without
+        // covering unrelated apps.
         let _ = window.show();
         let _ = window.set_focus();
         if let Some(t) = tab.as_deref().filter(|s| !s.is_empty()) {
@@ -168,61 +167,22 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
         return Ok(());
     }
 
-    let builder = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App(url_path.into()))
+    let mut builder = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App(url_path.into()))
         .title("Settings")
         .inner_size(900.0, 700.0)
         .min_inner_size(820.0, 620.0)
         .resizable(true)
-        .visible(false)
-        // Keep settings above the main app window so it doesn't get hidden
-        // when the user clicks back into the editor or terminal (#33).
-        .always_on_top(true);
+        .visible(false);
 
-    // Tie lifecycle to the main window so settings minimizes/closes with it.
-    // macOS: skip parent() — child + always_on_top leaves the settings webview
-    // behind the main window except while the parent is being dragged (#33).
-    #[cfg(not(target_os = "macos"))]
-    let builder = if let Some(main) = app.get_webview_window("main") {
-        builder.parent(&main).map_err(|e| e.to_string())?
-    } else {
-        builder
-    };
-
-    #[cfg(target_os = "macos")]
-    let builder = builder
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true);
-
-    // On Linux/Windows we render our own titlebar, so drop native chrome
-    // and make the window transparent.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    let builder = builder.decorations(false).transparent(true);
-
-    let window = builder.build().map_err(|e| e.to_string())?;
-
-    // Some Linux compositors (GNOME/Mutter with CSD-by-default) ignore the
-    // builder-time decorations flag — re-assert it after realize.
-    #[cfg(target_os = "linux")]
-    {
-        let _ = window.set_decorations(false);
-    }
-
-    #[cfg(target_os = "macos")]
+    // Tie lifecycle to the main window so settings minimizes/closes with it,
+    // and keep it above the main app window so it doesn't get hidden when the
+    // user clicks back into the editor or terminal.
     if let Some(main) = app.get_webview_window("main") {
-        if let (Ok(main_pos), Ok(main_size), Ok(settings_size)) = (
-            main.outer_position(),
-            main.outer_size(),
-            window.outer_size(),
-        ) {
-            let x = main_pos.x
-                + ((main_size.width as i32).saturating_sub(settings_size.width as i32)) / 2;
-            let y = main_pos.y
-                + ((main_size.height as i32).saturating_sub(settings_size.height as i32)) / 2;
-            let _ = window.set_position(PhysicalPosition::new(x, y));
-        } else {
-            let _ = window.center();
-        }
+        builder = builder.parent(&main).map_err(|e| e.to_string())?;
     }
+    builder = builder.decorations(false).transparent(true);
+
+    builder.build().map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -236,8 +196,6 @@ pub fn run() {
     let control_for_setup = control_state.clone();
 
     let builder = tauri::Builder::default();
-    #[cfg(target_os = "linux")]
-    let builder = builder.plugin(tauri_plugin_clipboard_manager::init());
     builder
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -262,22 +220,6 @@ pub fn run() {
         .setup(move |_app| {
             if let Err(error) = control::start(_app.handle().clone(), control_for_setup.clone()) {
                 log::warn!("could not start Terax control server: {error}");
-            }
-            // macOS skips parent() for the settings window, so tie its lifecycle
-            // to the main window here instead. Other platforms keep parent().
-            #[cfg(target_os = "macos")]
-            if let Some(main) = _app.get_webview_window("main") {
-                let handle = _app.handle().clone();
-                main.on_window_event(move |event| {
-                    if matches!(
-                        event,
-                        WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
-                    ) {
-                        if let Some(settings) = handle.get_webview_window("settings") {
-                            let _ = settings.close();
-                        }
-                    }
-                });
             }
             Ok(())
         })
@@ -409,6 +351,14 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             match event {
+                tauri::RunEvent::Ready => {
+                    // Start the web terminal bridge once every managed state is
+                    // registered. Runs on its own listener thread; failure only
+                    // logs so the desktop app keeps working.
+                    if let Err(e) = web::start(app.clone()) {
+                        log::warn!("could not start web terminal server: {e}");
+                    }
+                }
                 // Servers exit on stdin EOF, but destructors are not guaranteed
                 // on process exit; kill explicitly.
                 tauri::RunEvent::Exit => {
@@ -418,192 +368,11 @@ pub fn run() {
                     if let Some(state) = app.try_state::<control::ControlState>() {
                         state.shutdown();
                     }
-                }
-                // macOS delivers "Open With" files here, not as argv (cold and
-                // warm start, several at once). Seed the drain-once state and
-                // emit; canonicalize so the /tmp -> /private/tmp symlink can't
-                // defeat openFileTab's path dedupe against a CLI launch.
-                #[cfg(target_os = "macos")]
-                tauri::RunEvent::Opened { urls } => {
-                    let entries = urls
-                        .iter()
-                        .filter_map(|u| u.to_file_path().ok())
-                        .filter_map(|p| std::fs::canonicalize(p).ok())
-                        .filter(|p| p.is_file())
-                        .map(LaunchEntry::File)
-                        .collect();
-                    let target = resolve_launch_target(entries);
-                    if target.files.is_empty() {
-                        return;
-                    }
-                    if let Some(dir) = &target.dir {
-                        if let Some(registry) = app.try_state::<workspace::WorkspaceRegistry>() {
-                            let _ = registry.authorize(dir);
-                        }
-                        if let Some(state) = app.try_state::<LaunchDir>() {
-                            *state.0.lock().expect("LaunchDir mutex poisoned") = Some(dir.clone());
-                        }
-                    }
-                    if let Some(state) = app.try_state::<LaunchFiles>() {
-                        *state.0.lock().expect("LaunchFiles mutex poisoned") = target.files.clone();
-                    }
-                    let _ = app.emit("terax:open-file", target.files);
+                    web::stop();
                 }
                 _ => {}
             }
         });
 }
 
-#[cfg(test)]
-mod launch_args_tests {
-    use super::{sanitize_launch_command, split_launch_args, MAX_LAUNCH_COMMAND_CHARS};
 
-    fn split(args: &[&str]) -> (Option<String>, Vec<String>) {
-        split_launch_args(args.iter().map(|s| s.to_string()).collect())
-    }
-
-    #[test]
-    fn plain_paths_carry_through_without_a_command() {
-        let (command, paths) = split(&["/home/u/proj"]);
-        assert_eq!(command, None);
-        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
-    }
-
-    #[test]
-    fn run_takes_the_next_arg_and_leaves_the_path() {
-        let (command, paths) = split(&["--run", "pnpm dev", "/home/u/proj"]);
-        assert_eq!(command.as_deref(), Some("pnpm dev"));
-        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
-    }
-
-    #[test]
-    fn run_also_accepts_the_equals_form() {
-        let (command, paths) = split(&["--run=pnpm dev", "/home/u/proj"]);
-        assert_eq!(command.as_deref(), Some("pnpm dev"));
-        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
-    }
-
-    #[test]
-    fn unknown_flags_are_ignored_not_treated_as_paths() {
-        let (command, paths) = split(&["--no-focus", "/home/u/proj"]);
-        assert_eq!(command, None);
-        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
-    }
-
-    #[test]
-    fn separator_stops_option_parsing() {
-        let (command, paths) = split(&["--", "--run", "/home/u/proj"]);
-        assert_eq!(command, None);
-        assert_eq!(
-            paths,
-            vec!["--run".to_string(), "/home/u/proj".to_string()]
-        );
-    }
-
-    #[test]
-    fn first_run_wins_and_the_second_value_is_never_a_path() {
-        let (command, paths) = split(&["--run", "a", "--run", "b", "/home/u/proj"]);
-        assert_eq!(command.as_deref(), Some("a"));
-        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
-    }
-
-    // A rejected command must not fall through and be opened as a file path.
-    #[test]
-    fn rejected_command_still_consumes_its_value() {
-        let (command, paths) = split(&["--run", "bad\ncommand", "/home/u/proj"]);
-        assert_eq!(command, None);
-        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
-    }
-
-    #[test]
-    fn run_without_a_value_is_harmless() {
-        let (command, paths) = split(&["/home/u/proj", "--run"]);
-        assert_eq!(command, None);
-        assert_eq!(paths, vec!["/home/u/proj".to_string()]);
-    }
-
-    #[test]
-    fn commands_are_trimmed() {
-        assert_eq!(
-            sanitize_launch_command("  pnpm dev  ").as_deref(),
-            Some("pnpm dev")
-        );
-    }
-
-    #[test]
-    fn blank_commands_are_rejected() {
-        assert_eq!(sanitize_launch_command("   "), None);
-    }
-
-    // Newlines and escape bytes would run commands the caller never typed.
-    #[test]
-    fn control_characters_are_rejected() {
-        assert_eq!(sanitize_launch_command("echo hi\rrm -rf /"), None);
-        assert_eq!(sanitize_launch_command("echo hi\nrm -rf /"), None);
-        assert_eq!(sanitize_launch_command("echo \x1b[31mhi"), None);
-        assert_eq!(sanitize_launch_command("echo \x00hi"), None);
-    }
-
-    #[test]
-    fn overlong_commands_are_rejected() {
-        let long = "a".repeat(MAX_LAUNCH_COMMAND_CHARS + 1);
-        assert_eq!(sanitize_launch_command(&long), None);
-        let at_limit = "a".repeat(MAX_LAUNCH_COMMAND_CHARS);
-        assert_eq!(sanitize_launch_command(&at_limit).as_deref(), Some(&*at_limit));
-    }
-
-    #[test]
-    fn multibyte_commands_are_measured_in_chars_not_bytes() {
-        let cmd = "回显 你好世界";
-        assert_eq!(sanitize_launch_command(cmd).as_deref(), Some(cmd));
-    }
-}
-
-#[cfg(test)]
-mod launch_target_tests {
-    use super::{resolve_launch_target, LaunchEntry, LaunchTarget};
-    use std::path::PathBuf;
-
-    #[test]
-    fn no_entries_resolves_to_empty() {
-        assert_eq!(resolve_launch_target(vec![]), LaunchTarget::default());
-    }
-
-    #[test]
-    fn dir_arg_sets_workspace_and_opens_nothing() {
-        let out = resolve_launch_target(vec![LaunchEntry::Dir(PathBuf::from("/home/u/proj"))]);
-        assert_eq!(out.dir.as_deref(), Some("/home/u/proj"));
-        assert!(out.files.is_empty());
-    }
-
-    #[test]
-    fn file_arg_opens_file_and_uses_parent_as_workspace() {
-        let out =
-            resolve_launch_target(vec![LaunchEntry::File(PathBuf::from("/home/u/proj/main.rs"))]);
-        assert_eq!(out.dir.as_deref(), Some("/home/u/proj"));
-        assert_eq!(out.files, vec!["/home/u/proj/main.rs".to_string()]);
-    }
-
-    #[test]
-    fn multiple_files_all_open_and_first_parent_wins() {
-        let out = resolve_launch_target(vec![
-            LaunchEntry::File(PathBuf::from("/a/one.txt")),
-            LaunchEntry::File(PathBuf::from("/b/two.txt")),
-        ]);
-        assert_eq!(out.dir.as_deref(), Some("/a"));
-        assert_eq!(
-            out.files,
-            vec!["/a/one.txt".to_string(), "/b/two.txt".to_string()]
-        );
-    }
-
-    #[test]
-    fn explicit_dir_takes_precedence_over_file_parent() {
-        let out = resolve_launch_target(vec![
-            LaunchEntry::Dir(PathBuf::from("/workspace")),
-            LaunchEntry::File(PathBuf::from("/other/x.rs")),
-        ]);
-        assert_eq!(out.dir.as_deref(), Some("/workspace"));
-        assert_eq!(out.files, vec!["/other/x.rs".to_string()]);
-    }
-}

@@ -24,6 +24,8 @@ type TabBase = {
   spaceId: string;
   /** Restored from disk, not yet activated: rendered as a placeholder, not mounted. */
   cold?: boolean;
+  /** The terminal tab this file tab belongs to; drives per-terminal caps. */
+  ownerTabId?: number;
 };
 
 export type TerminalTab = TabBase & {
@@ -132,6 +134,8 @@ export type GitDiffOpenInput = {
 export type OpenFileTabOptions = {
   spaceId?: string;
   activate?: boolean;
+  /** The terminal tab this file is opened from; drives the per-terminal cap. */
+  ownerTabId?: number;
 };
 
 export function planMarkdownTabOpen(
@@ -139,6 +143,7 @@ export function planMarkdownTabOpen(
   path: string,
   spaceId: string,
   allocId: () => number,
+  ownerTabId?: number,
 ): { tabs: Tab[]; tabId: number } {
   const pathKey = path.replace(/\\/g, "/");
   const existing = tabs.find(
@@ -159,6 +164,7 @@ export function planMarkdownTabOpen(
         spaceId,
         title: basename(path),
         path,
+        ...(ownerTabId !== undefined && { ownerTabId }),
       },
     ],
     tabId,
@@ -171,6 +177,7 @@ export function planFileTabOpen(
   pin: boolean,
   spaceId: string,
   allocId: () => number,
+  ownerTabId?: number,
 ): { tabs: Tab[]; tabId: number } {
   if (pin) {
     const existing = tabs.find(
@@ -200,6 +207,7 @@ export function planFileTabOpen(
           path,
           dirty: false,
           preview: false,
+          ...(ownerTabId !== undefined && { ownerTabId }),
         },
       ],
       tabId,
@@ -236,6 +244,7 @@ export function planFileTabOpen(
     path,
     dirty: false,
     preview: true,
+    ...(ownerTabId !== undefined && { ownerTabId }),
   };
   if (previewIndex === -1) return { tabs: [...tabs, tab], tabId };
 
@@ -244,34 +253,47 @@ export function planFileTabOpen(
   return { tabs: next, tabId };
 }
 
-/** Editor tabs a single space keeps open; opening past it closes the oldest. */
+/** File tabs a single terminal tab keeps open; opening past it closes the oldest. */
 export const MAX_EDITOR_TABS_PER_SPACE = 10;
 
 /**
- * Trims a space back to MAX_EDITOR_TABS_PER_SPACE editor tabs, closing them in
- * tab order — which is the order they were opened, until tabs are dragged.
+ * Trims one terminal tab's files back to MAX_EDITOR_TABS_PER_SPACE editor /
+ * markdown tabs, closing them in tab order — which is the order they were
+ * opened, until tabs are dragged.
+ *
+ * Files are bucketed by their owning terminal tab (`ownerTabId`). Files with
+ * no owner — restored from sessions saved before the owner model — fall back
+ * to a per-space bucket so they still get capped.
  *
  * Two tabs are never evicted: the ones named in `keepIds` (the file just
  * opened and whatever is active), and any tab with unsaved edits, since
  * closing one would drop the buffer with no prompt. Both exemptions can leave
- * the space above the cap, which is the right way for this to fail.
+ * the bucket above the cap, which is the right way for this to fail.
  */
 export function capEditorTabs(
   tabs: Tab[],
+  ownerTabId: number | undefined,
   spaceId: string,
   keepIds: number[],
 ): Tab[] {
-  const editors = tabs.filter(
-    (t): t is EditorTab => t.kind === "editor" && t.spaceId === spaceId,
+  const isFileTab = (t: Tab): boolean =>
+    t.kind === "editor" || t.kind === "markdown";
+  const files = tabs.filter((t) =>
+    isFileTab(t)
+      ? ownerTabId !== undefined
+        ? t.ownerTabId === ownerTabId
+        : t.ownerTabId === undefined && t.spaceId === spaceId
+      : false,
   );
-  let over = editors.length - MAX_EDITOR_TABS_PER_SPACE;
+  let over = files.length - MAX_EDITOR_TABS_PER_SPACE;
   if (over <= 0) return tabs;
 
   const keep = new Set(keepIds);
   const evict = new Set<number>();
-  for (const t of editors) {
+  for (const t of files) {
     if (over <= 0) break;
-    if (keep.has(t.id) || t.dirty) continue;
+    if (keep.has(t.id)) continue;
+    if (t.kind === "editor" && t.dirty) continue;
     evict.add(t.id);
     over--;
   }
@@ -519,6 +541,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const activeSpaceIdRef = useRef(DEFAULT_SPACE_ID);
   const tabsRef = useRef(tabs);
   const activeIdRef = useRef(activeId);
+  // The terminal tab the user is currently working in — the owner for files
+  // opened from the explorer/search while that tab is active. Seeded with the
+  // initial terminal so files opened before any tab switch still get an owner.
+  const activeTerminalIdRef = useRef<number | undefined>(
+    tabs.find((x) => x.kind === "terminal")?.id,
+  );
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -527,6 +555,12 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    const t = tabs.find((x) => x.id === activeId);
+    activeTerminalIdRef.current =
+      t?.kind === "terminal" ? t.id : activeTerminalIdRef.current;
+  }, [tabs, activeId]);
 
   // Activating a cold tab warms it: one choke point for every activation path.
   useEffect(() => {
@@ -575,17 +609,22 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     return tabId;
   }, []);
 
-  // Reassigns a tab to another space. Returns true when the moved tab was active
-  // and emptied its source space, so the caller should follow it into the target.
+  // Reassigns a tab to another space. When a terminal tab moves, its owned
+  // file tabs follow. Returns true when the moved tab was active and emptied
+  // its source space, so the caller should follow it into the target.
   const moveTabToSpace = useCallback(
     (tabId: number, targetSpaceId: string): boolean => {
       const curr = tabsRef.current;
       const tab = curr.find((t) => t.id === tabId);
       if (!tab || tab.spaceId === targetSpaceId) return false;
       setTabs((prev) =>
-        prev.map((t) =>
-          t.id === tabId ? ({ ...t, spaceId: targetSpaceId } as Tab) : t,
-        ),
+        prev.map((t) => {
+          if (t.id === tabId) return { ...t, spaceId: targetSpaceId } as Tab;
+          if (t.kind === "terminal" && t.ownerTabId === tabId) {
+            return { ...t, spaceId: targetSpaceId } as Tab;
+          }
+          return t;
+        }),
       );
       if (activeIdRef.current !== tabId) return false;
       const fallback = nextActiveInSpace(curr, tabId);
@@ -753,6 +792,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   const openFileTab = useCallback(
     (path: string, pin = true, options: OpenFileTabOptions = {}) => {
       const targetSpaceId = options.spaceId ?? activeSpaceIdRef.current;
+      const ownerTabId = options.ownerTabId ?? activeTerminalIdRef.current;
       const activate = options.activate ?? true;
       const plan = planFileTabOpen(
         tabsRef.current,
@@ -760,8 +800,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         pin,
         targetSpaceId,
         () => nextIdRef.current++,
+        ownerTabId,
       );
-      const next = capEditorTabs(plan.tabs, targetSpaceId, [
+      const next = capEditorTabs(plan.tabs, ownerTabId, targetSpaceId, [
         plan.tabId,
         activeIdRef.current,
       ]);
@@ -809,17 +850,25 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   // batch that opens a markdown file before a regular one (multi-file "Open
   // With") would otherwise have the queued markdown update clobbered by
   // openFileTab's setTabs(plan.tabs), which is built from the stale ref.
-  const newMarkdownTab = useCallback((path: string) => {
+  const newMarkdownTab = useCallback((path: string, ownerTabId?: number) => {
     const curr = tabsRef.current;
+    const owner = ownerTabId ?? activeTerminalIdRef.current;
     const plan = planMarkdownTabOpen(
       curr,
       path,
       activeSpaceIdRef.current,
       () => nextIdRef.current++,
+      owner,
     );
-    if (plan.tabs !== curr) {
-      tabsRef.current = plan.tabs;
-      setTabs(plan.tabs);
+    const next = capEditorTabs(
+      plan.tabs,
+      owner,
+      activeSpaceIdRef.current,
+      [plan.tabId, activeIdRef.current],
+    );
+    if (next !== curr) {
+      tabsRef.current = next;
+      setTabs(next);
     }
     setActiveId(plan.tabId);
     return plan.tabId;
@@ -866,6 +915,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
               cold: t.cold,
               title: t.title,
               path: t.path,
+              ownerTabId: t.ownerTabId,
               overrideLanguage: t.overrideLanguage ?? null,
             };
           }
@@ -979,7 +1029,14 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       if (target?.kind === "terminal") {
         toDispose = leafIds(target.paneTree);
       }
-      const next = curr.filter((t) => t.id !== id);
+      let next = curr.filter((t) => t.id !== id);
+      // Files owned by the closed terminal keep their tabs but detach, so the
+      // Open Files panel shows them under "Unattached" instead of a ghost owner.
+      if (target?.kind === "terminal") {
+        next = next.map((t) =>
+          t.ownerTabId === id ? { ...t, ownerTabId: undefined } : t,
+        );
+      }
       setActiveId((active) => (id === active ? fallback : active));
       return next;
     });

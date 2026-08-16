@@ -28,7 +28,6 @@ export function AboutSection() {
   const checking = status.kind === "checking";
   const downloading = status.kind === "downloading";
   const available = status.kind === "available";
-  const manualAvailable = status.kind === "manual-available";
   const ready = status.kind === "ready";
   const checkLabel =
     status.kind === "uptodate"
@@ -43,9 +42,7 @@ export function AboutSection() {
               ? "重启以完成安装"
               : available
                 ? `安装 v${status.update.version}`
-                : manualAvailable
-                  ? `更新到 v${status.info.version}`
-                  : "检查更新";
+                : "检查更新";
   const onUpdateClick = () => {
     if (available) void install();
     else void check({ manual: true });

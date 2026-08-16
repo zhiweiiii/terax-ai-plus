@@ -1,9 +1,7 @@
 import { cn } from "@/lib/utils";
 import type { Tab } from "@/modules/tabs";
 import { labelFor } from "@/modules/tabs/lib/tabLabel";
-import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
-import { useSpaces } from "@/modules/spaces";
 import {
   Cancel01Icon,
   ComputerTerminal02Icon,
@@ -16,18 +14,31 @@ import { HugeiconsIcon } from "@hugeicons/react";
 type Props = {
   tabs: Tab[];
   activeId: number;
+  /** The terminal tab whose files are shown; null shows unattached files. */
+  currentOwnerTabId: number | null;
   onSelectTab: (id: number) => void;
   onCloseTab: (id: number) => void;
 };
 
-export function OpenFilesPanel({ tabs, activeId, onSelectTab, onCloseTab }: Props) {
-  const spaces = useSpaces((s) => s.spaces);
+export function OpenFilesPanel({
+  tabs,
+  activeId,
+  currentOwnerTabId,
+  onSelectTab,
+  onCloseTab,
+}: Props) {
+  // Files belong to the current command line (terminal tab). Switching command
+  // lines switches this list. Files with no owner are shown only when there is
+  // no active terminal to scope to.
   const fileTabs = tabs.filter(
     (t) =>
-      t.kind === "editor" ||
-      t.kind === "markdown" ||
-      t.kind === "preview" ||
-      t.kind === "git-diff",
+      (t.kind === "editor" ||
+        t.kind === "markdown" ||
+        t.kind === "preview" ||
+        t.kind === "git-diff") &&
+      (currentOwnerTabId !== null
+        ? t.ownerTabId === currentOwnerTabId
+        : t.ownerTabId === undefined),
   );
 
   if (fileTabs.length === 0) {
@@ -38,104 +49,66 @@ export function OpenFilesPanel({ tabs, activeId, onSelectTab, onCloseTab }: Prop
     );
   }
 
-  // Group tabs by spaceId
-  const groups = new Map<string, Tab[]>();
-  for (const tab of fileTabs) {
-    const key = tab.spaceId ?? DEFAULT_SPACE_ID;
-    const bucket = groups.get(key);
-    if (bucket) bucket.push(tab);
-    else groups.set(key, [tab]);
-  }
-
-  const renderTab = (tab: Tab) => {
-    const isActive = tab.id === activeId;
-    const name = labelFor(tab);
-    const iconUrl =
-      tab.kind === "editor" || tab.kind === "markdown"
-        ? fileIconUrl(name)
-        : null;
-
-    return (
-      <button
-        key={tab.id}
-        type="button"
-        onClick={() => onSelectTab(tab.id)}
-        className={cn(
-          "group flex h-7 shrink-0 items-center gap-2 px-3 text-left text-[12px] transition-colors",
-          isActive
-            ? "bg-accent text-foreground"
-            : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-        )}
-      >
-        {iconUrl ? (
-          <img src={iconUrl} alt="" className="size-3.5 shrink-0" />
-        ) : tab.kind === "preview" ? (
-          <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-        ) : tab.kind === "git-diff" ? (
-          <HugeiconsIcon icon={GitCompareIcon} size={14} strokeWidth={1.75} className="shrink-0" />
-        ) : tab.kind === "editor" ? (
-          <HugeiconsIcon icon={PencilEdit02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-        ) : (
-          <HugeiconsIcon icon={ComputerTerminal02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-        )}
-        <span className="min-w-0 flex-1 truncate">{name}</span>
-        <span
-          role="button"
-          aria-label="Close file"
-          onClick={(e) => {
-            e.stopPropagation();
-            onCloseTab(tab.id);
-          }}
-          className="rounded p-0.5 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-60"
-        >
-          <HugeiconsIcon icon={Cancel01Icon} size={11} strokeWidth={2} />
-        </span>
-      </button>
-    );
-  };
-
-  const totalHeader = (
-    <div className="flex h-7 shrink-0 items-center gap-2 border-b border-border/50 px-3">
-      <span className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/85">
-        Open Files
-      </span>
-      <span className="text-[10px] tabular-nums text-muted-foreground/60">
-        {fileTabs.length}
-      </span>
-    </div>
-  );
-
-  // If only one group, show without group headers
-  if (groups.size <= 1) {
-    return (
-      <div className="flex h-full flex-col overflow-y-auto">
-        {totalHeader}
-        {fileTabs.map(renderTab)}
-      </div>
-    );
-  }
-
-  // Multiple groups: show group headers
-  const groupOrder = [...groups.keys()];
   return (
     <div className="flex h-full flex-col overflow-y-auto">
-      {totalHeader}
-      {groupOrder.map((spaceId) => {
-        const groupTabs = groups.get(spaceId)!;
-        const space = spaces.find((s) => s.id === spaceId);
-        const groupLabel = space?.name ?? (spaceId === DEFAULT_SPACE_ID ? "Default" : spaceId);
+      <div className="flex h-7 shrink-0 items-center gap-2 border-b border-border/50 px-3">
+        <HugeiconsIcon
+          icon={ComputerTerminal02Icon}
+          size={11}
+          strokeWidth={1.75}
+          className="shrink-0 text-muted-foreground/60"
+        />
+        <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/85">
+          Open Files
+        </span>
+        <span className="text-[10px] tabular-nums text-muted-foreground/60">
+          {fileTabs.length}
+        </span>
+      </div>
+      {fileTabs.map((tab) => {
+        const isActive = tab.id === activeId;
+        const name = labelFor(tab);
+        const iconUrl =
+          tab.kind === "editor" || tab.kind === "markdown"
+            ? fileIconUrl(name)
+            : null;
+
         return (
-          <div key={spaceId}>
-            <div className="flex h-6 items-center gap-2 border-b border-border/30 px-3">
-              <span className="text-[10px] font-semibold text-muted-foreground/70">
-                {groupLabel}
-              </span>
-              <span className="text-[9px] tabular-nums text-muted-foreground/50">
-                {groupTabs.length}
-              </span>
-            </div>
-            {groupTabs.map(renderTab)}
-          </div>
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => onSelectTab(tab.id)}
+            className={cn(
+              "group flex h-7 w-full shrink-0 items-center gap-2 px-3 text-left text-[12px] transition-colors",
+              isActive
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+            )}
+          >
+            {iconUrl ? (
+              <img src={iconUrl} alt="" className="size-3.5 shrink-0" />
+            ) : tab.kind === "preview" ? (
+              <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
+            ) : tab.kind === "git-diff" ? (
+              <HugeiconsIcon icon={GitCompareIcon} size={14} strokeWidth={1.75} className="shrink-0" />
+            ) : tab.kind === "editor" ? (
+              <HugeiconsIcon icon={PencilEdit02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
+            ) : (
+              <HugeiconsIcon icon={ComputerTerminal02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
+            )}
+            <span className="min-w-0 flex-1 truncate">{name}</span>
+            <span
+              role="button"
+              aria-label="Close file"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCloseTab(tab.id);
+              }}
+              className="rounded p-0.5 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-60"
+            >
+              <HugeiconsIcon icon={Cancel01Icon} size={11} strokeWidth={2} />
+            </span>
+          </button>
         );
       })}
     </div>

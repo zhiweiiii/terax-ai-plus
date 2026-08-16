@@ -68,7 +68,7 @@ export function MarkdownPreviewPane({
       )}
     >
       <MarkdownViewToggle mode="rendered" onChange={onSetView} />
-      <div className="flex-1 overflow-auto">
+      <div className="markdown-preview flex-1 overflow-auto">
         <div className="px-8 py-6" ref={contentRef}>
           {status.kind === "loading" && (
             <p className="text-[12px] text-muted-foreground">Loading…</p>

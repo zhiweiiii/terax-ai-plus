@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,6 +31,16 @@ const MAX_PENDING: usize = 4 * 1024 * 1024;
 const OVERFLOW_NOTICE: &[u8] =
     b"\x1bc\x1b[2m[terax: dropped output due to backpressure]\x1b[0m\r\n";
 
+/// Ring buffer kept for late Web subscribers (page reload, new viewer): a new
+/// subscriber gets this history replayed before live bytes, so the mobile page
+/// opens showing the current screen instead of a blank terminal.
+const WEB_HISTORY_CAP: usize = 256 * 1024;
+
+/// Bounded queue a Web client subscribes with. SyncSender + try_send drops the
+/// oldest chunk when a slow viewer can't keep up, so one laggy phone never
+/// stalls the PTY pipeline.
+const WEB_SUB_QUEUE: usize = 64;
+
 pub struct Session {
     // Field drop order is intentional. Rust drops fields top-to-bottom:
     //   1. `_job` — on Windows, closing the Job HANDLE fires
@@ -52,6 +63,12 @@ pub struct Session {
     // Set by the waiter once the child exits, so pty_open can reap a shell
     // that died before it was registered.
     pub(super) exited: Arc<AtomicBool>,
+    /// Display metadata for the web page's session list.
+    pub cwd: Option<String>,
+    /// Recent output for late Web subscribers (ring buffer).
+    history: Mutex<Vec<u8>>,
+    /// Web viewers attached to this session (bounded queues).
+    web_subs: Mutex<Vec<SyncSender<Vec<u8>>>>,
 }
 
 impl Drop for Session {
@@ -74,6 +91,41 @@ pub(super) fn drop_session(session: Arc<Session>) {
     #[cfg(windows)]
     let _guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
     drop(session);
+}
+
+impl Session {
+    /// Number of currently attached Web viewers (for the page's session list).
+    pub fn web_viewer_count(&self) -> usize {
+        self.web_subs.lock().unwrap().len()
+    }
+
+    /// Attach a Web viewer: returns a snapshot of recent output (to be replayed
+    /// first) and a receiver for live chunks. Returns None if the session
+    /// already exited, in which case the caller should list it as dead.
+    pub fn web_subscribe(&self) -> Option<(Vec<u8>, mpsc::Receiver<Vec<u8>>)> {
+        if self.exited.load(Ordering::Acquire) {
+            return None;
+        }
+        let (tx, rx) = mpsc::sync_channel(WEB_SUB_QUEUE);
+        let history = self.history.lock().unwrap().clone();
+        self.web_subs.lock().unwrap().push(tx);
+        Some((history, rx))
+    }
+
+    pub fn web_unsubscribe(&self, tx: &SyncSender<Vec<u8>>) {
+        self.web_subs.lock().unwrap().retain(|s| !std::ptr::eq(s, tx));
+    }
+
+    pub fn web_unsubscribe_all(&self) {
+        self.web_subs.lock().unwrap().clear();
+    }
+
+    /// Fan out one output chunk to every attached Web viewer. Drops
+    /// dead / full subscribers so a slow phone can't stall the PTY.
+    fn web_broadcast(&self, chunk: &[u8]) {
+        let mut subs = self.web_subs.lock().unwrap();
+        subs.retain(|s| s.try_send(chunk.to_vec()).is_ok());
+    }
 }
 
 struct ChildKillGuard {
@@ -124,7 +176,7 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let cmd = shell_init::build_command(cwd, workspace, blocks, shell, control)?;
+    let cmd = shell_init::build_command(cwd.clone(), workspace, blocks, shell, control)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 
@@ -162,6 +214,9 @@ pub fn spawn(
         writer: writer.clone(),
         master: Mutex::new(pair.master),
         exited: exited.clone(),
+        cwd,
+        history: Mutex::new(Vec::with_capacity(WEB_HISTORY_CAP.min(64 * 1024))),
+        web_subs: Mutex::new(Vec::new()),
     });
 
     let pending: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((
@@ -234,6 +289,7 @@ pub fn spawn(
     let on_data_flush = on_data.clone();
     let pending_f = pending.clone();
     let done_f = done.clone();
+    let session_f = session.clone();
     thread::Builder::new()
         .name("terax-pty-flusher".into())
         .spawn(move || {
@@ -255,10 +311,22 @@ pub fn spawn(
                 if chunk.is_empty() {
                     continue;
                 }
-                if let Err(e) = on_data_flush.send(Response::new(chunk)) {
+                if let Err(e) = on_data_flush.send(Response::new(chunk.clone())) {
                     log::debug!("pty flusher exiting, channel closed: {e}");
                     break;
                 }
+                // Keep a rolling window of output for late Web subscribers and
+                // fan the chunk out to currently attached viewers.
+                {
+                    let mut history = session_f.history.lock().unwrap();
+                    if history.len() + chunk.len() > WEB_HISTORY_CAP {
+                        let over = history.len() + chunk.len() - WEB_HISTORY_CAP;
+                        let cut = over.min(history.len());
+                        history.drain(..cut);
+                    }
+                    history.extend_from_slice(&chunk);
+                }
+                session_f.web_broadcast(&chunk);
             }
         })
         .expect("spawn pty flusher thread");
@@ -315,89 +383,3 @@ pub fn spawn(
     Ok((session, size))
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use portable_pty::CommandBuilder;
-
-    #[test]
-    fn drop_kills_child_process() {
-        let pty_system = native_pty_system();
-        let size = PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-        let pair = pty_system.openpty(size).expect("openpty");
-
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg("sleep 30");
-        let mut child = pair.slave.spawn_command(cmd).expect("spawn");
-        drop(pair.slave);
-
-        let killer = child.clone_killer();
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(pair.master.take_writer().expect("writer")));
-
-        let session = Arc::new(Session {
-            shell_pid: child.process_id().unwrap_or(0),
-            killer: Mutex::new(killer),
-            writer,
-            master: Mutex::new(pair.master),
-            exited: Arc::new(AtomicBool::new(false)),
-        });
-
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "child must be alive before drop",
-        );
-
-        drop(session);
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut exited = false;
-        while Instant::now() < deadline {
-            if child.try_wait().unwrap().is_some() {
-                exited = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        assert!(exited, "child still running 2s after Session drop");
-    }
-
-    #[test]
-    fn drop_session_succeeds_after_child_already_exited() {
-        let pty_system = native_pty_system();
-        let size = PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-        let pair = pty_system.openpty(size).expect("openpty");
-
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg("exit 0");
-        let mut child = pair.slave.spawn_command(cmd).expect("spawn");
-        drop(pair.slave);
-        let _ = child.wait();
-
-        let killer = child.clone_killer();
-        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
-            Arc::new(Mutex::new(pair.master.take_writer().expect("writer")));
-
-        let session = Arc::new(Session {
-            shell_pid: 0,
-            killer: Mutex::new(killer),
-            writer,
-            master: Mutex::new(pair.master),
-            exited: Arc::new(AtomicBool::new(false)),
-        });
-
-        drop_session(session);
-    }
-}

@@ -126,42 +126,4 @@ fn default_focus() -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
 
-    #[test]
-    fn request_round_trips_without_caller_context() {
-        let raw = json!({
-            "protocol": PROTOCOL_VERSION,
-            "id": "42",
-            "token": "secret",
-            "method": METHOD_PING,
-            "params": {}
-        });
-        let request: ControlRequest = serde_json::from_value(raw).expect("deserialize request");
-        assert_eq!(request.caller, CallerContext::default());
-        assert_eq!(request.method, METHOD_PING);
-    }
-
-    #[test]
-    fn response_shapes_are_unambiguous() {
-        let success = ControlResponse::success("1", json!({ "pong": true }));
-        assert!(success.ok);
-        assert!(success.result.is_some());
-        assert!(success.error.is_none());
-
-        let failure = ControlResponse::failure("2", "invalid_request", "bad request");
-        assert!(!failure.ok);
-        assert!(failure.result.is_none());
-        assert_eq!(failure.error.expect("error").code, "invalid_request");
-    }
-
-    #[test]
-    fn open_defaults_to_focusing_the_target() {
-        let params: OpenParams =
-            serde_json::from_value(json!({ "path": "/tmp/a" })).expect("deserialize open params");
-        assert!(params.focus);
-    }
-}

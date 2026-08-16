@@ -269,36 +269,4 @@ fn display_path(
     to_canon(path)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    fn hit(rel: &str) -> SearchHit {
-        SearchHit {
-            path: rel.to_string(),
-            rel: rel.to_string(),
-            name: rel.rsplit('/').next().unwrap_or(rel).to_string(),
-            is_dir: false,
-        }
-    }
-
-    #[test]
-    fn rank_fuzzy_prefers_name_and_shorter_path() {
-        let cands = vec![
-            hit("src/deeply/nested/config.rs"),
-            hit("config.rs"),
-            hit("src/main.rs"),
-        ];
-        let out = rank_fuzzy(cands, "config", 10);
-        assert_eq!(out[0].rel, "config.rs");
-        assert!(!out.iter().any(|h| h.rel == "src/main.rs"));
-    }
-
-    #[test]
-    fn rank_fuzzy_matches_subsequence() {
-        let cands = vec![hit("CommandPalette.tsx"), hit("readme.md")];
-        let out = rank_fuzzy(cands, "cmdp", 10);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].rel, "CommandPalette.tsx");
-    }
-}

@@ -104,11 +104,13 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { CloseDialogs } from "./components/CloseDialogs";
+import { SelectionAskButton } from "./components/SelectionAskButton";
 import {
   TOGGLE_BLOCK_INPUT_EVENT,
   WorkspaceInputBar,
 } from "./components/WorkspaceInputBar";
 import { WorkspaceSurface } from "./components/WorkspaceSurface";
+import { useSelectionAsk } from "./components/useSelectionAsk";
 import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
 
 function HeaderTabs({
@@ -369,11 +371,14 @@ export default function App() {
   useEditorFileSync({ tabs, tabsRef, editorRefs });
   useThemeFileEditing({ tabsRef, openFileTab });
 
-  const { explorerRoot, inheritedCwdForNewTab } = useWorkspaceCwd(
-    activeTab,
-    tabs,
-    launchCwd ?? home,
-  );
+  // One source of truth for the side panels: the command line (terminal tab)
+  // they all follow. 文件 / 版本 / 窗口 switch together with it.
+  const {
+    currentTerminalTab: currentOwnerTab,
+    explorerRoot,
+    inheritedCwdForNewTab,
+  } = useWorkspaceCwd(activeTab, tabs, launchCwd ?? home);
+  const currentOwnerTabId = currentOwnerTab?.id ?? null;
 
   useWindowTitle(activeTab, explorerRoot);
 
@@ -473,6 +478,11 @@ export default function App() {
     if (t.kind === "editor") {
       return editorRefs.current.get(activeId)?.getSelection() ?? null;
     }
+    if (t.kind === "markdown") {
+      // Rendered markdown preview is plain selectable HTML.
+      const sel = window.getSelection();
+      return sel && !sel.isCollapsed ? sel.toString() : null;
+    }
     return null;
   }, [tabs, activeId]);
 
@@ -552,70 +562,97 @@ export default function App() {
     [findClaudeLeaf, setActiveId, focusPane],
   );
 
-  const sendSelectionToClaude = useCallback(() => {
-    const selection = captureActiveSelection();
-    if (!selection || !selection.trim()) return;
+  const sendSelectionToClaude = useCallback(
+    (targetLeafId?: number) => {
+      const selection = captureActiveSelection();
+      if (!selection || !selection.trim()) return;
 
-    // Resolve the source file first — it both labels the block and decides
-    // which Claude Code pane receives it. Git tabs carry a repo-relative path,
-    // so join them onto their repo root to get something absolute.
-    let filePath: string | null = null;
-    if (activeTab?.kind === "editor" || activeTab?.kind === "markdown") {
-      filePath = activeTab.path;
-    } else if (
-      activeTab?.kind === "git-diff" ||
-      activeTab?.kind === "git-commit-file"
-    ) {
-      filePath = /^([A-Za-z]:|\/|\\)/.test(activeTab.path)
-        ? activeTab.path
-        : `${activeTab.repoRoot.replace(/[\\/]+$/, "")}/${activeTab.path.replace(/^[\\/]+/, "")}`;
-    }
+      // Resolve the source file first — it both labels the block and decides
+      // which Claude Code pane receives it. Git tabs carry a repo-relative path,
+      // so join them onto their repo root to get something absolute.
+      let filePath: string | null = null;
+      if (activeTab?.kind === "editor" || activeTab?.kind === "markdown") {
+        filePath = activeTab.path;
+      } else if (
+        activeTab?.kind === "git-diff" ||
+        activeTab?.kind === "git-commit-file"
+      ) {
+        filePath = /^([A-Za-z]:|\/|\\)/.test(activeTab.path)
+          ? activeTab.path
+          : `${activeTab.repoRoot.replace(/[\\/]+$/, "")}/${activeTab.path.replace(/^[\\/]+/, "")}`;
+      }
 
-    const leafId = findClaudeLeaf(filePath);
-    if (leafId === null) {
-      toast.error("No terminal pane to send the selection to");
-      return;
-    }
+      // An explicit multi-agent target wins; otherwise pick the best pane.
+      const leafId = targetLeafId ?? findClaudeLeaf(filePath);
+      if (leafId === null) {
+        toast.error("No terminal pane to send the selection to");
+        return;
+      }
 
-    // Label the block with its file and line range so the agent can locate it.
-    // Pasted without a trailing CR so the user can add a question first.
-    let location = filePath;
-    if (
-      location &&
-      (activeTab?.kind === "editor" || activeTab?.kind === "markdown")
-    ) {
-      const range = editorRefs.current.get(activeId)?.getSelectionRange?.();
-      if (range) {
-        location +=
-          range.startLine === range.endLine
-            ? `:${range.startLine}`
-            : `:${range.startLine}-${range.endLine}`;
+      // Label the block with its file and line range so the agent can locate it.
+      // Pasted without a trailing CR so the user can add a question first.
+      let location = filePath;
+      if (
+        location &&
+        (activeTab?.kind === "editor" || activeTab?.kind === "markdown")
+      ) {
+        const range = editorRefs.current.get(activeId)?.getSelectionRange?.();
+        if (range) {
+          location +=
+            range.startLine === range.endLine
+              ? `:${range.startLine}`
+              : `:${range.startLine}-${range.endLine}`;
+        }
+      }
+
+      const header = location ? `${location}\n` : "";
+      const body = `${header}\`\`\`\n${selection.trimEnd()}\n\`\`\`\n`;
+
+      if (pasteToLeaf(leafId, body)) {
+        const tab = tabsRef.current.find(
+          (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+        );
+        if (tab) {
+          setActiveId(tab.id);
+          focusPane(tab.id, leafId);
+        }
+        toast.success("Selection sent — add your question and press Enter");
+      } else {
+        toast.error("That terminal is no longer running");
+      }
+    },
+    [
+      captureActiveSelection,
+      findClaudeLeaf,
+      activeTab,
+      activeId,
+      setActiveId,
+      focusPane,
+    ],
+  );
+
+  // All running agent terminals (claude / codex / gemini / opencode / ...),
+  // used to let the user pick a target when several agents are open.
+  const agentTargets = useMemo(() => {
+    const { agents } = useAgentActivityStore.getState();
+    const targets: { leafId: number; agent: string; cwd: string | null }[] = [];
+    for (const tab of tabsRef.current) {
+      if (tab.kind !== "terminal") continue;
+      for (const leafId of leafIds(tab.paneTree)) {
+        const ptyId = ptyIdForLeaf(leafId);
+        const agent = ptyId !== null ? agents[ptyId] : undefined;
+        if (!agent) continue;
+        targets.push({ leafId, agent, cwd: leafCwd(leafId) });
       }
     }
+    return targets;
+  }, [tabs]);
 
-    const header = location ? `${location}\n` : "";
-    const body = `${header}\`\`\`\n${selection.trimEnd()}\n\`\`\`\n`;
-
-    if (pasteToLeaf(leafId, body)) {
-      const tab = tabsRef.current.find(
-        (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
-      );
-      if (tab) {
-        setActiveId(tab.id);
-        focusPane(tab.id, leafId);
-      }
-      toast.success("Selection sent — add your question and press Enter");
-    } else {
-      toast.error("That terminal is no longer running");
-    }
-  }, [
-    captureActiveSelection,
-    findClaudeLeaf,
-    activeTab,
-    activeId,
-    setActiveId,
-    focusPane,
-  ]);
+  const { popup: selectionAskPopup, setPopup: setSelectionAskPopup, send: sendSelection } =
+    useSelectionAsk({
+      captureActiveSelection,
+      onSend: sendSelectionToClaude,
+    });
 
   const openNewTab = useCallback(() => {
     newTab(inheritedCwdForNewTab());
@@ -660,10 +697,11 @@ export default function App() {
       // Markdown opens in its rendered view by default; a per-tab toggle flips
       // it to the raw editor. Other files default to preview (pin=false);
       // explicit actions like context-menu "Open" pass pin=true to persist.
-      if (isMarkdownPath(path)) newMarkdownTab(path);
-      else openFileTab(path, pin ?? false);
+      // Files always belong to the current command line.
+      if (isMarkdownPath(path)) newMarkdownTab(path, currentOwnerTabId ?? undefined);
+      else openFileTab(path, pin ?? false, { ownerTabId: currentOwnerTabId ?? undefined });
     },
-    [openFileTab, newMarkdownTab],
+    [openFileTab, newMarkdownTab, currentOwnerTabId],
   );
 
   const openLaunchFiles = useCallback(
@@ -744,6 +782,8 @@ export default function App() {
     [tabs, updateTab],
   );
 
+  // The cwd of the command line the side panels follow; falls back to the
+  // active terminal leaf's cwd for the leaf-level detail (e.g. split panes).
   const activeTerminalLeafCwd =
     activeTab?.kind === "terminal"
       ? (findLeafCwd(activeTab.paneTree, activeTab.activeLeafId) ??
@@ -830,7 +870,7 @@ export default function App() {
   } = useSourceControlContext({
     activeTab,
     tabs,
-    activeTerminalLeafCwd,
+    activeTerminalLeafCwd: currentOwnerTab?.cwd ?? null,
     explorerRoot,
     launchCwd,
     launchCwdResolved,
@@ -959,7 +999,7 @@ export default function App() {
         if (editor) editor.openSearch();
         else searchInlineRef.current?.focus();
       },
-      "selection.sendToAgent": sendSelectionToClaude,
+      "selection.sendToAgent": () => sendSelectionToClaude(),
       "settings.open": () => void openSettingsWindow(),
       "sidebar.toggle": toggleSidebar,
       "explorer.focus": toggleExplorerFocus,
@@ -1134,7 +1174,10 @@ export default function App() {
 
   const searchRoot = explorerRoot;
 
-  const activeCwd = activeTerminalLeafCwd;
+  // The command line's cwd — follows the active file's owner, not just the
+  // active terminal tab, so the status bar / new groups stay in context.
+  const activeCwd =
+    activeTerminalLeafCwd ?? currentOwnerTab?.cwd ?? explorerRoot;
 
   // ── Group (space) management ────────────────────────────────────────
   const handleCreateGroup = useCallback(
@@ -1225,13 +1268,15 @@ export default function App() {
   >(new Map());
   const openContentHit = useCallback(
     (path: string, line: number) => {
-      const id = openFileTab(path, true);
+      const id = openFileTab(path, true, {
+        ownerTabId: currentOwnerTabId ?? undefined,
+      });
       if (id == null) return;
       const h = editorRefs.current.get(id);
       if (h) h.gotoLine(line);
       else pendingEditorNavigation.current.set(id, { line, focus: true });
     },
-    [openFileTab],
+    [openFileTab, currentOwnerTabId],
   );
 
   const openControlFile = useCallback(
@@ -1298,6 +1343,7 @@ export default function App() {
             <Header
               tabs={headerTabs}
               activeId={activeId}
+              activeOwnerTabId={currentOwnerTabId}
               onSelect={setActiveId}
               onNew={openNewTab}
               onNewBlock={openNewBlockTab}
@@ -1399,6 +1445,7 @@ export default function App() {
                       <OpenFilesPanel
                         tabs={tabs}
                         activeId={activeId}
+                        currentOwnerTabId={currentOwnerTabId}
                         onSelectTab={setActiveId}
                         onCloseTab={handleClose}
                       />
@@ -1412,6 +1459,7 @@ export default function App() {
                         activeFilePath={explorerActiveFilePath}
                         openFilePaths={explorerOpenFilePaths}
                         onOpenFile={handleOpenFile}
+                        onOpenSearchHit={openContentHit}
                         onPathRenamed={handlePathRenamed}
                         onPathDeleted={handlePathDeleted}
                         onRevealInTerminal={cdInNewTab}
@@ -1520,6 +1568,16 @@ export default function App() {
           )}
 
           <Toaster position="bottom-right" />
+
+          {selectionAskPopup && (
+            <SelectionAskButton
+              x={selectionAskPopup.x}
+              y={selectionAskPopup.y}
+              targets={agentTargets}
+              onSend={sendSelection}
+              onDismiss={() => setSelectionAskPopup(null)}
+            />
+          )}
 
           {switcherState && (
             <TabSwitcherHud tabs={spaceTabs} state={switcherState} />

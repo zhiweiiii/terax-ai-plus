@@ -55,6 +55,12 @@ import { NewTabMenu } from "./NewTabMenu";
 type Props = {
   tabs: Tab[];
   activeId: number;
+  /**
+   * When the active tab is a file, this is the terminal tab it belongs to —
+   * the command line stays highlighted so file ⇄ command line read as parent
+   * and child.
+   */
+  activeOwnerTabId?: number | null;
   onSelect: (id: number) => void;
   onNew: () => void;
   onNewBlock: () => void;
@@ -76,6 +82,7 @@ type Props = {
 export function TabBar({
   tabs,
   activeId,
+  activeOwnerTabId,
   onSelect,
   onNew,
   onNewBlock,
@@ -134,7 +141,7 @@ export function TabBar({
 
   useLayoutEffect(() => {
     measurePill();
-  }, [measurePill, activeId, tabs]);
+  }, [measurePill, activeId, activeOwnerTabId, tabs]);
 
   useEffect(() => {
     const list = listRef.current;
@@ -230,7 +237,14 @@ export function TabBar({
             {tabs.map((t, i) => {
               const isPreview =
                 (t.kind === "editor" || t.kind === "git-diff") && t.preview;
-              const isActive = t.id === activeId;
+              // A file tab highlights its owning command line; a terminal tab
+              // highlights itself.
+              const isActive =
+                t.id === activeId ||
+                (activeOwnerTabId != null &&
+                  activeId !== t.id &&
+                  t.kind === "terminal" &&
+                  t.id === activeOwnerTabId);
               const isNew = !firstRender && !seen.has(t.id);
 
               const srcIndex = tabs.findIndex((x) => x.id === draggingId);

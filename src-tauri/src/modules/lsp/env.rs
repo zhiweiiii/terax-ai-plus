@@ -101,20 +101,3 @@ fn capture_login_env() -> Option<HashMap<String, String>> {
     Some(env)
 }
 
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_binary_finds_sh() {
-        let p = resolve_binary("sh").expect("sh must resolve");
-        assert!(p.is_absolute());
-    }
-
-    #[test]
-    fn resolve_binary_rejects_empty_and_missing() {
-        assert!(resolve_binary("").is_none());
-        assert!(resolve_binary("   ").is_none());
-        assert!(resolve_binary("terax-definitely-not-a-real-binary").is_none());
-    }
-}

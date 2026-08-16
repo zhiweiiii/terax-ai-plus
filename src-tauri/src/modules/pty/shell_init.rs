@@ -134,10 +134,6 @@ fn ensure_utf8_locale(cmd: &mut CommandBuilder) {
     if already_utf8 {
         return;
     }
-    #[cfg(target_os = "macos")]
-    let fallback = "en_US.UTF-8";
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let fallback = "C.UTF-8";
     #[cfg(windows)]
     let fallback = "en_US.UTF-8";
     cmd.env("LANG", fallback);

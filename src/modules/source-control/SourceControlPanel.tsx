@@ -35,7 +35,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { IS_MAC } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import {
   type GitBranchEntry,
@@ -713,7 +712,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     return scm.status.isDetached ? "detached" : scm.status.branch;
   }, [fixedTargetPending, scm.status]);
 
-  const commitShortcut = IS_MAC ? "⌘↩" : "Ctrl+Enter";
+  const commitShortcut = "Ctrl+Enter";
   // stagedEntries covers the active repo only; fileEntries spans every repo, so
   // commit stays enabled when the staged work sits in another group.
   const stagedRepoCount =
@@ -1359,11 +1358,16 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       onClick={() => void scm.commit()}
                     >
                       {scm.actionBusy === "commit" ||
-                      scm.actionBusy === "commit-and-push"
-                        ? "Committing…"
-                        : stagedRepoCount > 1
-                          ? `Commit to ${stagedRepoCount} repos`
-                          : "Commit"}
+                      scm.actionBusy === "commit-and-push" ? (
+                        <>
+                          <Spinner className="size-3.5" />
+                          Committing…
+                        </>
+                      ) : stagedRepoCount > 1 ? (
+                        `Commit to ${stagedRepoCount} repos`
+                      ) : (
+                        "Commit"
+                      )}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent
@@ -1385,9 +1389,14 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       disabled={!canCommit}
                       onClick={() => void scm.commitAndPush()}
                     >
-                      {scm.actionBusy === "commit-and-push"
-                        ? "Committing…"
-                        : "Commit & Push"}
+                      {scm.actionBusy === "commit-and-push" ? (
+                        <>
+                          <Spinner className="size-3.5" />
+                          Committing…
+                        </>
+                      ) : (
+                        "Commit & Push"
+                      )}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent
@@ -1872,7 +1881,7 @@ const EntryRow = memo(function EntryRow({
     ? joinPath(repoRoot.replace(/\\/g, "/"), entry.path.replace(/\\/g, "/"))
     : null;
   const isDeleted = entry.statusCode === "D";
-  const revealLabel = IS_MAC ? "Reveal in Finder" : "Reveal in File Manager";
+  const revealLabel = "Reveal in File Manager";
 
   return (
     <ContextMenu>

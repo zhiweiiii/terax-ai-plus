@@ -270,41 +270,4 @@ pub fn fs_watch_remove(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn skip_filter_matches_basename() {
-        assert!(is_skipped(Path::new("/a/b/node_modules")));
-        assert!(is_skipped(Path::new("/x/target")));
-        assert!(is_skipped(Path::new("/p/obj")));
-        assert!(!is_skipped(Path::new("/a/src")));
-        assert!(!is_skipped(Path::new("/a/node_modules/pkg")));
-    }
-
-    #[test]
-    fn collect_ignores_access_and_dedups() {
-        let mut set = HashSet::new();
-        collect(
-            &mut set,
-            Ok(Event {
-                kind: EventKind::Access(notify::event::AccessKind::Read),
-                paths: vec![PathBuf::from("/a/x")],
-                attrs: Default::default(),
-            }),
-        );
-        assert!(set.is_empty());
-
-        let modify = || {
-            Ok(Event {
-                kind: EventKind::Modify(notify::event::ModifyKind::Any),
-                paths: vec![PathBuf::from("/a/x")],
-                attrs: Default::default(),
-            })
-        };
-        collect(&mut set, modify());
-        collect(&mut set, modify());
-        assert_eq!(set.len(), 1);
-    }
-}

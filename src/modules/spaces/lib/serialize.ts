@@ -22,9 +22,9 @@ export type SerializedTab =
       blocks?: boolean;
       customTitle?: string;
     }
-  | { kind: "editor"; path: string }
+  | { kind: "editor"; path: string; ownerTab?: number }
   | { kind: "preview"; url: string }
-  | { kind: "markdown"; path: string };
+  | { kind: "markdown"; path: string; ownerTab?: number };
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -78,23 +78,51 @@ function serializeTab(tab: Tab): SerializedTab | null {
         ...(tab.customTitle !== undefined && { customTitle: tab.customTitle }),
       };
     case "editor":
-      return { kind: "editor", path: tab.path };
+      return {
+        kind: "editor",
+        path: tab.path,
+        ...(tab.ownerTabId !== undefined && { ownerTabId: tab.ownerTabId }),
+      };
     case "preview":
       return { kind: "preview", url: tab.url };
     case "markdown":
-      return { kind: "markdown", path: tab.path };
+      return {
+        kind: "markdown",
+        path: tab.path,
+        ...(tab.ownerTabId !== undefined && { ownerTabId: tab.ownerTabId }),
+      };
     default:
       return null;
   }
 }
 
 export function serializeTabs(tabs: Tab[]): SerializedTab[] {
+  // Serialize in one pass, remembering each entry's source tab and the
+  // serialized slot of every terminal tab, so file tabs can reference their
+  // owner by position (runtime ids are reallocated on restore).
   const out: SerializedTab[] = [];
+  const slots: { tab: Tab; ownerTabId?: number }[] = [];
+  const terminalSlot = new Map<number, number>();
   for (const tab of tabs) {
     const s = serializeTab(tab);
-    if (s) out.push(s);
+    if (!s) continue;
+    if (tab.kind === "terminal") terminalSlot.set(tab.id, out.length);
+    slots.push({ tab });
+    out.push(s);
   }
-  return out;
+  return out.map((s, i) => {
+    const ownerTabId = slots[i]?.tab.ownerTabId;
+    if (
+      (s.kind === "editor" || s.kind === "markdown") &&
+      ownerTabId !== undefined
+    ) {
+      const owner = terminalSlot.get(ownerTabId);
+      if (owner !== undefined) {
+        return { ...s, ownerTab: owner } as typeof s;
+      }
+    }
+    return s;
+  });
 }
 
 type HydratedTree = {
@@ -223,13 +251,41 @@ export function hydrateTabs(
   allocId: () => number,
 ): Tab[] {
   if (!Array.isArray(serialized)) return [];
-  const out: Tab[] = [];
-  for (const s of serialized) {
+
+  // First pass: hydrate every tab but remember, per serialized slot, the new
+  // id of terminal tabs and the serialized owner slot of file tabs.
+  const hydrated: (Tab | null)[] = [];
+  const terminalIdBySlot = new Map<number, number>();
+  const ownerSlotByIndex = new Map<number, number>();
+  for (let i = 0; i < serialized.length; i++) {
+    const s = serialized[i];
     try {
       const tab = hydrateTab(s, spaceId, allocId);
-      if (tab) out.push(tab);
+      if (!tab) {
+        hydrated.push(null);
+        continue;
+      }
+      if (tab.kind === "terminal") terminalIdBySlot.set(i, tab.id);
+      if ((s.kind === "editor" || s.kind === "markdown") && s.ownerTab !== undefined) {
+        ownerSlotByIndex.set(i, s.ownerTab);
+      }
+      hydrated.push(tab);
     } catch {
-      // Skip corrupted entries rather than failing the whole restore.
+      hydrated.push(null);
+    }
+  }
+
+  // Second pass: attach the owner's new terminal id to each file tab.
+  const out: Tab[] = [];
+  for (let i = 0; i < hydrated.length; i++) {
+    const tab = hydrated[i];
+    if (!tab) continue;
+    const ownerSlot = ownerSlotByIndex.get(i);
+    if (ownerSlot !== undefined && (tab.kind === "editor" || tab.kind === "markdown")) {
+      const ownerId = terminalIdBySlot.get(ownerSlot);
+      out.push({ ...tab, ownerTabId: ownerId });
+    } else {
+      out.push(tab);
     }
   }
   return out;

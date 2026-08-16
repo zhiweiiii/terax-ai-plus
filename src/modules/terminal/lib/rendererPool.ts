@@ -1040,13 +1040,10 @@ export function getLiveSlotForLeaf(leafId: number): Slot | null {
   );
 }
 
-const IS_MAC =
-  typeof navigator !== "undefined" &&
-  /Mac|iPhone|iPad/.test(navigator.userAgent);
+const IS_MAC = false;
 
 function isTerminalCopy(e: KeyboardEvent): boolean {
   return (
-    !IS_MAC &&
     e.ctrlKey &&
     e.shiftKey &&
     !e.altKey &&
@@ -1057,10 +1054,9 @@ function isTerminalCopy(e: KeyboardEvent): boolean {
 
 // Ctrl+Shift+V (the terminal convention) and plain Ctrl+V both paste. Ctrl+V
 // would otherwise reach the shell as a literal ^V, which no one wants on
-// Windows/Linux where it is the universal paste chord.
+// Windows where it is the universal paste chord.
 function isTerminalPaste(e: KeyboardEvent): boolean {
   return (
-    !IS_MAC &&
     e.ctrlKey &&
     !e.altKey &&
     !e.metaKey &&

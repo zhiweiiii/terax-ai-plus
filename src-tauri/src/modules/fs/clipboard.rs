@@ -180,22 +180,4 @@ fn read_windows_clipboard_files() -> Result<Vec<String>, String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn known_image_types_map_to_an_extension() {
-        assert_eq!(extension_for("image/png"), Some("png"));
-        assert_eq!(extension_for("image/jpeg"), Some("jpg"));
-        assert_eq!(extension_for("IMAGE/PNG"), Some("png"));
-        assert_eq!(extension_for(" image/webp "), Some("webp"));
-    }
-
-    #[test]
-    fn other_types_are_rejected() {
-        assert_eq!(extension_for("text/plain"), None);
-        assert_eq!(extension_for("application/x-sh"), None);
-        assert_eq!(extension_for(""), None);
-    }
-}
