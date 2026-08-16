@@ -36,7 +36,7 @@ Long-lived interactive terminal sessions.
 - `pty_has_foreground_process` / `pty_has_foreground_job` - detect whether a command is running
 - `pty_shell_name` / `pty_list_shells` - shell detection and enumeration
 
-Output streams from `pty_open` via a Tauri `Channel<PtyEvent>`.
+Output from `pty_open` streams through a callback wired to a Tauri `Channel<Response>`; exit codes use a separate `Channel<i32>`.
 
 ### File system (`src-tauri/src/modules/fs/`)
 
@@ -63,14 +63,8 @@ Output streams from `pty_open` via a Tauri `Channel<PtyEvent>`.
 
 #### Search
 
-- `fs_search` - fuzzy file finder
-- `fs_list_files` - recursive file listing
-
-#### Grep
-
-- `fs_grep` - content search
-- `fs_grep_interactive` - interactive content search
-- `fs_glob` - glob matching
+- `fs_search` - fuzzy file finder (name search)
+- `fs_grep_interactive` - interactive content search (file contents)
 
 ### Git (`src-tauri/src/modules/git/`)
 
@@ -103,6 +97,14 @@ All git commands are gated through the workspace authorization registry.
 
 - `get_launch_dir` - CLI launch directory, drained on first read
 - `open_settings_window` - open the separate settings webview (optional `tab` deep-link)
+
+### Web terminal bridge (`src-tauri/src/modules/web/`)
+
+- `web_sync_tabs` - frontend syncs every desktop terminal tab (leaf id, cwd, title, active, pty id, space) so the phone can list all command lines
+- `web_sync_leaf_pty` - records a leaf → pty id mapping once a tab's pty spawns
+- `web_activate_leaf` - the phone attached to a tab with no live pty; ask the frontend to activate it (spawns the pty)
+
+These back the embedded HTTP + WebSocket server. See [Web terminal bridge](web-terminal-bridge.md) for the transport, auth, and protocol.
 
 ### CLI control plane
 

@@ -27,23 +27,23 @@ const dist = path.join(root, "dist-web");
 let html = readFileSync(path.join(dist, "web.html"), "utf8");
 
 // Inline the JS module bundle (whatever its asset name).
+// NOTE: use a function replacer — `String.replace` with a string interprets
+// `$` sequences (e.g. `$$` → `$`), which would corrupt template literals in
+// the bundle. A function returns the replacement verbatim.
 const scriptMatch = html.match(/<script type="module"[^>]*src="([^"]+)"[^>]*><\/script>/);
 if (scriptMatch) {
   const js = readFileSync(path.join(dist, scriptMatch[1]), "utf8");
-  html = html.replace(
-    scriptMatch[0],
-    `<script type="module">\n${js}\n</script>`,
-  );
+  html = html.replace(scriptMatch[0], () => `<script type="module">\n${js}\n</script>`);
 }
 // Inline the CSS bundle.
 const cssMatch = html.match(/<link rel="stylesheet"[^>]*href="([^"]+)"[^>]*>/);
 if (cssMatch) {
   const css = readFileSync(path.join(dist, cssMatch[1]), "utf8");
-  html = html.replace(cssMatch[0], `<style>\n${css}\n</style>`);
+  html = html.replace(cssMatch[0], () => `<style>\n${css}\n</style>`);
 }
 // Strip any remaining asset references so the file is standalone.
-html = html.replace(/<script type="module"[^>]*src="[^"]+"[^>]*><\/script>/g, "");
-html = html.replace(/<link rel="icon"[^>]*>/g, "");
+html = html.replace(/<script type="module"[^>]*src="[^"]+"[^>]*><\/script>/g, () => "");
+html = html.replace(/<link rel="icon"[^>]*>/g, () => "");
 
 const out = path.join(root, "src-tauri", "web.html");
 mkdirSync(path.dirname(out), { recursive: true });

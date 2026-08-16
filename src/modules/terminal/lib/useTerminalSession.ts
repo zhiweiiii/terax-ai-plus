@@ -21,6 +21,7 @@ import {
   registerCwdHandler,
   registerOsc52ClipboardHandler,
   registerPromptTracker,
+  type ShellIntegrationState,
 } from "./osc-handlers";
 import { openPty, type PtySession } from "./pty-bridge";
 import "../block/block.css";
@@ -100,6 +101,8 @@ type Session = {
   // Pane is parked on a dead shell (spawn failed, or the shell exited
   // abnormally) showing a notice; Enter respawns instead of reaching the pty.
   awaitingRestart: boolean;
+  // Shared OSC trust gate for blocks mode (inCommand = agent is running).
+  shellState: ShellIntegrationState;
 };
 
 const sessions = new Map<number, Session>();
@@ -494,6 +497,7 @@ function ensureSession(
     commandRunning: false,
     hiddenReleaseTimer: null,
     awaitingRestart: false,
+    shellState: createShellIntegrationState(),
   };
   sessions.set(leafId, session);
 
@@ -622,6 +626,9 @@ function applyBlockMode(leafId: number, mode: BlockMode): void {
   if (!s) return;
   s.blockMode = mode;
   s.commandRunning = mode !== "prompt";
+  // Mirrors the non-blocks prompt tracker so the OSC 52 clipboard gate
+  // treats agent output (a running block) as untrusted too.
+  s.shellState.inCommand = mode !== "prompt";
   const slot = getSlotForLeaf(leafId);
   if (slot) {
     const prompt = mode === "prompt";
@@ -655,7 +662,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     rows: s.rows,
     registerOsc: (term) => {
       if (s.blocks) {
-        const osc52 = registerOsc52ClipboardHandler(term);
+        const osc52 = registerOsc52ClipboardHandler(term, undefined, s.shellState);
         const deco = new BlockDecorations(term, {
           onCwd: (next) => {
             markSessionReady(leafId);
@@ -701,7 +708,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
         },
         shellState,
       );
-      const osc52 = registerOsc52ClipboardHandler(term);
+      const osc52 = registerOsc52ClipboardHandler(term, undefined, shellState);
       return [prompt.dispose, cwd, osc52];
     },
   });

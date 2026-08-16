@@ -2,7 +2,8 @@ import { MarkdownCode } from "@/components/ai-elements/markdown-code";
 import { cn } from "@/lib/utils";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useRef, useState } from "react";
+import type { ComponentProps } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import { MarkdownLink } from "./MarkdownLink";
 import { MarkdownViewToggle } from "./MarkdownViewToggle";
@@ -23,17 +24,38 @@ type Props = {
   path: string;
   visible: boolean;
   onSetView: (mode: "rendered" | "raw") => void;
+  /** Opens a project file from a relative markdown link. */
+  onOpenPath: (path: string) => void;
 };
 
-const components = { a: MarkdownLink, code: MarkdownCode };
+function dirname(path: string): string {
+  const sep = path.lastIndexOf("\\");
+  const slash = path.lastIndexOf("/");
+  const cut = Math.max(sep, slash);
+  return cut <= 0 ? "" : path.slice(0, cut);
+}
 
 export function MarkdownPreviewPane({
   path,
   visible,
   onSetView,
+  onOpenPath,
 }: Props) {
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const contentRef = useRef<HTMLDivElement>(null);
+  const baseDir = useMemo(() => dirname(path), [path]);
+
+  // Components close over baseDir/onOpenPath so relative markdown links can
+  // resolve to project files; Streamdown passes only intrinsic element props.
+  const componentsWithPaths = useMemo(
+    () => ({
+      a: (props: ComponentProps<typeof MarkdownLink>) => (
+        <MarkdownLink {...props} baseDir={baseDir} onOpenPath={onOpenPath} />
+      ),
+      code: MarkdownCode,
+    }),
+    [baseDir, onOpenPath],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -91,7 +113,7 @@ export function MarkdownPreviewPane({
           {status.kind === "ready" && (
             <Streamdown
               className="select-text [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-              components={components}
+              components={componentsWithPaths}
               mode="static"
               parseIncompleteMarkdown={false}
             >

@@ -6,7 +6,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, ChildKiller, MasterPty, PtySize};
-use tauri::ipc::{Channel, Response};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::agent_detect::AgentDetector;
@@ -41,6 +40,13 @@ const WEB_HISTORY_CAP: usize = 256 * 1024;
 /// stalls the PTY pipeline.
 const WEB_SUB_QUEUE: usize = 64;
 
+/// Message sent to a Web viewer: live output bytes, or a final exit notice so
+/// the page can clear its attached state instead of waiting forever.
+pub enum WebMsg {
+    Output(Vec<u8>),
+    Exited(i32),
+}
+
 pub struct Session {
     // Field drop order is intentional. Rust drops fields top-to-bottom:
     //   1. `_job` — on Windows, closing the Job HANDLE fires
@@ -68,7 +74,7 @@ pub struct Session {
     /// Recent output for late Web subscribers (ring buffer).
     history: Mutex<Vec<u8>>,
     /// Web viewers attached to this session (bounded queues).
-    web_subs: Mutex<Vec<SyncSender<Vec<u8>>>>,
+    web_subs: Mutex<Vec<SyncSender<WebMsg>>>,
 }
 
 impl Drop for Session {
@@ -94,37 +100,48 @@ pub(super) fn drop_session(session: Arc<Session>) {
 }
 
 impl Session {
-    /// Number of currently attached Web viewers (for the page's session list).
-    pub fn web_viewer_count(&self) -> usize {
-        self.web_subs.lock().unwrap().len()
-    }
-
     /// Attach a Web viewer: returns a snapshot of recent output (to be replayed
-    /// first) and a receiver for live chunks. Returns None if the session
-    /// already exited, in which case the caller should list it as dead.
-    pub fn web_subscribe(&self) -> Option<(Vec<u8>, mpsc::Receiver<Vec<u8>>)> {
+    /// first), the sender handle used to cancel this exact subscription, and a
+    /// receiver for live chunks. Returns None if the session already exited.
+    pub fn web_subscribe(
+        &self,
+    ) -> Option<(
+        Vec<u8>,
+        SyncSender<WebMsg>,
+        mpsc::Receiver<WebMsg>,
+    )> {
         if self.exited.load(Ordering::Acquire) {
             return None;
         }
         let (tx, rx) = mpsc::sync_channel(WEB_SUB_QUEUE);
         let history = self.history.lock().unwrap().clone();
-        self.web_subs.lock().unwrap().push(tx);
-        Some((history, rx))
+        self.web_subs.lock().unwrap().push(tx.clone());
+        Some((history, tx, rx))
     }
 
-    pub fn web_unsubscribe(&self, tx: &SyncSender<Vec<u8>>) {
+    /// Remove one specific subscriber (not the whole table, so other viewers
+    /// of the same session are never affected).
+    pub fn web_unsubscribe(&self, tx: &SyncSender<WebMsg>) {
         self.web_subs.lock().unwrap().retain(|s| !std::ptr::eq(s, tx));
     }
 
-    pub fn web_unsubscribe_all(&self) {
-        self.web_subs.lock().unwrap().clear();
-    }
-
-    /// Fan out one output chunk to every attached Web viewer. Drops
-    /// dead / full subscribers so a slow phone can't stall the PTY.
+    /// Fan out one output chunk to every attached Web viewer. A viewer whose
+    /// queue is full is evicted (its handle_ws sees the channel disconnect and
+    /// notifies the page), so a slow phone is told instead of silently
+    /// missing output, and one laggy viewer can't accumulate unbounded state.
     fn web_broadcast(&self, chunk: &[u8]) {
         let mut subs = self.web_subs.lock().unwrap();
-        subs.retain(|s| s.try_send(chunk.to_vec()).is_ok());
+        subs.retain(|s| s.try_send(WebMsg::Output(chunk.to_vec())).is_ok());
+    }
+
+    /// Tell every Web viewer that this session exited (final message). The
+    /// page clears its attached state; the caller detaches the WS table
+    /// afterwards via handle_ws.
+    fn web_broadcast_exit(&self, code: i32) {
+        let mut subs = self.web_subs.lock().unwrap();
+        for s in subs.drain(..) {
+            let _ = s.try_send(WebMsg::Exited(code));
+        }
     }
 }
 
@@ -161,9 +178,11 @@ pub fn spawn(
     blocks: bool,
     shell: Option<String>,
     control: Option<crate::modules::control::ShellControlEnv>,
-    on_data: Channel<Response>,
-    on_exit: Channel<i32>,
+    on_data: Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>,
+    on_exit: Option<Box<dyn Fn(i32) + Send + Sync>>,
 ) -> Result<(Arc<Session>, PtySize), String> {
+    let on_data = on_data.map(Arc::new);
+    let on_exit = on_exit.map(Arc::new);
     #[cfg(windows)]
     let _spawn_guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
 
@@ -286,7 +305,7 @@ pub fn spawn(
         })
         .expect("spawn pty reader thread");
 
-    let on_data_flush = on_data.clone();
+    let on_data_ref = on_data.clone();
     let pending_f = pending.clone();
     let done_f = done.clone();
     let session_f = session.clone();
@@ -311,9 +330,8 @@ pub fn spawn(
                 if chunk.is_empty() {
                     continue;
                 }
-                if let Err(e) = on_data_flush.send(Response::new(chunk.clone())) {
-                    log::debug!("pty flusher exiting, channel closed: {e}");
-                    break;
+                if let Some(cb) = &on_data_ref {
+                    cb(chunk.clone());
                 }
                 // Keep a rolling window of output for late Web subscribers and
                 // fan the chunk out to currently attached viewers.
@@ -332,10 +350,12 @@ pub fn spawn(
         .expect("spawn pty flusher thread");
 
     let on_data_exit = on_data;
+    let on_exit_cb = on_exit;
     let pending_e = pending;
     let done_e = done;
     let app_waiter = app;
     let exited_w = exited;
+    let session_exit_f = session.clone();
     thread::Builder::new()
         .name("terax-pty-waiter".into())
         .spawn(move || {
@@ -349,9 +369,12 @@ pub fn spawn(
             exited_w.store(true, Ordering::Release);
             // Wait for the reader to hit EOF before taking a final snapshot of
             // `pending`, so the last line of output never races the Exit event.
+            // On Windows the reader cannot be joined (it is not the thread that
+            // owns the master handle), so poll it with a generous deadline
+            // instead of a fixed short sleep (issue #10).
             #[cfg(windows)]
             {
-                let deadline = Instant::now() + Duration::from_millis(50);
+                let deadline = Instant::now() + Duration::from_millis(2000);
                 while Instant::now() < deadline && !reader_thread.is_finished() {
                     thread::sleep(Duration::from_millis(5));
                 }
@@ -363,14 +386,31 @@ pub fn spawn(
             let (lock, cv) = &*pending_e;
             let tail = std::mem::take(&mut *lock.lock().unwrap());
             if !tail.is_empty() {
-                if let Err(e) = on_data_exit.send(Response::new(tail)) {
-                    log::debug!("pty final-data send failed (channel closed): {e}");
+                // The tail is the last output before exit. Desktop channel,
+                // history ring, and Web viewers all get it, so a phone
+                // attached at exit time sees the final lines (issue #5).
+                {
+                    let mut history = session_exit_f.history.lock().unwrap();
+                    if history.len() + tail.len() > WEB_HISTORY_CAP {
+                        let over = history.len() + tail.len() - WEB_HISTORY_CAP;
+                        let cut = over.min(history.len());
+                        history.drain(..cut);
+                    }
+                    history.extend_from_slice(&tail);
+                }
+                session_exit_f.web_broadcast(&tail);
+                if let Some(cb) = &on_data_exit {
+                    cb(tail);
                 }
             }
             done_e.store(true, Ordering::Release);
             cv.notify_all();
-            if let Err(e) = on_exit.send(code) {
-                log::debug!("pty exit send failed (channel closed): {e}");
+            // Final word to attached Web viewers before the session is reaped:
+            // they clear their attached state immediately instead of waiting
+            // for a reconnect.
+            session_exit_f.web_broadcast_exit(code);
+            if let Some(cb) = &on_exit_cb {
+                cb(code);
             }
             if let Some(state) = app_waiter.try_state::<super::PtyState>() {
                 if let Some(s) = state.take(id) {

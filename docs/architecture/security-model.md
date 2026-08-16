@@ -11,6 +11,8 @@ The main trust boundaries are:
 1. **IPC boundary** - commands registered in `src-tauri/src/lib.rs`, gated by `src-tauri/capabilities/default.json`.
 2. **File-system boundary** - PTY spawn and git commands go through the workspace authorization registry.
 3. **Terminal escape-sequence boundary** - OSC sequences are parsed and acted on, but never blindly trusted to mutate state.
+4. **Web terminal boundary** - the embedded HTTP + WebSocket server (see `web-terminal-bridge.md`) is a remote shell surface. Access is gated by a password login (`POST /auth`, rate-limited) plus an auth cookie (`Max-Age=604800`) that the WebSocket upgrade also validates. The password digest and token exist only in Rust, never in the served page bundle. For anything beyond a trusted LAN, run behind a firewall or VPN because the server binds `0.0.0.0`.
+   Known weaknesses tracked in `docs/issues.md` #3: the password is still a hard-coded constant (extractable with `strings`) and the cookie token is a fixed string that never rotates.
 
 ## Workspace authorization registry
 

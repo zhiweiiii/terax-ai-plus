@@ -46,22 +46,22 @@ The token is injected into Terax-spawned native shells together with `TERAX_PANE
 
 ## Command discovery inside a PTY
 
-The packaged helper is named `terax-cli` because a macOS app bundle places sidecars beside the GUI executable, which is already named `terax`. At app startup Terax creates a user-private, per-process `bin/terax` hard link to the packaged helper, falling back to a symlink on Unix or a copy on Windows. That directory is prepended to the PTY `PATH`.
+At app startup Terax creates a user-private, per-process `bin/terax` copy of the packaged helper (the main binary is `terax-prod`, so `terax` is free for the helper). That directory is prepended to the PTY `PATH`.
 
-Existing Bash, Zsh, Fish, and PowerShell integration also defines an interactive `terax` function that executes `$TERAX_CLI`. The real PATH entry is still required because non-interactive child shells do not reliably inherit shell functions.
+Existing PowerShell integration also defines an interactive `terax` function that executes `$TERAX_CLI`. The real PATH entry is still required because non-interactive child shells do not reliably inherit shell functions.
 
 Launcher directories for exited processes are removed at the next control-server startup. Live process ids are preserved regardless of directory age.
 
 ## Packaging and size
 
-`tauri.conf.json` declares `binaries/terax-cli` as an external binary. Tauri selects the file with the current target-triple suffix and signs or packages it with the app. The release workflow passes its explicit Rust target to `scripts/build-cli.mjs`, which prevents an x86_64 macOS release from accidentally bundling an arm64 helper from the host.
+`tauri.conf.json` declares `binaries/terax-cli` as an external binary. Tauri selects the file with the current target-triple suffix and signs or packages it with the app. `scripts/build-cli.mjs` builds the helper for the host triple.
 
 The release profile uses one codegen unit, fat LTO, size optimization, abort-on-panic, and stripping. Always measure the actual target artifacts after changing dependencies.
 
 ## Current limits
 
-- WSL panes do not receive the control credentials or CLI launcher yet. Windows path translation and WSL networking must be implemented and tested together.
-- Terax does not yet install a global command for external Terminal.app, PowerShell, or other terminals. The bundled helper and cache descriptor already support that future installer step.
+- WSL panes do not receive the control credentials or CLI launcher yet. Windows path translation and WSL networking must be implemented together.
+- Terax does not yet install a global `terax` command for external terminals. The bundled helper and cache descriptor already support that future installer step.
 - The CLI does not launch a stopped Terax app yet.
 - Split, tab, agent, screen-read, and input commands are not part of protocol version 1 yet.
 

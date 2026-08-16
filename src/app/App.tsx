@@ -112,6 +112,7 @@ import {
 import { WorkspaceSurface } from "./components/WorkspaceSurface";
 import { useSelectionAsk } from "./components/useSelectionAsk";
 import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
+import { useWebTerminalSync } from "./hooks/useWebTerminalSync";
 
 function HeaderTabs({
   active,
@@ -335,6 +336,14 @@ export default function App() {
     () => spaceTabs.filter((t) => t.kind === "terminal"),
     [spaceTabs],
   );
+
+  // Sync the desktop's command-line tabs to the web layer (phone list) and
+  // react to the phone asking to activate a terminal.
+  useWebTerminalSync({
+    terminalTabs: headerTabs,
+    activeId,
+    activateTab: (id) => setActiveId(id),
+  });
 
   const {
     sidebarRef,
@@ -1539,6 +1548,7 @@ export default function App() {
                       gitHistoryRepos={multiRepo.repos}
                       onSwitchGitHistoryRepo={handleSwitchHistoryRepo}
                       onSetMarkdownView={setMarkdownView}
+                      onOpenMarkdownPath={handleOpenFile}
                     />
                   </div>
 

@@ -1,23 +1,24 @@
 //! Web terminal bridge: exposes the running PTY sessions over HTTP + WebSocket
-//! on port 17000 so a phone / other machine can watch or drive the command
-//! lines from a plain browser page.
+//! on port 17001 (dev) / 17002 (release) so a phone / other machine can watch
+//! or drive the command lines from a plain browser page.
 //!
 //!   GET /     → embedded mobile page (single-file HTML, served as-is)
 //!   GET /ws   → WebSocket (ttyd-style binary protocol, extended with a
 //!               session list / attach handshake for multi-terminal support)
 //!
 //! Wire protocol (client → server):
-//!   First message (text): { "attach": <id>, "cols": N, "rows": N }
-//!                         or { "list": true }          → session list only
+//!   First message (text): { "attach": <id> } or { "list": true }
 //!   Later (binary, first byte is the command):
 //!     '0' + bytes        → write input to the attached session
-//!     '1' + JSON         → resize { "cols": N, "rows": N }
-//!   Later (text):        { "attach": <id>, ... }        → switch session
+//!     '1' + JSON         → resize { "cols": N, "rows": N } (kept for
+//!                          completeness; the current page never sends it —
+//!                          the desktop owns the PTY size)
+//!   Later (text):        { "attach": <id> }        → switch session
 //!
 //! Wire protocol (server → client):
 //!   binary '0' + bytes   → terminal output
 //!   binary '1' + bytes   → window title (UTF-8)
-//!   text  { "type": "sessions", "sessions": [ {id,cwd,viewers} ] }
+//!   text  { "type": "sessions", "sessions": [ {id,cwd,title,active,live,space} ] }
 //!   text  { "type": "attached", "id": N }
 //!   text  { "type": "exit", "id": N, "code": C }
 //!   text  { "type": "error", "message": "..." }
@@ -37,10 +38,12 @@ use base64::Engine;
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 
-use crate::modules::pty::{PtyState, Session};
+use crate::modules::pty::{PtyState, Session, WebMsg};
 use tauri::Manager;
 
-const PORT: u16 = 17000;
+// Dev builds listen on 17001, packaged (release) builds on 17002 — so the two
+// can run side by side without clashing, and the phone can pick the right one.
+const PORT: u16 = if cfg!(debug_assertions) { 17001 } else { 17002 };
 const BIND_ADDR: &str = "0.0.0.0";
 
 // The mobile page is embedded at build time by scripts/build-web.mjs.
@@ -48,12 +51,40 @@ const INDEX_HTML: &str = include_str!("../../../web.html");
 
 const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+/// Auth cookie value — a fixed string derived from the password. It is only
+/// ever compared in memory, never transmitted to the page bundle; note the
+/// password itself is still a hard-coded constant and the token never rotates
+/// (weakness tracked in docs/issues.md #3).
+const WEB_TOKEN: &str = "terax7hzwyes123token";
+
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// Start the web terminal server on 0.0.0.0:17000. Returns an error only if
-/// the port cannot be bound; the accept loop runs on its own thread.
+/// Live WebSocket connections; /ws is rejected once MAX_CONNECTIONS is hit so
+/// a runaway client can't pile up unbounded threads. A phone in grid mode
+/// keeps one connection per visible terminal window, so this must allow a
+/// handful of windows, not just one viewer.
+static CONNECTIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+const MAX_CONNECTIONS: usize = 24;
+
+/// Failed login attempts since boot (rate limit: >=5 consecutive fails = 5s
+/// delay before the next attempt is even evaluated).
+static FAILED_LOGINS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Timestamp (Instant millis) of the last failed login, for the lockout.
+static LAST_FAIL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Start the web terminal server on 0.0.0.0:17001 (dev) / 17002 (release).
+/// Returns an error only if the port cannot be bound; the accept loop runs on
+/// its own thread.
 pub fn start(app: tauri::AppHandle) -> Result<(), String> {
     SHUTDOWN.store(false, Ordering::Release);
+    // Make sure the page always has at least one terminal to attach to, even
+    // before the desktop opens any tab.
+    if let Some(state) = app.try_state::<PtyState>() {
+        state.web_ensure_session(&app);
+    }
     let listener = TcpListener::bind((BIND_ADDR, PORT)).map_err(|e| {
         format!("web terminal: failed to bind {BIND_ADDR}:{PORT}: {e}")
     })?;
@@ -101,9 +132,15 @@ const OP_PONG: u8 = 0xA;
 
 struct WsConn {
     stream: TcpStream,
-    /// Bytes read past the HTTP head terminator (early WS frames).
-    prefetched: Vec<u8>,
-    prefetch_pos: usize,
+    /// All bytes read but not yet consumed by the message parser. Includes
+    /// anything past the HTTP head terminator (early WS frames) and every
+    /// partial frame: parsing consumes only *complete* messages, so a
+    /// fragmented frame is never lost and never misparsed.
+    buffer: Vec<u8>,
+    /// Consume cursor into `buffer`.
+    consume: usize,
+    /// Last time any byte was read (drives the dead-peer timeout).
+    last_read_at: std::time::Instant,
 }
 
 impl WsConn {
@@ -121,10 +158,13 @@ impl WsConn {
             return Err("not a GET request".into());
         }
         let mut key = None;
+        const KEY_PREFIX: &str = "sec-websocket-key:";
         for line in lines {
             let lower = line.to_ascii_lowercase();
-            if let Some(v) = lower.strip_prefix("sec-websocket-key:") {
-                key = Some(line[v.len()..].trim().to_string());
+            if lower.strip_prefix(KEY_PREFIX).is_some() {
+                // Index the original line by the prefix length (case folding
+                // does not change byte length) to grab the key value.
+                key = Some(line[KEY_PREFIX.len()..].trim().to_string());
             }
         }
         let key = key.ok_or_else(|| "missing Sec-WebSocket-Key".to_string())?;
@@ -135,9 +175,6 @@ impl WsConn {
             hasher.update(WS_GUID);
             base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
         };
-        log::debug!(
-            "web terminal: ws handshake key={key} accept={accept}"
-        );
         let response = format!(
             "HTTP/1.1 101 Switching Protocols\r\n\
              Upgrade: websocket\r\n\
@@ -148,8 +185,12 @@ impl WsConn {
             .write_all(response.as_bytes())
             .map_err(|e| e.to_string())?;
         stream.flush().map_err(|e| e.to_string())?;
+        // Non-blocking reads: handle_ws polls for complete messages while
+        // draining session output between polls. Partial frames stay in
+        // `buffer` until they are complete — a fragmented frame is never
+        // lost, so quiet phones no longer get disconnected (issue #41).
         stream
-            .set_read_timeout(None)
+            .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
 
         let terminator = head
@@ -157,64 +198,80 @@ impl WsConn {
             .position(|w| w == b"\r\n\r\n")
             .map(|p| p + 4)
             .unwrap_or(head.len());
-        let prefetched = head[terminator..].to_vec();
+        let buffer = head[terminator..].to_vec();
         Ok(Self {
             stream,
-            prefetched,
-            prefetch_pos: 0,
+            buffer,
+            consume: 0,
+            last_read_at: std::time::Instant::now(),
         })
     }
 
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), String> {
-        let mut filled = 0usize;
-        // Serve from the prefetched buffer first.
-        if self.prefetch_pos < self.prefetched.len() {
-            let take = (self.prefetched.len() - self.prefetch_pos).min(buf.len());
-            buf[..take].copy_from_slice(&self.prefetched[self.prefetch_pos..self.prefetch_pos + take]);
-            self.prefetch_pos += take;
-            filled = take;
-            if filled == buf.len() {
-                return Ok(());
-            }
-        }
-        self.stream
-            .read_exact(&mut buf[filled..])
-            .map_err(|e| format!("read ws bytes: {e}"))
-    }
-
-    /// Read one message. Returns the payload and its opcode. Frames are
-    /// reassembled across continuation frames (terminal output can exceed a
-    /// single frame).
-    fn read_message(&mut self) -> Result<(u8, Vec<u8>), String> {
+    /// Try to parse one complete message out of the buffer. Returns
+    /// `Ok(Some(...))` on a full message (consuming its bytes), `Ok(None)`
+    /// when more bytes are needed (nothing is consumed), `Err` on protocol
+    /// violations. Partial frames are never discarded.
+    fn try_parse_message(&mut self) -> Result<Option<(u8, Vec<u8>)>, String> {
+        let buf = self.buffer.as_slice();
+        let mut pos = self.consume;
         let mut result_op: Option<u8> = None;
         let mut result = Vec::new();
+        let mut total = 0usize;
         loop {
-            let mut hdr = [0u8; 2];
-            self.read_exact(&mut hdr)
-                .map_err(|e| format!("read ws frame head: {e}"))?;
-            let fin = hdr[0] & 0x80 != 0;
-            let opcode = hdr[0] & 0x0F;
-            let masked = hdr[1] & 0x80 != 0;
-            let mut len = (hdr[1] & 0x7F) as usize;
-            if len == 126 {
-                let mut ext = [0u8; 2];
-                self.read_exact(&mut ext).map_err(|e| e.to_string())?;
-                len = u16::from_be_bytes(ext) as usize;
-            } else if len == 127 {
-                let mut ext = [0u8; 8];
-                self.read_exact(&mut ext).map_err(|e| e.to_string())?;
-                len = u64::from_be_bytes(ext) as usize;
+            if buf.len() - pos < 2 {
+                return Ok(None);
             }
-            // 1 MiB cap per message (input pastes, never our own output).
+            let fin = buf[pos] & 0x80 != 0;
+            let opcode = buf[pos] & 0x0F;
+            let masked = buf[pos + 1] & 0x80 != 0;
+            let mut len = (buf[pos + 1] & 0x7F) as usize;
+            pos += 2;
+            if len == 126 {
+                if buf.len() - pos < 2 {
+                    return Ok(None);
+                }
+                len = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
+                pos += 2;
+            } else if len == 127 {
+                if buf.len() - pos < 8 {
+                    return Ok(None);
+                }
+                let mut ext = [0u8; 8];
+                ext.copy_from_slice(&buf[pos..pos + 8]);
+                len = u64::from_be_bytes(ext) as usize;
+                pos += 8;
+            }
+            // Control frames must be small per RFC 6455; data frames capped
+            // per-frame, and the reassembled message capped as a whole so
+            // unlimited continuation frames cannot grow memory without bound.
+            if opcode >= OP_CLOSE && len > 125 {
+                return Err("ws control frame too large".into());
+            }
             if len > 1024 * 1024 {
                 return Err("ws frame too large".into());
             }
+            if result_op.is_some() && total + len > 1024 * 1024 {
+                return Err("ws message too large".into());
+            }
             let mut mask = [0u8; 4];
             if masked {
-                self.read_exact(&mut mask).map_err(|e| e.to_string())?;
+                if buf.len() - pos < 4 {
+                    return Ok(None);
+                }
+                mask.copy_from_slice(&buf[pos..pos + 4]);
+                pos += 4;
+            } else if opcode < OP_CLOSE {
+                // RFC 6455: client frames MUST be masked. A browser always
+                // masks; an unmasked data frame means a hand-rolled client.
+                // Strict per spec, so malformed peers fail fast instead of
+                // being interpreted leniently (issue #16).
+                return Err("ws client frame not masked".into());
             }
-            let mut payload = vec![0u8; len];
-            self.read_exact(&mut payload).map_err(|e| e.to_string())?;
+            if buf.len() - pos < len {
+                return Ok(None);
+            }
+            let mut payload = buf[pos..pos + len].to_vec();
+            pos += len;
             if masked {
                 for (i, b) in payload.iter_mut().enumerate() {
                     *b ^= mask[i % 4];
@@ -222,22 +279,60 @@ impl WsConn {
             }
             match opcode {
                 OP_CONT => {
+                    total += len;
                     result.extend_from_slice(&payload);
                 }
                 OP_TEXT | OP_BIN => {
                     result_op = Some(opcode);
+                    total += len;
                     result.extend_from_slice(&payload);
                 }
                 OP_CLOSE | OP_PING | OP_PONG => {
-                    return Ok((opcode, payload));
+                    self.consume = pos;
+                    return Ok(Some((opcode, payload)));
                 }
                 _ => return Err("unknown ws opcode".into()),
             }
             if fin {
                 if let Some(op) = result_op {
-                    return Ok((op, result));
+                    self.consume = pos;
+                    return Ok(Some((op, result)));
                 }
                 return Err("continuation without initial frame".into());
+            }
+        }
+    }
+
+    /// Read one message, blocking up to the read loop's poll cadence.
+    /// Returns `Ok(Some(msg))`, or `Ok(None)` when no complete message is
+    /// available yet (the caller drains output and polls again). Protocol
+    /// and I/O failures surface as `Err`.
+    fn read_message(&mut self) -> Result<Option<(u8, Vec<u8>)>, String> {
+        loop {
+            if let Some(msg) = self.try_parse_message()? {
+                return Ok(Some(msg));
+            }
+            // Compact consumed bytes so the buffer can't grow without bound.
+            if self.consume > 0 {
+                self.buffer.drain(..self.consume);
+                self.consume = 0;
+            }
+            if self.buffer.len() > 4 * 1024 * 1024 {
+                // Only reachable with many interleaved partial frames; cap it
+                // so a misbehaving client cannot balloon memory.
+                return Err("ws buffer overflow".into());
+            }
+            let mut chunk = [0u8; 8192];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err("read ws bytes: eof".into()),
+                Ok(n) => {
+                    self.buffer.extend_from_slice(&chunk[..n]);
+                    self.last_read_at = std::time::Instant::now();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(format!("read ws bytes: {e}")),
             }
         }
     }
@@ -256,15 +351,32 @@ impl WsConn {
             head.push(127);
             head.extend_from_slice(&(len as u64).to_be_bytes());
         }
-        self.stream
-            .write_all(&head)
-            .map_err(|e| e.to_string())?;
+        self.write_all_blocking(&head)?;
         if !payload.is_empty() {
-            self.stream
-                .write_all(payload)
-                .map_err(|e| e.to_string())?;
+            self.write_all_blocking(payload)?;
         }
         self.stream.flush().map_err(|e| e.to_string())
+    }
+
+    /// `write_all` on a non-blocking socket returns WouldBlock mid-write and
+    /// loses the partial write; poll instead so big frames (history replay)
+    /// still go out. A peer that never reads eventually errors out.
+    fn write_all_blocking(&mut self, mut data: &[u8]) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !data.is_empty() {
+            if std::time::Instant::now() > deadline {
+                return Err("write ws bytes: timeout".into());
+            }
+            match self.stream.write(data) {
+                Ok(0) => return Err("write ws bytes: eof".into()),
+                Ok(n) => data = &data[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => return Err(format!("write ws bytes: {e}")),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -304,21 +416,228 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
     let mut lines = head_text.lines();
     let request_line = lines.next().unwrap_or("");
     let mut is_upgrade = false;
+    let mut cookie: Option<String> = None;
     for line in lines {
-        if line.to_ascii_lowercase().starts_with("upgrade: websocket") {
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("upgrade: websocket") {
             is_upgrade = true;
-            break;
+        } else if lower.starts_with("cookie:") {
+            cookie = Some(line[line.find(':').unwrap_or(6) + 1..].trim().to_string());
         }
     }
+    let authenticated = cookie
+        .as_deref()
+        .map(|c| c.split(';').any(|part| part.trim() == format!("terax_web={WEB_TOKEN}")))
+        .unwrap_or(false);
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+
+    // Login endpoint: verify the password, then set the auth cookie.
+    if path == "/auth" {
+        // POST only — GET would put the password in URLs and access logs.
+        let mut is_post = false;
+        let mut content_length = 0usize;
+        for line in head_text.lines() {
+            let upper = line.to_ascii_uppercase();
+            if upper.starts_with("POST ") {
+                is_post = true;
+            } else if upper.starts_with("CONTENT-LENGTH:") {
+                content_length = line
+                    .split_once(':')
+                    .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+            }
+        }
+        let pwd: String = if is_post {
+            // The body may not have arrived in the same read as the head
+            // (TCP fragmentation): read the remaining Content-Length bytes.
+            let have = head.len().saturating_sub(header_end);
+            let need = content_length.saturating_sub(have);
+            if need > 0 && need <= 256 {
+                let mut rest = vec![0u8; need];
+                let _ = stream.read_exact(&mut rest);
+                String::from_utf8_lossy(&rest).trim().to_string()
+            } else if content_length <= 256 && have >= content_length {
+                String::from_utf8_lossy(&head[header_end..header_end + content_length])
+                    .trim()
+                    .to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        // Brute-force lockout: 5+ consecutive failures impose a 5s delay.
+        if FAILED_LOGINS.load(Ordering::Acquire) >= 5 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_FAIL.load(Ordering::Acquire);
+            if now.saturating_sub(last) < 5000 {
+                let body = "<html><body><p>too many attempts, try again later</p></body></html>";
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/html; charset=utf-8\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+                return;
+            }
+            FAILED_LOGINS.store(0, Ordering::Release);
+        }
+
+        // Constant-time comparison of the password digest.
+        let digest = {
+            let mut hasher = Sha1::new();
+            hasher.update(pwd.as_bytes());
+            hasher.finalize()
+        };
+        const EXPECTED: [u8; 20] = [
+            0xb6, 0x67, 0x0f, 0x91, 0xaf, 0x8f, 0xa0, 0x51, 0xed, 0xd9,
+            0xe6, 0x8c, 0xef, 0xae, 0xcc, 0xf6, 0xab, 0x29, 0x4e, 0xe8,
+        ];
+        let ok = digest[..] == EXPECTED;
+        if ok {
+            FAILED_LOGINS.store(0, Ordering::Release);
+            let body =
+                "<html><body><p>OK</p><script>location.href='/'</script></body></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                 Set-Cookie: terax_web={WEB_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        } else {
+            FAILED_LOGINS.fetch_add(1, Ordering::AcqRel);
+            LAST_FAIL.store(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                Ordering::Release,
+            );
+            let body = "<html><body><p>wrong password</p><script>history.back()</script></body></html>";
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/html; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+        }
+        return;
+    }
+
+    // WebSocket upgrade requires a valid auth cookie.
     if path.starts_with("/ws") && is_upgrade {
+        if !authenticated {
+            let body = "unauthorized";
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+            return;
+        }
+        // Cap concurrent connections so a runaway client cannot pile up
+        // threads. A rejected client simply sees a failed upgrade.
+        let prev = CONNECTIONS.fetch_add(1, Ordering::AcqRel);
+        if prev >= MAX_CONNECTIONS {
+            CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+            let body = "busy: too many connections";
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+            return;
+        }
+        struct ConnGuard;
+        impl Drop for ConnGuard {
+            fn drop(&mut self) {
+                CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        let _guard = ConnGuard;
         match WsConn::from_handshake(stream, head) {
             Ok(conn) => handle_ws(app, conn),
             Err(e) => log::debug!("web terminal: ws handshake failed: {e}"),
         }
         return;
     }
-    serve_page(stream);
+
+    // Everything else (including /): serve the terminal page when
+    // authenticated, otherwise the login page.
+    if authenticated {
+        serve_page(stream);
+    } else {
+        serve_login(stream);
+    }
+}
+
+fn serve_login(mut stream: TcpStream) {
+    let body = r#"<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Terax Terminal</title>
+<style>
+  body { margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
+         background:#0d1117; color:#e6edf3; font-family:system-ui,sans-serif; }
+  .card { width:min(320px,88vw); background:#161b22; border:1px solid #21262d;
+          border-radius:14px; padding:28px 24px; text-align:center; }
+  h1 { font-size:17px; margin:0 0 20px; }
+  input { width:100%; box-sizing:border-box; padding:12px; font-size:16px;
+          border:1px solid #21262d; border-radius:10px; background:#0d1117; color:#e6edf3;
+          outline:none; }
+  input:focus { border-color:#58a6ff; }
+  button { width:100%; margin-top:14px; padding:12px; font-size:16px; border:none;
+           border-radius:10px; background:#1f6feb; color:#fff; cursor:pointer; }
+  .err { color:#f85149; font-size:13px; margin-top:10px; min-height:18px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Terax Terminal</h1>
+    <input id="pwd" type="password" placeholder="访问密码" autofocus />
+    <button onclick="login()">进入</button>
+    <div class="err" id="err"></div>
+  </div>
+  <script>
+    async function login() {
+      const v = document.getElementById('pwd').value.trim();
+      if (!v) return;
+      const res = await fetch('/auth', { method: 'POST', body: v, credentials: 'same-origin' });
+      if (res.ok) { location.href = '/'; }
+      else if (res.status === 429) { document.getElementById('err').textContent = '尝试过多，请稍后再试'; }
+      else { document.getElementById('err').textContent = '密码错误'; }
+    }
+    document.getElementById('pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+  </script>
+</body>
+</html>"#;
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+         Cache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+    let _ = stream.flush();
 }
 
 fn serve_page(mut stream: TcpStream) {
@@ -336,30 +655,88 @@ fn serve_page(mut stream: TcpStream) {
 /// Per-connection WS loop: one client watches one session at a time.
 fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
     let state = app.state::<PtyState>();
-    let mut attached: Option<Arc<Session>> = None;
-    let mut live_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>> = None;
+    // The leaf id this connection is attached to (for exit notices), plus the
+    // (session, subscriber sender, live receiver) triple.
+    let mut attached_id: Option<u32> = None;
+    let mut attached: Option<(
+        Arc<Session>,
+        std::sync::mpsc::SyncSender<WebMsg>,
+        std::sync::mpsc::Receiver<WebMsg>,
+    )> = None;
+    let mut last_ping = std::time::Instant::now();
 
     // Push the session list so the page renders without a round trip.
     send_sessions(&mut conn, &state);
 
     loop {
-        // Drain pending output first so a quiet terminal still shows echo.
-        if let Some(rx) = &live_rx {
-            while let Ok(chunk) = rx.try_recv() {
-                if chunk.is_empty() {
-                    continue;
-                }
-                let mut frame = Vec::with_capacity(chunk.len() + 1);
-                frame.push(b'0');
-                frame.extend_from_slice(&chunk);
-                if conn.send_frame(OP_BIN, &frame).is_err() {
-                    break;
+        // Drain pending output on every iteration, whether or not the client
+        // has sent anything: a phone that only watches still receives live
+        // output instead of freezing when its input queue is quiet.
+        if let Some((session, tx, rx)) = &attached {
+            loop {
+                match rx.try_recv() {
+                    Ok(WebMsg::Output(chunk)) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        let mut frame = Vec::with_capacity(chunk.len() + 1);
+                        frame.push(b'0');
+                        frame.extend_from_slice(&chunk);
+                        if conn.send_frame(OP_BIN, &frame).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(WebMsg::Exited(code)) => {
+                        // Session ended: tell the page, then drop this
+                        // subscription so the stale viewer table stays clean.
+                        let _ = send_text(
+                            &mut conn,
+                            &json!({ "type": "exit", "id": attached_id, "code": code })
+                                .to_string(),
+                        );
+                        session.web_unsubscribe(tx);
+                        attached_id = None;
+                        attached = None;
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Evicted for falling behind (queue overflow): tell the
+                        // page so it can surface the condition instead of
+                        // silently losing output.
+                        let _ = send_error(&mut conn, "output too fast, resubscribe");
+                        attached_id = None;
+                        attached = None;
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 }
             }
         }
 
+        // Server heartbeat: keep half-open connections honest and let NAT
+        // keep the mapping alive on phones that sleep.
+        if last_ping.elapsed() >= Duration::from_secs(30) {
+            last_ping = std::time::Instant::now();
+            if conn.send_frame(OP_PING, b"terax").is_err() {
+                break;
+            }
+        }
+
+        // A peer that goes 90s without a single byte (PONG included) is dead
+        // or off the network: stop pinning a thread and a connection slot.
+        if conn.last_read_at.elapsed() > Duration::from_secs(90) {
+            log::debug!("web terminal: peer idle 90s, dropping connection");
+            break;
+        }
+
         match conn.read_message() {
-            Ok((OP_TEXT, payload)) => {
+            Ok(None) => {
+                // No complete frame yet: yield briefly so the loop can keep
+                // draining session output, then poll again. A quiet phone is
+                // never disconnected for idling (issue #41).
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(Some((OP_TEXT, payload))) => {
                 let text = String::from_utf8_lossy(&payload);
                 let parsed: Value = match serde_json::from_str(&text) {
                     Ok(v) => v,
@@ -369,31 +746,29 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     }
                 };
                 if let Some(id) = parsed.get("attach").and_then(|v| v.as_u64()) {
-                    if let Some(s) = &attached {
-                        s.web_unsubscribe_all();
+                    let leaf_id = id as u32;
+                    // Detach the previous subscription precisely, so other
+                    // viewers of the same session are never affected.
+                    if let Some((session, tx, _)) = attached.take() {
+                        session.web_unsubscribe(&tx);
                     }
-                    attached = None;
-                    live_rx = None;
+                    attached_id = None;
 
-                    let Some(session) = state.web_get(id as u32) else {
-                        let _ = send_error(&mut conn, "session not found");
+                    // The phone attaches by leaf id (the desktop tab's leaf).
+                    // If that tab has no live pty yet, ask the desktop to open
+                    // it and report "opening" so the page can retry shortly.
+                    let session = state.web_leaf_session(leaf_id, &app);
+                    let Some(session) = session else {
+                        let _ = send_text(
+                            &mut conn,
+                            &json!({ "type": "opening", "id": id }).to_string(),
+                        );
                         continue;
                     };
-                    let cols = parsed.get("cols").and_then(|v| v.as_u64());
-                    let rows = parsed.get("rows").and_then(|v| v.as_u64());
-                    if let (Some(c), Some(r)) = (cols, rows) {
-                        let _ = session
-                            .master
-                            .lock()
-                            .unwrap()
-                            .resize(portable_pty::PtySize {
-                                rows: r as u16,
-                                cols: c as u16,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
-                    }
-                    let Some((history, rx)) = session.web_subscribe() else {
+                    // Attach does NOT resize the shared PTY. The desktop owns
+                    // the canonical size; the phone renders at its own fit
+                    // dimensions, so the two views stay independent.
+                    let Some((history, tx, rx)) = session.web_subscribe() else {
                         let _ = send_error(&mut conn, "session already exited");
                         continue;
                     };
@@ -407,16 +782,22 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     }
                     let _ = send_text(
                         &mut conn,
-                        &json!({ "type": "attached", "id": id }).to_string(),
+                        &json!({
+                            "type": "attached",
+                            "id": id,
+                            "cols": state.web_session_size(&session).0,
+                            "rows": state.web_session_size(&session).1,
+                        })
+                        .to_string(),
                     );
-                    attached = Some(session);
-                    live_rx = Some(rx);
+                    attached_id = Some(leaf_id);
+                    attached = Some((session, tx, rx));
                 } else if parsed.get("list").and_then(|v| v.as_bool()) == Some(true) {
                     send_sessions(&mut conn, &state);
                 }
             }
-            Ok((OP_BIN, payload)) => {
-                let Some(session) = &attached else {
+            Ok(Some((OP_BIN, payload))) => {
+                let Some(session) = attached.as_ref().map(|(s, _, _)| s) else {
                     continue;
                 };
                 if payload.is_empty() {
@@ -450,11 +831,11 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     _ => {}
                 }
             }
-            Ok((OP_PING, payload)) => {
+            Ok(Some((OP_PING, payload))) => {
                 let _ = conn.send_frame(OP_PONG, &payload);
             }
-            Ok((OP_PONG, _)) | Ok((OP_CONT, _)) => {}
-            Ok((OP_CLOSE, _)) => break,
+            Ok(Some((OP_PONG, _))) => {}
+            Ok(Some((OP_CLOSE, _))) => break,
             Err(e) => {
                 log::debug!("web terminal: ws read ended: {e}");
                 break;
@@ -463,19 +844,25 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
         }
     }
 
-    if let Some(session) = attached {
-        session.web_unsubscribe_all();
+    // Detach this connection's subscription precisely, never the whole table.
+    if let Some((session, tx, _)) = attached {
+        session.web_unsubscribe(&tx);
     }
 }
 
 fn send_sessions(conn: &mut WsConn, state: &PtyState) {
-    let sessions = state.web_list();
+    let tabs = state.web_tabs();
     let msg = json!({
         "type": "sessions",
-        "sessions": sessions.iter().map(|(id, cwd, viewers)| json!({
-            "id": id,
-            "cwd": cwd,
-            "viewers": viewers,
+        "sessions": tabs.iter().map(|t| json!({
+            "id": t.leaf_id,
+            "cwd": t.cwd,
+            "title": t.title,
+            "active": t.active,
+            "live": t.pty_id.is_some(),
+            "space": t.space_id,
+            "cols": t.pty_id.and_then(|id| state.web_get(id)).map(|s| state.web_session_size(&s).0),
+            "rows": t.pty_id.and_then(|id| state.web_get(id)).map(|s| state.web_session_size(&s).1),
         })).collect::<Vec<_>>(),
     });
     let _ = send_text(conn, &msg.to_string());

@@ -1,4 +1,4 @@
-# 一键打包正式版本
+﻿# 一键打包正式版
 # 用法: .\打包.ps1
 #
 # 做的事:
@@ -8,7 +8,7 @@
 #   4. 生成 NSIS / MSI 安装包
 #
 # 打包过程中可以继续用正在开着的 Terax, 它跑的还是旧版本,
-# 想用新版本自己重启一下就行。
+# 想用新版本自己重启一下就行.
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
@@ -21,7 +21,7 @@ function Step($msg) {
 
 $startTime = Get-Date
 
-$releaseExe = Join-Path $root "src-tauri\target\release\terax-awei.exe"
+$releaseExe = Join-Path $root "src-tauri\target\release\terax-prod.exe"
 
 # 文件是不是被别的进程占着写不了
 function Test-FileLocked($path) {
@@ -36,14 +36,13 @@ function Test-FileLocked($path) {
 
 Step "挪开被占用的旧产物"
 # Windows 允许重命名正在运行的 exe: 把被占用的旧文件改个名让开位置,
-# 链接器就能写新文件, 已经开着的 Terax 继续用改名后的旧文件跑, 不受影响。
-# 改名留下的 *.locked-* 等下次打包 (那个进程退出后) 自动清掉。
-
+# 链接器就能写新文件; 已经开着的 Terax 继续用改名后的旧文件, 不受影响.
+# 改名留下的 *.locked-* 等下次打包 (那个进程退出后) 自动清掉.
 $outDirs = @(
     (Join-Path $root "src-tauri\target\release")
     (Join-Path $root "src-tauri\binaries")
 )
-# 交叉编译目录 target/<triple>/release/ —— build-cli.mjs 的 CLI 产物在这
+# 交叉编译目录 target/<triple>/release/ -- build-cli.mjs 的 CLI 产物在这
 $outDirs += Get-ChildItem (Join-Path $root "src-tauri\target") -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like "*-windows-*" } |
     ForEach-Object { Join-Path $_.FullName "release" }
@@ -72,7 +71,7 @@ if ($locked) {
             Rename-Item $f.FullName -NewName "$($f.Name).locked-$stamp" -Force -ErrorAction Stop
             Write-Host "  已挪开 $($f.Name)" -ForegroundColor Gray
         } catch {
-            Write-Host "  挪不动 $($f.FullName)" -ForegroundColor Red
+            Write-Host "  挪不开 $($f.FullName)" -ForegroundColor Red
             Write-Host "  请手动关掉占用它的程序再打包" -ForegroundColor Red
             exit 1
         }
@@ -81,7 +80,7 @@ if ($locked) {
     Write-Host "  没有被占用的文件" -ForegroundColor Gray
 }
 
-$running = Get-Process -Name "terax-awei" -ErrorAction SilentlyContinue |
+$running = Get-Process -Name "terax-prod" -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -like "$root*" }
 if ($running) {
     Write-Host "  正式版 Terax 保持运行 ($($running.Count) 个), 跑的仍是旧版本" -ForegroundColor Gray
@@ -95,11 +94,19 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "  通过" -ForegroundColor Green
 
+Step "构建手机版 Web 页面"
+& node scripts/build-web.mjs
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Web 页面构建失败, 停止打包" -ForegroundColor Red
+    exit 1
+}
+Write-Host "  完成" -ForegroundColor Green
+
 Step "编译打包 (CLI + 前端 + Rust, 大约 5-6 分钟)"
 & pnpm tauri build
 
 # tauri build 最后会因为缺少更新签名私钥而报错退出,
-# 但安装包这时候已经生成好了 —— 所以按产物是否存在来判断成败。
+# 但安装包这时候已经生成好了 -- 所以按产物是否存在来判断成败.
 $version = (Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json).version
 $exe   = $releaseExe
 $nsis  = Join-Path $root "src-tauri\target\release\bundle\nsis\Terax_${version}_x64-setup.exe"

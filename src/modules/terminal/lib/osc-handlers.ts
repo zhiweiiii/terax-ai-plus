@@ -87,8 +87,13 @@ export type ClipboardWriter = (text: string) => void | Promise<void>;
 export function registerOsc52ClipboardHandler(
   term: Terminal,
   writeClipboard: ClipboardWriter = writeSystemClipboard,
+  state?: ShellIntegrationState,
 ): () => void {
   const d = term.parser.registerOscHandler(52, (data) => {
+    // Same trust gate as the cwd handler: command output is untrusted (SSH,
+    // `cat` of an attacker file, a remote agent). Only the local shell at
+    // the prompt may touch the system clipboard.
+    if (state?.inCommand) return true;
     const text = parseOsc52Clipboard(data);
     if (text === null) return true;
     queueMicrotask(() => {

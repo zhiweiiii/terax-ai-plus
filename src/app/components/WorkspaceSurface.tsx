@@ -29,6 +29,8 @@ type Props = {
   gitHistoryRepos?: GitHistoryStackProps["repos"];
   onSwitchGitHistoryRepo?: GitHistoryStackProps["onSwitchRepo"];
   onSetMarkdownView: EditorStackProps["onSetMarkdownView"];
+  /** Opens a project file from a relative markdown link. */
+  onOpenMarkdownPath: (path: string) => void;
 };
 
 /**
@@ -53,6 +55,7 @@ export function WorkspaceSurface({
   gitHistoryRepos,
   onSwitchGitHistoryRepo,
   onSetMarkdownView,
+  onOpenMarkdownPath,
 }: Props) {
   const kind = activeTab?.kind;
   const isTerminalTab = kind === "terminal";
@@ -121,6 +124,7 @@ export function WorkspaceSurface({
           tabs={tabs}
           activeId={activeId}
           onSetMarkdownView={onSetMarkdownView}
+          onOpenPath={onOpenMarkdownPath}
         />
       </div>
       <div

@@ -146,6 +146,10 @@ export function planMarkdownTabOpen(
   ownerTabId?: number,
 ): { tabs: Tab[]; tabId: number } {
   const pathKey = path.replace(/\\/g, "/");
+  // Dedupe across BOTH views: an editor (raw) tab holding the same file must
+  // not spawn a second rendered tab for the same document — the rendered tab
+  // is found first, then the raw editor tab, which flips that tab to
+  // rendered instead.
   const existing = tabs.find(
     (tab) =>
       tab.kind === "markdown" &&
@@ -153,6 +157,30 @@ export function planMarkdownTabOpen(
       tab.path.replace(/\\/g, "/") === pathKey,
   );
   if (existing) return { tabs, tabId: existing.id };
+  const rawExisting = tabs.find(
+    (tab): tab is Extract<Tab, { kind: "editor" }> =>
+      tab.kind === "editor" &&
+      tab.spaceId === spaceId &&
+      tab.path.replace(/\\/g, "/") === pathKey,
+  );
+  if (rawExisting) {
+    // An editor tab with unsaved changes must not be flipped to the rendered
+    // view (the preview cannot show unsaved edits); keep the editor tab.
+    if (rawExisting.dirty) return { tabs, tabId: rawExisting.id };
+    const converted: MarkdownTab = {
+      id: rawExisting.id,
+      kind: "markdown",
+      spaceId: rawExisting.spaceId,
+      cold: rawExisting.cold,
+      title: rawExisting.title,
+      path: rawExisting.path,
+      ownerTabId: rawExisting.ownerTabId,
+    };
+    return {
+      tabs: tabs.map((tab) => (tab.id === rawExisting.id ? converted : tab)),
+      tabId: rawExisting.id,
+    };
+  }
 
   const tabId = allocId();
   return {

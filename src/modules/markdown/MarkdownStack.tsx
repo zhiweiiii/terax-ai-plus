@@ -6,9 +6,16 @@ type Props = {
   tabs: Tab[];
   activeId: number;
   onSetMarkdownView: (id: number, mode: "rendered" | "raw") => void;
+  /** Opens a project file from a relative markdown link. */
+  onOpenPath: (path: string) => void;
 };
 
-export function MarkdownStack({ tabs, activeId, onSetMarkdownView }: Props) {
+export function MarkdownStack({
+  tabs,
+  activeId,
+  onSetMarkdownView,
+  onOpenPath,
+}: Props) {
   const markdowns = tabs.filter(
     (t): t is MarkdownTab => t.kind === "markdown" && !t.cold,
   );
@@ -31,6 +38,7 @@ export function MarkdownStack({ tabs, activeId, onSetMarkdownView }: Props) {
               path={t.path}
               visible={visible}
               onSetView={(mode) => onSetMarkdownView(t.id, mode)}
+              onOpenPath={onOpenPath}
             />
           </div>
         );

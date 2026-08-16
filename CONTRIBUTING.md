@@ -78,33 +78,32 @@ Terax positions itself as **lightweight, fast, production-grade**. Every PR is r
 
 - `pnpm lint` clean
 - `pnpm check-types` clean
-- `pnpm test` clean
 - `cargo clippy --all-targets --locked -- -D warnings` clean
-- `cargo nextest run --locked` clean (or `cargo test --locked`)
 - `cargo fmt` applied before pushing
-- No perf regressions in known hot paths: terminal renderer, PTY stream, AI streaming, source control, file explorer
+- No perf regressions in known hot paths: terminal renderer, PTY stream, source control, file explorer
 - No new heavy dependencies (>50KB gzip in client bundle, >5MB compiled on Rust side) without justification
-- Platform parity preserved (macOS / Linux / Windows / WSL still work)
-- Security review for changes to AI tool surface, file system access, network paths, IPC commands
+- Windows-only: platform parity requirements are scoped to Windows + WSL; do not reintroduce macOS/Linux branches without an explicit decision
+- Security review for changes to the file-system access, network paths (including the web terminal bridge), IPC commands
 
 If you're not sure how to measure perf or what counts as a hot path, ask in Discord or an issue. Better to confirm than get bounced.
 
-## Changes to core subsystems require a test
+## Manual verification for core subsystems
 
-The most common way a PR breaks Terax is a **local fix with global blast radius**: the diff solves one reported case, reads fine, passes type-check and clippy, and silently breaks the same subsystem in every other case. Review alone does not catch these. A test does.
+There is no automated test suite (removed); core subsystems rely on careful manual verification and code review.
 
-So if your change touches behavior in any of these load-bearing paths, the PR must add or extend a test that locks the invariant you're relying on:
+The most common way a PR breaks Terax is a **local fix with global blast radius**: the diff solves one reported case, reads fine, passes type-check and clippy, and silently breaks the same subsystem in every other case. Review alone does not always catch these.
+
+When your change touches behavior in any of these load-bearing paths, manually verify the edge cases before opening the PR:
 
 - **Shell/terminal spawn**: what shell launches, with which cwd, env, and login flags. A "fix" here can stop terminals from starting entirely.
-- **Workspace authorization**: which directories spawns, git, and AI tools may operate in. Both the allow and the deny side.
+- **Workspace authorization**: which directories spawns and git may operate in. Both the allow and the deny side.
 - **Git command layer**: repo-root resolution, pathspec/argument guards, status parsing.
 - **Filesystem mutation**: atomic writes, symlink handling, no-data-loss on partial failure.
-- **IPC command surface and AI tool surface**: anything the webview or the agent can invoke.
-- **Pure logic with wide reach**: cwd inheritance, tab/split tree transforms, OSC/prompt parsing, the command guard.
+- **IPC command surface**: anything the webview can invoke.
+- **Pure logic with wide reach**: cwd inheritance, tab/split tree transforms, OSC/prompt parsing, file ownership across command lines.
+- **Web terminal bridge**: attach / detach, output streaming, auth, and resize behavior on a phone.
 
-The bar for the test is real coverage of the contract, not a placeholder. Test the case that would actually break: the edge, the deny path, the "what happens one level above home". If you can't see how to test it, ask in Discord before opening the PR. That conversation is usually shorter than the revert.
-
-UI rendering, themes, syntax-highlight tables, and anything the type-checker already guarantees do not need tests.
+Test the case that would actually break: the edge, the deny path, the "what happens one level above home". If you can't see how to verify it, ask in Discord before opening the PR.
 
 ## What Terax is not
 

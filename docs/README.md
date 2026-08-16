@@ -12,11 +12,13 @@ If a guide conflicts with `TERAX.md`, `TERAX.md` wins.
 ## Architecture guides
 
 - [Two-process model and IPC command reference](architecture/two-process-model.md) - Rust owns all OS access; the webview talks through `invoke()`. Command catalog and how to add a new command.
-- [PTY shell integration](architecture/pty-shell-integration.md) - PTY sessions, shell init scripts, OSC 7 / 133, ConPTY, SPAWN_LOCK, Job Object, WSL.
-- [Security model](architecture/security-model.md) - deny-list, workspace authorization, IPC allowlist, OSC trust, keychain handling.
+- [PTY shell integration](architecture/pty-shell-integration.md) - PTY sessions, shell init scripts, OSC 7 / 133, ConPTY, CONPTY_LIFECYCLE_LOCK, Job Object, WSL.
+- [Web terminal bridge](architecture/web-terminal-bridge.md) - embedded HTTP + WebSocket server that shares desktop PTY sessions with a phone browser; auth, protocol, build pipeline.
+- [Security model](architecture/security-model.md) - workspace authorization, IPC allowlist, OSC trust, and the web terminal auth boundary.
 - [Terminal renderer pool](architecture/terminal-renderer-pool.md) - slot pooling, the DormantRing, and the never-serialize-mid-command invariant.
 - [CLI control plane](architecture/cli-control.md) - bundled CLI, authenticated local protocol, caller targeting, packaging, and current platform limits.
+- [Known issues and architectural debt](issues.md) - documented bugs, risks, dead code, and docs drift.
 
-## Contributing guides
+## Porting history (archived)
 
-- [Testing](contributing/testing.md) - the testing contract, how to run checks, and what makes a good core-subsystem test.
+- [history/](history/README.md) - archived migration records (`porting-issues.md`, `移植进度.md`) from the Git/IDEA VCS porting batch. Historical only; they reference removed code and are kept for context.

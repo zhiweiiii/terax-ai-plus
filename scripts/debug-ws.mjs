@@ -1,20 +1,26 @@
 // Debug the WS handshake: print raw response headers.
+// Usage: node scripts/debug-ws.mjs [port] [cookie]
+//   port   - dev 17001 (default), release 17002
+//   cookie - optional raw Cookie header value; without it the server
+//            returns 403 (auth required).
 const key = "dGhlIHNhbXBsZSBub25jZQ==";
 const net = await import("node:net");
 
-const sock = net.connect(17000, "127.0.0.1");
+const port = Number(process.argv[2] ?? 17001);
+const cookie = process.argv[3] ?? "";
+const sock = net.connect(port, "127.0.0.1");
 sock.on("connect", () => {
-  const req = [
-    "GET /ws HTTP/1.1",
-    "Host: 127.0.0.1:17000",
+  const lines = [
+    `GET /ws HTTP/1.1`,
+    `Host: 127.0.0.1:${port}`,
     "Upgrade: websocket",
     "Connection: Upgrade",
     `Sec-WebSocket-Key: ${key}`,
     "Sec-WebSocket-Version: 13",
-    "",
-    "",
-  ].join("\r\n");
-  sock.write(req);
+  ];
+  if (cookie) lines.push(`Cookie: ${cookie}`);
+  lines.push("", "");
+  sock.write(lines.join("\r\n"));
 });
 let data = "";
 sock.on("data", (chunk) => {
