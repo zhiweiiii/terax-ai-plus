@@ -1122,20 +1122,6 @@ pub fn pre_commit_checks(
         );
     }
 
-    if let Ok(lines) = git_stdout_lines(
-        &repo_root.workspace,
-        &repo_root.git_path,
-        ["ls-files", "--eol"],
-    ) {
-        if lines
-            .iter()
-            .take(500)
-            .any(|line| line.to_ascii_lowercase().contains("crlf"))
-        {
-            warnings.push("工作区包含 CRLF 行尾的文件，建议统一为 LF 行尾".into());
-        }
-    }
-
     if let Ok(output) = run_git(
         &repo_root.workspace,
         Some(&repo_root.git_path),

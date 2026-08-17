@@ -1,13 +1,21 @@
+import {
+  FindBox,
+  type FindBoxHandle,
+  type FindMatch,
+} from "@/components/ui/find-box";
 import { useTheme } from "@/modules/theme";
 import {
   forwardRef,
   memo,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
+  useState,
 } from "react";
 import { BlockOverlay } from "./block/BlockOverlay";
 import { BlockWatermark } from "./block/BlockWatermark";
+import type { TermMatch } from "./lib/terminalFind";
 import {
   focusLeafInput,
   submitToLeaf,
@@ -19,6 +27,7 @@ export type TerminalPaneHandle = {
   focus: () => void;
   getBuffer: (maxLines?: number) => string | null;
   getSelection: () => string | null;
+  openSearch: () => void;
 };
 
 type Props = {
@@ -51,6 +60,9 @@ export const TerminalPane = memo(
     const containerRef = useRef<HTMLDivElement>(null);
     const downYRef = useRef<number | null>(null);
     const { resolvedMode, activeTheme } = useTheme();
+    const [findOpen, setFindOpen] = useState(false);
+    const [findMatches, setFindMatches] = useState<TermMatch[]>([]);
+    const findBoxRef = useRef<FindBoxHandle>(null);
 
     const session = useTerminalSession({
       leafId,
@@ -69,6 +81,35 @@ export const TerminalPane = memo(
       return () => cancelAnimationFrame(id);
     }, [resolvedMode, activeTheme, session]);
 
+    const openSearch = useCallback(() => {
+      setFindOpen(true);
+      requestAnimationFrame(() => findBoxRef.current?.focus());
+    }, []);
+
+    const runFind = useCallback(
+      (q: string) => {
+        const matches = q.trim() ? session.findAll(q.trim()) : [];
+        setFindMatches(matches);
+        if (matches.length > 0) session.revealFind(matches[0]);
+        else session.clearFind();
+      },
+      [session],
+    );
+
+    const jumpFind = useCallback(
+      (i: number) => {
+        const m = findMatches[i];
+        if (m) session.revealFind(m);
+      },
+      [findMatches, session],
+    );
+
+    const closeFind = useCallback(() => {
+      setFindOpen(false);
+      setFindMatches([]);
+      session.clearFind();
+    }, [session]);
+
     useImperativeHandle(
       ref,
       () => ({
@@ -76,8 +117,9 @@ export const TerminalPane = memo(
         focus: () => session.focus(),
         getBuffer: (max?: number) => session.getBuffer(max),
         getSelection: () => session.getSelection(),
+        openSearch,
       }),
-      [session],
+      [session, openSearch],
     );
 
     const hideStyle = {
@@ -86,6 +128,13 @@ export const TerminalPane = memo(
     };
 
     const promptReady = session.blockMode === "prompt";
+
+    const findDropdown: FindMatch[] = findMatches.map((m) => ({
+      key: `${m.line}:${m.col}`,
+      line: m.line + 1,
+      text: m.text,
+      hint: `行 ${m.line + 1}`,
+    }));
 
     if (blocks) {
       return (
@@ -127,17 +176,35 @@ export const TerminalPane = memo(
                 if (session.blockMode === "prompt") focusLeafInput(leafId);
               }}
             />
+            {findOpen ? (
+              <FindBox
+                ref={findBoxRef}
+                placeholder="Find in terminal"
+                matches={findDropdown}
+                onSearch={runFind}
+                onJump={jumpFind}
+                onClose={closeFind}
+              />
+            ) : null}
           </div>
         </div>
       );
     }
 
     return (
-      <div
-        ref={containerRef}
-        className="zoom-exempt h-full w-full"
-        style={hideStyle}
-      />
+      <div className="relative h-full w-full" style={hideStyle}>
+        <div ref={containerRef} className="zoom-exempt h-full w-full" />
+        {findOpen ? (
+          <FindBox
+            ref={findBoxRef}
+            placeholder="Find in terminal"
+            matches={findDropdown}
+            onSearch={runFind}
+            onJump={jumpFind}
+            onClose={closeFind}
+          />
+        ) : null}
+      </div>
     );
   }),
 );

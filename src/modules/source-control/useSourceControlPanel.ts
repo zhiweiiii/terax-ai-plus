@@ -14,12 +14,20 @@ import {
   workingDiffKey,
 } from "@/modules/editor/lib/diffCache";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { repoDisplayName, type RepoStatusEntry } from "./useRepoStatuses";
+import type { PushPlan } from "./useMultiRepoSourceControl";
+import { type RepoStatusEntry, repoDisplayName } from "./useRepoStatuses";
 import type { SourceControlSummary } from "./useSourceControl";
 
 type PanelState = "closed" | "loading" | "no-repo" | "ready" | "error";
 type DiffMode = "+" | "-";
 type SelectionTransition = "none" | "moved-group" | "reset";
+
+/** Lets the commit flow hand the final push over to the preview dialog. */
+export type PushPreviewBridge = {
+  buildPushPlan?: () => Promise<PushPlan>;
+  /** Open (or close) the push preview with the given plan. */
+  onPreviewPush: (plan: PushPlan | null) => void;
+};
 
 const RECONCILE_DEBOUNCE_MS = 180;
 
@@ -332,6 +340,7 @@ export function useSourceControlPanel(
     | null,
   repos: GitRepoHead[] = [],
   repoStatuses: RepoStatusBundle = NOOP_REPO_STATUSES,
+  pushPreview?: PushPreviewBridge,
 ): SourceControlPanelState {
   const [panelState, setPanelState] = useState<PanelState>("closed");
   const [repo, setRepo] = useState<GitRepoInfo | null>(null);
@@ -1004,9 +1013,27 @@ export function useSourceControlPanel(
           }
         }
         let pushError: string | null = null;
+        let pushDeferred = false;
         if (andPush && failed.length === 0) {
-          const pushResult = await summary.runRemoteAction("push");
-          if (!pushResult.ok && pushResult.error) pushError = pushResult.error;
+          // When a push-preview bridge exists, hand the final push to the
+          // preview dialog instead of pushing on the same click.
+          if (pushPreview?.buildPushPlan) {
+            try {
+              const plan = await pushPreview.buildPushPlan();
+              if (plan.entries.length > 0) {
+                pushPreview.onPreviewPush(plan);
+                pushDeferred = true;
+              }
+            } catch {
+              // Plan failed (e.g. transient git error): fall through to a
+              // direct push rather than silently dropping the step.
+            }
+          }
+          if (!pushDeferred) {
+            const pushResult = await summary.runRemoteAction("push");
+            if (!pushResult.ok && pushResult.error)
+              pushError = pushResult.error;
+          }
         }
         if (failed.length === 0) {
           setCommitMessage("");
@@ -1025,7 +1052,7 @@ export function useSourceControlPanel(
               : `${base} (merged into recent commit)`
             : base;
           setActionMessage(
-            andPush && !pushError
+            andPush && !pushError && !pushDeferred
               ? `${message} and pushed${
                   summary.status?.upstream
                     ? ` to ${summary.status.upstream}`
@@ -1049,6 +1076,7 @@ export function useSourceControlPanel(
       amendTargetSha,
       commitMessage,
       multiRepo,
+      pushPreview,
       recentCommits,
       refreshOtherRepos,
       repo,

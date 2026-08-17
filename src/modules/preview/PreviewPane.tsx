@@ -16,6 +16,8 @@ export type PreviewPaneHandle = {
   reload: () => void;
   focusAddressBar: () => void;
   getUrl: () => string;
+  /** Focus the embedded page so its own in-page find (Ctrl+F) applies. */
+  focusFrame: () => void;
 };
 
 type Props = {
@@ -36,6 +38,7 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
     const [nonce, setNonce] = useState(0);
     const [loaded, setLoaded] = useState(visible);
     const addressRef = useRef<PreviewAddressBarHandle>(null);
+    const frameRef = useRef<HTMLIFrameElement>(null);
 
     useEffect(() => {
       if (visible) {
@@ -55,6 +58,9 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
         },
         focusAddressBar: () => addressRef.current?.focus(),
         getUrl: () => url,
+        focusFrame: () => {
+          frameRef.current?.contentWindow?.focus();
+        },
       }),
       [url],
     );
@@ -100,6 +106,7 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
             loaded ? (
               <iframe
                 key={`${url}#${nonce}`}
+                ref={frameRef}
                 src={url}
                 title="Preview"
                 className="h-full w-full border-0"
@@ -171,8 +178,8 @@ function EmptyState() {
             Ports
           </span>{" "}
           dropdown to jump straight to your running dev server. Public sites
-          often block embedding — open them in your browser via the link icon
-          if you see a blank page.
+          often block embedding — open them in your browser via the link icon if
+          you see a blank page.
         </p>
       </div>
     </div>

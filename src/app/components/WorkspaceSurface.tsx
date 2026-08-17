@@ -10,6 +10,7 @@ import type { ComponentProps } from "react";
 type TerminalStackProps = ComponentProps<typeof TerminalStack>;
 type EditorStackProps = ComponentProps<typeof EditorStack>;
 type PreviewStackProps = ComponentProps<typeof PreviewStack>;
+type GitDiffStackProps = ComponentProps<typeof GitDiffStack>;
 type GitHistoryStackProps = ComponentProps<typeof GitHistoryStack>;
 
 type Props = {
@@ -25,6 +26,11 @@ type Props = {
   onEditorCloseTab: EditorStackProps["onCloseTab"];
   registerPreviewHandle: PreviewStackProps["registerHandle"];
   onPreviewUrlChange: PreviewStackProps["onUrlChange"];
+  registerMarkdownHandle: ComponentProps<
+    typeof MarkdownStack
+  >["registerHandle"];
+  registerGitDiffHandle: GitDiffStackProps["registerHandle"];
+  registerGitHistoryHandle: GitHistoryStackProps["registerHandle"];
   onOpenCommitFile: GitHistoryStackProps["onOpenCommitFile"];
   gitHistoryRepos?: GitHistoryStackProps["repos"];
   onSwitchGitHistoryRepo?: GitHistoryStackProps["onSwitchRepo"];
@@ -51,6 +57,9 @@ export function WorkspaceSurface({
   onEditorCloseTab,
   registerPreviewHandle,
   onPreviewUrlChange,
+  registerMarkdownHandle,
+  registerGitDiffHandle,
+  registerGitHistoryHandle,
   onOpenCommitFile,
   gitHistoryRepos,
   onSwitchGitHistoryRepo,
@@ -123,6 +132,7 @@ export function WorkspaceSurface({
         <MarkdownStack
           tabs={tabs}
           activeId={activeId}
+          registerHandle={registerMarkdownHandle}
           onSetMarkdownView={onSetMarkdownView}
           onOpenPath={onOpenMarkdownPath}
         />
@@ -134,7 +144,11 @@ export function WorkspaceSurface({
         )}
         aria-hidden={!isGitDiffTab}
       >
-        <GitDiffStack tabs={tabs} activeId={activeId} />
+        <GitDiffStack
+          tabs={tabs}
+          activeId={activeId}
+          registerHandle={registerGitDiffHandle}
+        />
       </div>
       <div
         className={cn(
@@ -146,6 +160,7 @@ export function WorkspaceSurface({
         <GitHistoryStack
           tabs={tabs}
           activeId={activeId}
+          registerHandle={registerGitHistoryHandle}
           repos={gitHistoryRepos}
           onSwitchRepo={onSwitchGitHistoryRepo}
           onOpenCommitFile={onOpenCommitFile}

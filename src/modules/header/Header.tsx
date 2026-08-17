@@ -1,18 +1,8 @@
-import { Button } from "@/components/ui/button";
 import { WindowControls } from "@/components/WindowControls";
 import { USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import type { Tab } from "@/modules/tabs";
 import { TabBar } from "@/modules/tabs";
-import {
-  CommandIcon,
-  Settings01Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import type { ReactNode, RefObject } from "react";
-import {
-  SearchInline,
-  type SearchInlineHandle,
-} from "./SearchInline";
+import type { ReactNode } from "react";
 
 type Props = {
   tabs: Tab[];
@@ -31,16 +21,9 @@ type Props = {
   onRename: (id: number, title: string) => void;
   onReorder: (fromId: number, toGapIndex: number) => void;
   onOverrideLanguage?: (id: number, lang: string | null) => void;
-  onOpenCommandPalette: () => void;
-  onOpenSettings: () => void;
-  searchRoot: string | null;
-  onSearchOpenHit: (path: string, line: number) => void;
-  searchRef: RefObject<SearchInlineHandle | null>;
   headerTabs?: ReactNode;
   /** Group (space) switcher rendered before the tab strip. */
   groupSwitcher?: ReactNode;
-  onLaunchClaude?: () => void;
-  onLaunchClaudeC?: () => void;
 };
 
 export function Header({
@@ -59,28 +42,9 @@ export function Header({
   onRename,
   onReorder,
   onOverrideLanguage,
-  onOpenCommandPalette,
-  onOpenSettings,
-  searchRoot,
-  onSearchOpenHit,
-  searchRef,
   headerTabs,
   groupSwitcher,
-  onLaunchClaude,
-  onLaunchClaudeC,
 }: Props) {
-
-  const settingsButton = (
-    <Button
-      variant="ghost"
-      size="icon"
-      className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
-      onClick={onOpenSettings}
-      title="Settings"
-    >
-      <HugeiconsIcon icon={Settings01Icon} size={15} strokeWidth={1.75} />
-    </Button>
-  );
 
   return (
     <div
@@ -89,38 +53,6 @@ export function Header({
     >
       <div className="flex shrink-0 items-center gap-0.5">
         {headerTabs}
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          onClick={onOpenCommandPalette}
-          title="Command palette"
-          className="shrink-0 gap-1.5 rounded-md px-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
-        >
-          <HugeiconsIcon icon={CommandIcon} size={14} strokeWidth={1.75} />
-        </Button>
-
-        {onLaunchClaude && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="h-6 shrink-0 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={onLaunchClaude}
-            title="Launch Claude Code"
-          >
-            C
-          </Button>
-        )}
-        {onLaunchClaudeC && (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="h-6 shrink-0 rounded px-1 text-[10px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={onLaunchClaudeC}
-            title="Launch Claude Code -c"
-          >
-            C-C
-          </Button>
-        )}
       </div>
 
       <span className="mx-1 h-full w-px shrink-0 bg-border/70" />
@@ -149,15 +81,6 @@ export function Header({
         />
         <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
       </div>
-
-      <SearchInline
-        ref={searchRef}
-        root={searchRoot}
-        onOpenHit={onSearchOpenHit}
-        compact={false}
-      />
-
-      {settingsButton}
 
       {USE_CUSTOM_WINDOW_CONTROLS && (
         <>

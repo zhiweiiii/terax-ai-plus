@@ -122,6 +122,11 @@
   pointer-events: none;
 }
 
+.bt-match.find-active {
+  background: rgba(255, 193, 84, 0.85);
+  box-shadow: 0 0 0 2px rgba(255, 193, 84, 1);
+}
+
 .bt-bar {
   position: absolute;
   left: 8px;

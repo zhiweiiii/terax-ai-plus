@@ -3,9 +3,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Button } from "@/components/ui/button";
 import { LspStatusPill } from "@/modules/lsp";
 import type { WorkspaceEnv } from "@/modules/workspace";
-import { IncognitoIcon } from "@hugeicons/core-free-icons";
+import { IncognitoIcon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { DiagnosticsBadge } from "./DiagnosticsBadge";
@@ -18,6 +19,7 @@ type Props = {
   home: string | null;
   onCd: (path: string) => void;
   onWorkspaceChange: (env: WorkspaceEnv) => void;
+  onOpenSettings: () => void;
   privateActive: boolean;
 };
 
@@ -27,6 +29,7 @@ export function StatusBar({
   home,
   onCd,
   onWorkspaceChange,
+  onOpenSettings,
   privateActive,
 }: Props) {
   return (
@@ -53,7 +56,18 @@ export function StatusBar({
           </Tooltip>
         ) : null}
       </div>
-      <WebStatusBadge />
+      <div className="flex shrink-0 items-center gap-1.5">
+        <WebStatusBadge />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+          onClick={onOpenSettings}
+          title="Settings"
+        >
+          <HugeiconsIcon icon={Settings01Icon} size={13} strokeWidth={1.75} />
+        </Button>
+      </div>
     </footer>
   );
 }

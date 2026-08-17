@@ -35,7 +35,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
 import {
   type GitBranchEntry,
   type GitLogEntry,
@@ -43,6 +42,7 @@ import {
   type GitStatusSnapshot,
   native,
 } from "@/lib/native";
+import { cn } from "@/lib/utils";
 import {
   copyToClipboard,
   revealInFinder,
@@ -665,12 +665,25 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   const [planLoading, setPlanLoading] = useState(false);
   const [pullBusy, setPullBusy] = useState(false);
   const repoCount = repoList.length;
-  const scm = useSourceControlPanel(open, sourceControl, onOpenDiff, repoList, {
-    entries: repoStatusEntries ?? [],
-    applyStatus: applyRepoStatus ?? (() => {}),
-    refreshRepo: refreshRepoStatus ?? (async () => {}),
-    refreshAll: refreshAllRepoStatuses ?? (async () => {}),
-  });
+  const scm = useSourceControlPanel(
+    open,
+    sourceControl,
+    onOpenDiff,
+    repoList,
+    {
+      entries: repoStatusEntries ?? [],
+      applyStatus: applyRepoStatus ?? (() => {}),
+      refreshRepo: refreshRepoStatus ?? (async () => {}),
+      refreshAll: refreshAllRepoStatuses ?? (async () => {}),
+    },
+    useMemo(
+      () => ({
+        buildPushPlan,
+        onPreviewPush: setPushPlan,
+      }),
+      [buildPushPlan],
+    ),
+  );
   const refreshAnimationRef = useRef<number | null>(null);
   const [refreshAnimating, setRefreshAnimating] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -860,7 +873,10 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       });
       // Group entries by their top-level directory (like IDEA's Changes view).
       // Only insert a folder header when >=2 files share the same folder.
-      const pushByFolder = (files: SourceControlFileEntry[], repoKey: string) => {
+      const pushByFolder = (
+        files: SourceControlFileEntry[],
+        repoKey: string,
+      ) => {
         const groups = new Map<string, SourceControlFileEntry[]>();
         for (const entry of files) {
           const dir = topLevelDir(entry.path);
@@ -1191,11 +1207,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 onClick={onManageRemotes}
                 side="bottom"
               >
-                <HugeiconsIcon
-                  icon={Edit02Icon}
-                  size={14}
-                  strokeWidth={1.9}
-                />
+                <HugeiconsIcon icon={Edit02Icon} size={14} strokeWidth={1.9} />
               </IconActionButton>
             ) : null}
           </div>
@@ -1424,10 +1436,10 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                         planLoading
                       }
                       onClick={() => {
-                        // Multi-repo pushes go through a preview: sending
-                        // commits to several remotes is not something to fire
-                        // off a single click without showing what goes where.
-                        if (repoList.length > 1 && buildPushPlan) {
+                        // Pushes go through a preview: sending commits to a
+                        // remote is not something to fire off a single click
+                        // without showing what goes where.
+                        if (buildPushPlan) {
                           setPlanLoading(true);
                           void buildPushPlan()
                             .then((plan) => {

@@ -50,6 +50,12 @@ import {
   releaseSlot,
   setSlotFocused,
 } from "./rendererPool";
+import {
+  clearTermFind,
+  findInTerminal,
+  revealTermMatch,
+  type TermMatch,
+} from "./terminalFind";
 import { useTerminalFont } from "./useTerminalFont";
 
 type Callbacks = {
@@ -662,7 +668,11 @@ function bindLeafToSlot(leafId: number, s: Session): void {
     rows: s.rows,
     registerOsc: (term) => {
       if (s.blocks) {
-        const osc52 = registerOsc52ClipboardHandler(term, undefined, s.shellState);
+        const osc52 = registerOsc52ClipboardHandler(
+          term,
+          undefined,
+          s.shellState,
+        );
         const deco = new BlockDecorations(term, {
           onCwd: (next) => {
             markSessionReady(leafId);
@@ -1097,6 +1107,30 @@ export function useTerminalSession({
     [leafId],
   );
 
+  const findAll = useCallback(
+    (query: string): TermMatch[] => {
+      const slot = getLiveSlotForLeaf(leafId);
+      if (!slot || !query) return [];
+      return findInTerminal(slot.term, query);
+    },
+    [leafId],
+  );
+
+  const revealFind = useCallback(
+    (m: TermMatch) => {
+      const slot = getLiveSlotForLeaf(leafId);
+      if (!slot) return;
+      revealTermMatch(slot.term, m);
+    },
+    [leafId],
+  );
+
+  const clearFind = useCallback(() => {
+    const slot = getSlotForLeaf(leafId);
+    if (!slot) return;
+    clearTermFind(slot.term);
+  }, [leafId]);
+
   return useMemo(
     () => ({
       write,
@@ -1112,6 +1146,9 @@ export function useTerminalSession({
       searchBlock,
       revealMatch,
       clearSearch,
+      findAll,
+      revealFind,
+      clearFind,
     }),
     [
       write,
@@ -1127,6 +1164,9 @@ export function useTerminalSession({
       searchBlock,
       revealMatch,
       clearSearch,
+      findAll,
+      revealFind,
+      clearFind,
     ],
   );
 }

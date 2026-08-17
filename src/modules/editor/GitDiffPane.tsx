@@ -2,10 +2,19 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { unifiedMergeView } from "@codemirror/merge";
+import { openSearchPanel } from "@codemirror/search";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   commitDiffKey,
   fetchCommitDiff,
@@ -136,197 +145,209 @@ function loadStateFromCache(source: WorkingSource | CommitSource): LoadState {
   };
 }
 
-export function GitDiffPane({ source, chipLabel, active }: Props) {
-  const cmRef = useRef<ReactCodeMirrorRef>(null);
-  const themeExt = useEditorThemeExt();
-  const [state, setState] = useState<LoadState>(() =>
-    active ? loadStateFromCache(source) : { kind: "idle" },
-  );
+export type GitDiffPaneHandle = {
+  openSearch: () => void;
+};
 
-  const key = cacheKey(source);
+export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
+  function GitDiffPane({ source, chipLabel, active }, ref) {
+    const cmRef = useRef<ReactCodeMirrorRef>(null);
+    const themeExt = useEditorThemeExt();
+    const [state, setState] = useState<LoadState>(() =>
+      active ? loadStateFromCache(source) : { kind: "idle" },
+    );
 
-  useEffect(() => {
-    if (!active) return;
-    const cached = loadStateFromCache(source);
-    if (cached.kind === "loaded") {
-      setState(cached);
-      return;
-    }
-    let cancelled = false;
-    setState({ kind: "loading" });
-    const promise =
-      source.kind === "working"
-        ? fetchWorkingDiff(
-            source.repoRoot,
-            source.path,
-            source.mode,
-            source.originalPath,
-          )
-        : fetchCommitDiff(
-            source.repoRoot,
-            source.sha,
-            source.path,
-            source.originalPath,
-          );
-    Promise.all([promise, resolveLanguage(source.path).catch(() => null)])
-      .then(([res, lang]) => {
-        if (cancelled) return;
-        setState({
-          kind: "loaded",
-          originalContent: res.originalContent,
-          modifiedContent: res.modifiedContent,
-          isBinary: res.isBinary,
-          fallbackPatch: res.fallbackPatch,
-          langExt: lang?.ext ?? null,
+    const openSearch = useCallback(() => {
+      const view = cmRef.current?.view;
+      if (view) openSearchPanel(view);
+    }, []);
+
+    useImperativeHandle(ref, () => ({ openSearch }), [openSearch]);
+
+    const key = cacheKey(source);
+
+    useEffect(() => {
+      if (!active) return;
+      const cached = loadStateFromCache(source);
+      if (cached.kind === "loaded") {
+        setState(cached);
+        return;
+      }
+      let cancelled = false;
+      setState({ kind: "loading" });
+      const promise =
+        source.kind === "working"
+          ? fetchWorkingDiff(
+              source.repoRoot,
+              source.path,
+              source.mode,
+              source.originalPath,
+            )
+          : fetchCommitDiff(
+              source.repoRoot,
+              source.sha,
+              source.path,
+              source.originalPath,
+            );
+      Promise.all([promise, resolveLanguage(source.path).catch(() => null)])
+        .then(([res, lang]) => {
+          if (cancelled) return;
+          setState({
+            kind: "loaded",
+            originalContent: res.originalContent,
+            modifiedContent: res.modifiedContent,
+            isBinary: res.isBinary,
+            fallbackPatch: res.fallbackPatch,
+            langExt: lang?.ext ?? null,
+          });
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setState({
+            kind: "error",
+            message:
+              err && typeof err === "object" && "message" in err
+                ? String((err as { message: unknown }).message)
+                : String(err),
+          });
         });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setState({
-          kind: "error",
-          message:
-            err && typeof err === "object" && "message" in err
-              ? String((err as { message: unknown }).message)
-              : String(err),
-        });
+      return () => {
+        cancelled = true;
+      };
+    }, [active, key, source]);
+
+    const path = source.path;
+    const repoRoot = source.repoRoot;
+    const mode = source.kind === "working" ? source.mode : "+";
+    const loaded = state.kind === "loaded" ? state : null;
+    const originalContent = loaded?.originalContent ?? "";
+    const modifiedContent = loaded?.modifiedContent ?? "";
+    const isBinary = loaded?.isBinary ?? false;
+    const fallbackPatch = loaded?.fallbackPatch ?? "";
+
+    const isTooLarge =
+      originalContent.length > LARGE_FILE_THRESHOLD ||
+      modifiedContent.length > LARGE_FILE_THRESHOLD;
+    const useFallback = isBinary || isTooLarge;
+
+    const langExt = loaded?.langExt ?? null;
+    const extensions = useMemo(
+      () => [
+        ...SHARED_EXT,
+        DEFAULT_INDENT,
+        languageCompartment.of(langExt ?? []),
+        ...READONLY_EXT,
+        unifiedMergeView({
+          original: originalContent,
+          mergeControls: false,
+          highlightChanges: true,
+          gutter: true,
+          syntaxHighlightDeletions: true,
+          collapseUnchanged: { margin: 3, minSize: 6 },
+        }),
+        DIFF_THEME,
+      ],
+      [originalContent, langExt],
+    );
+
+    // Cache-hit path only: the diff came from the cache before the language
+    // pack was imported. Resolve and reconfigure once the view exists.
+    useEffect(() => {
+      if (useFallback || state.kind !== "loaded" || state.langExt) return;
+      let cancelled = false;
+      resolveLanguage(path).then((res) => {
+        if (cancelled || !res) return;
+        setState((s) => (s.kind === "loaded" ? { ...s, langExt: res.ext } : s));
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [active, key, source]);
+      return () => {
+        cancelled = true;
+      };
+    }, [useFallback, path, state]);
 
-  const path = source.path;
-  const repoRoot = source.repoRoot;
-  const mode = source.kind === "working" ? source.mode : "+";
-  const loaded = state.kind === "loaded" ? state : null;
-  const originalContent = loaded?.originalContent ?? "";
-  const modifiedContent = loaded?.modifiedContent ?? "";
-  const isBinary = loaded?.isBinary ?? false;
-  const fallbackPatch = loaded?.fallbackPatch ?? "";
+    const stats = useMemo(
+      () =>
+        useFallback ? countDiffLines(fallbackPatch) : { added: 0, removed: 0 },
+      [useFallback, fallbackPatch],
+    );
 
-  const isTooLarge =
-    originalContent.length > LARGE_FILE_THRESHOLD ||
-    modifiedContent.length > LARGE_FILE_THRESHOLD;
-  const useFallback = isBinary || isTooLarge;
-
-  const langExt = loaded?.langExt ?? null;
-  const extensions = useMemo(
-    () => [
-      ...SHARED_EXT,
-      DEFAULT_INDENT,
-      languageCompartment.of(langExt ?? []),
-      ...READONLY_EXT,
-      unifiedMergeView({
-        original: originalContent,
-        mergeControls: false,
-        highlightChanges: true,
-        gutter: true,
-        syntaxHighlightDeletions: true,
-        collapseUnchanged: { margin: 3, minSize: 6 },
-      }),
-      DIFF_THEME,
-    ],
-    [originalContent, langExt],
-  );
-
-  // Cache-hit path only: the diff came from the cache before the language
-  // pack was imported. Resolve and reconfigure once the view exists.
-  useEffect(() => {
-    if (useFallback || state.kind !== "loaded" || state.langExt) return;
-    let cancelled = false;
-    resolveLanguage(path).then((res) => {
-      if (cancelled || !res) return;
-      setState((s) =>
-        s.kind === "loaded" ? { ...s, langExt: res.ext } : s,
-      );
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [useFallback, path, state]);
-
-  const stats = useMemo(
-    () =>
-      useFallback ? countDiffLines(fallbackPatch) : { added: 0, removed: 0 },
-    [useFallback, fallbackPatch],
-  );
-
-  return (
-    <div className="flex h-full min-h-0 flex-col rounded-md border border-border/60 bg-background">
-      <div className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border/60 px-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <Badge
-            variant="outline"
-            className="text-[10px] uppercase tracking-wide"
-          >
-            {chipLabel ?? mode}
-          </Badge>
-          {isBinary ? (
-            <Badge variant="secondary" className="text-[10px]">
-              Binary / patch fallback
+    return (
+      <div className="flex h-full min-h-0 flex-col rounded-md border border-border/60 bg-background">
+        <div className="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-border/60 px-3">
+          <div className="flex min-w-0 items-center gap-2">
+            <Badge
+              variant="outline"
+              className="text-[10px] uppercase tracking-wide"
+            >
+              {chipLabel ?? mode}
             </Badge>
-          ) : isTooLarge ? (
-            <Badge variant="secondary" className="text-[10px]">
-              Large file / patch view
-            </Badge>
-          ) : null}
-          <span
-            className="truncate font-mono text-[11px] text-muted-foreground"
-            title={path}
-          >
-            {path}
-          </span>
+            {isBinary ? (
+              <Badge variant="secondary" className="text-[10px]">
+                Binary / patch fallback
+              </Badge>
+            ) : isTooLarge ? (
+              <Badge variant="secondary" className="text-[10px]">
+                Large file / patch view
+              </Badge>
+            ) : null}
+            <span
+              className="truncate font-mono text-[11px] text-muted-foreground"
+              title={path}
+            >
+              {path}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-3 text-[10.5px] tabular-nums text-muted-foreground">
+            <span className="truncate max-w-80 font-mono">{repoRoot}</span>
+            {useFallback ? (
+              <>
+                <span className="text-emerald-600 dark:text-emerald-400">
+                  +{stats.added}
+                </span>
+                <span className="text-rose-600 dark:text-rose-400">
+                  −{stats.removed}
+                </span>
+              </>
+            ) : null}
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-3 text-[10.5px] tabular-nums text-muted-foreground">
-          <span className="truncate max-w-80 font-mono">{repoRoot}</span>
-          {useFallback ? (
-            <>
-              <span className="text-emerald-600 dark:text-emerald-400">
-                +{stats.added}
-              </span>
-              <span className="text-rose-600 dark:text-rose-400">
-                −{stats.removed}
-              </span>
-            </>
-          ) : null}
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {state.kind === "loading" || state.kind === "idle" ? (
+            <div className="flex h-full items-center justify-center gap-2 text-[11px] text-muted-foreground">
+              <Spinner className="size-3" />
+              Loading diff…
+            </div>
+          ) : state.kind === "error" ? (
+            <div className="flex h-full items-center justify-center px-6 text-center text-[11.5px] text-destructive">
+              {state.message}
+            </div>
+          ) : useFallback ? (
+            <ScrollArea className="h-full">
+              <pre className="min-h-full whitespace-pre-wrap wrap-break-word p-4 font-mono text-[12px] leading-relaxed text-muted-foreground">
+                {fallbackPatch ||
+                  "Diff preview is not available for this file."}
+              </pre>
+            </ScrollArea>
+          ) : (
+            <CodeMirror
+              ref={cmRef}
+              value={modifiedContent}
+              theme={themeExt}
+              extensions={extensions}
+              editable={false}
+              height="100%"
+              className="h-full"
+              basicSetup={{
+                lineNumbers: true,
+                foldGutter: true,
+                highlightActiveLine: false,
+                highlightActiveLineGutter: false,
+                searchKeymap: true,
+              }}
+            />
+          )}
         </div>
       </div>
-
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {state.kind === "loading" || state.kind === "idle" ? (
-          <div className="flex h-full items-center justify-center gap-2 text-[11px] text-muted-foreground">
-            <Spinner className="size-3" />
-            Loading diff…
-          </div>
-        ) : state.kind === "error" ? (
-          <div className="flex h-full items-center justify-center px-6 text-center text-[11.5px] text-destructive">
-            {state.message}
-          </div>
-        ) : useFallback ? (
-          <ScrollArea className="h-full">
-            <pre className="min-h-full whitespace-pre-wrap wrap-break-word p-4 font-mono text-[12px] leading-relaxed text-muted-foreground">
-              {fallbackPatch || "Diff preview is not available for this file."}
-            </pre>
-          </ScrollArea>
-        ) : (
-          <CodeMirror
-            ref={cmRef}
-            value={modifiedContent}
-            theme={themeExt}
-            extensions={extensions}
-            editable={false}
-            height="100%"
-            className="h-full"
-            basicSetup={{
-              lineNumbers: true,
-              foldGutter: true,
-              highlightActiveLine: false,
-              highlightActiveLineGutter: false,
-              searchKeymap: true,
-            }}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
+    );
+  },
+);

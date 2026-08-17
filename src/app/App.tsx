@@ -10,12 +10,13 @@ import {
   consumeLaunchFiles,
   getLaunchDir,
 } from "@/lib/launchDir";
+import { native } from "@/lib/native";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { isMarkdownPath } from "@/lib/utils";
-import { native } from "@/lib/native";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import { useControlBridge } from "@/modules/control";
+import type { GitDiffPaneHandle } from "@/modules/editor";
 import {
   type EditorPaneHandle,
   NewEditorDialog,
@@ -23,11 +24,11 @@ import {
   useEditorFileSync,
 } from "@/modules/editor";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
-import {
-  Header,
-  type SearchInlineHandle,
-} from "@/modules/header";
+import { FileHistoryDialog } from "@/modules/git-history";
+import type { GitHistoryPaneHandle } from "@/modules/git-history/GitHistoryPane";
+import { Header } from "@/modules/header";
 import { setLspNavigator } from "@/modules/lsp";
+import type { MarkdownPreviewPaneHandle } from "@/modules/markdown/MarkdownPreviewPane";
 import type { PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -52,7 +53,6 @@ import {
   useRepositoryTargeting,
   useSourceControlContext,
 } from "@/modules/source-control";
-import { FileHistoryDialog } from "@/modules/git-history";
 import {
   GroupSwitcher,
   useSpacePersistence,
@@ -105,12 +105,12 @@ import {
 import { toast } from "sonner";
 import { CloseDialogs } from "./components/CloseDialogs";
 import { SelectionAskButton } from "./components/SelectionAskButton";
+import { useSelectionAsk } from "./components/useSelectionAsk";
 import {
   TOGGLE_BLOCK_INPUT_EVENT,
   WorkspaceInputBar,
 } from "./components/WorkspaceInputBar";
 import { WorkspaceSurface } from "./components/WorkspaceSurface";
-import { useSelectionAsk } from "./components/useSelectionAsk";
 import { useAppCloseGuard } from "./hooks/useAppCloseGuard";
 import { useWebTerminalSync } from "./hooks/useWebTerminalSync";
 
@@ -208,11 +208,14 @@ export default function App() {
     return t && t.kind === "terminal" ? t : null;
   }, [tabs, activeId]);
   const activeLeafId = activeTerminalTab?.activeLeafId ?? null;
-
-  const searchInlineRef = useRef<SearchInlineHandle | null>(null);
   const terminalRefs = useRef<Map<number, TerminalPaneHandle>>(new Map());
   const editorRefs = useRef<Map<number, EditorPaneHandle>>(new Map());
   const previewRefs = useRef<Map<number, PreviewPaneHandle>>(new Map());
+  const markdownRefs = useRef<Map<number, MarkdownPreviewPaneHandle>>(
+    new Map(),
+  );
+  const gitDiffRefs = useRef<Map<number, GitDiffPaneHandle>>(new Map());
+  const gitHistoryRefs = useRef<Map<number, GitHistoryPaneHandle>>(new Map());
   const { zoomIn, zoomOut, zoomReset } = useZoom();
   useApplyEditorFontSize();
   const terminalPathDropTarget = useTerminalFileDrop();
@@ -664,11 +667,14 @@ export default function App() {
     return targets;
   }, [tabs]);
 
-  const { popup: selectionAskPopup, setPopup: setSelectionAskPopup, send: sendSelection } =
-    useSelectionAsk({
-      captureActiveSelection,
-      onSend: sendSelectionToClaude,
-    });
+  const {
+    popup: selectionAskPopup,
+    setPopup: setSelectionAskPopup,
+    send: sendSelection,
+  } = useSelectionAsk({
+    captureActiveSelection,
+    onSend: sendSelectionToClaude,
+  });
 
   const openNewTab = useCallback(() => {
     newTab(inheritedCwdForNewTab());
@@ -714,8 +720,12 @@ export default function App() {
       // it to the raw editor. Other files default to preview (pin=false);
       // explicit actions like context-menu "Open" pass pin=true to persist.
       // Files always belong to the current command line.
-      if (isMarkdownPath(path)) newMarkdownTab(path, currentOwnerTabId ?? undefined);
-      else openFileTab(path, pin ?? false, { ownerTabId: currentOwnerTabId ?? undefined });
+      if (isMarkdownPath(path))
+        newMarkdownTab(path, currentOwnerTabId ?? undefined);
+      else
+        openFileTab(path, pin ?? false, {
+          ownerTabId: currentOwnerTabId ?? undefined,
+        });
     },
     [openFileTab, newMarkdownTab, currentOwnerTabId],
   );
@@ -1035,9 +1045,20 @@ export default function App() {
       "blocks.prev": () => navigateFocusedBlocks(-1),
       "blocks.next": () => navigateFocusedBlocks(1),
       "search.focus": () => {
-        const editor = editorRefs.current.get(activeId);
-        if (editor) editor.openSearch();
-        else searchInlineRef.current?.focus();
+        const kind = activeTab?.kind;
+        if (kind === "editor") {
+          editorRefs.current.get(activeId)?.openSearch();
+        } else if (kind === "markdown") {
+          markdownRefs.current.get(activeId)?.openSearch();
+        } else if (kind === "terminal" && activeLeafId !== null) {
+          terminalRefs.current.get(activeLeafId)?.openSearch();
+        } else if (kind === "git-diff" || kind === "git-commit-file") {
+          gitDiffRefs.current.get(activeId)?.openSearch();
+        } else if (kind === "git-history") {
+          gitHistoryRefs.current.get(activeId)?.openSearch();
+        } else if (kind === "preview" && activeLeafId !== null) {
+          previewRefs.current.get(activeLeafId)?.focusFrame();
+        }
       },
       "selection.sendToAgent": () => sendSelectionToClaude(),
       "settings.open": () => void openSettingsWindow(),
@@ -1052,6 +1073,8 @@ export default function App() {
     }),
     [
       activeId,
+      activeTab,
+      activeLeafId,
       openCommandPalette,
       stepSwitcher,
       handleCloseTabOrPane,
@@ -1068,6 +1091,7 @@ export default function App() {
       sendSelectionToClaude,
       toggleSidebar,
       toggleExplorerFocus,
+      openSidebarView,
       zoomIn,
       zoomOut,
       zoomReset,
@@ -1161,6 +1185,30 @@ export default function App() {
     [],
   );
 
+  const registerMarkdownHandle = useCallback(
+    (id: number, h: MarkdownPreviewPaneHandle | null) => {
+      if (h) markdownRefs.current.set(id, h);
+      else markdownRefs.current.delete(id);
+    },
+    [],
+  );
+
+  const registerGitDiffHandle = useCallback(
+    (id: number, h: GitDiffPaneHandle | null) => {
+      if (h) gitDiffRefs.current.set(id, h);
+      else gitDiffRefs.current.delete(id);
+    },
+    [],
+  );
+
+  const registerGitHistoryHandle = useCallback(
+    (id: number, h: GitHistoryPaneHandle | null) => {
+      if (h) gitHistoryRefs.current.set(id, h);
+      else gitHistoryRefs.current.delete(id);
+    },
+    [],
+  );
+
   const handlePreviewUrl = useCallback(
     (id: number, url: string) => updateTab(id, { url }),
     [updateTab],
@@ -1212,8 +1260,6 @@ export default function App() {
     [updateTab],
   );
 
-  const searchRoot = explorerRoot;
-
   // The command line's cwd — follows the active file's owner, not just the
   // active terminal tab, so the status bar / new groups stay in context.
   const activeCwd =
@@ -1263,7 +1309,7 @@ export default function App() {
         ? createCommandItems({
             tabs,
             activeId,
-            searchRoot,
+            searchRoot: explorerRoot,
             explorerRoot,
             home,
             openNewTab,
@@ -1276,7 +1322,7 @@ export default function App() {
             closeActiveTabOrPane: handleCloseTabOrPane,
             splitPaneRight: () => splitActivePaneInActiveTab("row"),
             splitPaneDown: () => splitActivePaneInActiveTab("col"),
-            focusSearch: () => searchInlineRef.current?.focus(),
+            focusSearch: () => explorerRef.current?.focusSearch(),
             focusExplorerSearch: () => explorerRef.current?.focusSearch(),
             toggleSidebar,
             openSettings: () => void openSettingsWindow(),
@@ -1287,7 +1333,6 @@ export default function App() {
       commandPaletteOpen,
       tabs,
       activeId,
-      searchRoot,
       explorerRoot,
       home,
       openNewTab,
@@ -1396,11 +1441,6 @@ export default function App() {
               onRename={handleRenameTab}
               onReorder={reorderTabByGap}
               onOverrideLanguage={setOverrideLanguage}
-              onOpenCommandPalette={() => openCommandPalette("commands")}
-              onOpenSettings={() => void openSettingsWindow()}
-              searchRoot={searchRoot}
-              onSearchOpenHit={openContentHit}
-              searchRef={searchInlineRef}
               groupSwitcher={
                 <GroupSwitcher
                   spaces={spacesList}
@@ -1411,16 +1451,6 @@ export default function App() {
                   onDelete={handleDeleteGroup}
                 />
               }
-              onLaunchClaude={() => {
-                if (activeLeafId !== null) {
-                  writeToSession(activeLeafId, "claude\r");
-                }
-              }}
-              onLaunchClaudeC={() => {
-                if (activeLeafId !== null) {
-                  writeToSession(activeLeafId, "claude -c\r");
-                }
-              }}
               headerTabs={
                 <HeaderTabs
                   active={sidebarOpen ? sidebarView : null}
@@ -1575,6 +1605,9 @@ export default function App() {
                       onEditorCloseTab={disposeTab}
                       registerPreviewHandle={registerPreviewHandle}
                       onPreviewUrlChange={handlePreviewUrl}
+                      registerMarkdownHandle={registerMarkdownHandle}
+                      registerGitDiffHandle={registerGitDiffHandle}
+                      registerGitHistoryHandle={registerGitHistoryHandle}
                       onOpenCommitFile={openCommitFileDiffTab}
                       gitHistoryRepos={multiRepo.repos}
                       onSwitchGitHistoryRepo={handleSwitchHistoryRepo}
@@ -1602,6 +1635,7 @@ export default function App() {
               home={home}
               onCd={sendCd}
               onWorkspaceChange={handleWorkspaceChange}
+              onOpenSettings={() => void openSettingsWindow()}
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true
               }

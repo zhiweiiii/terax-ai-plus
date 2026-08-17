@@ -1,23 +1,37 @@
 import type { GitCommitFileDiffTab, GitDiffTab, Tab } from "@/modules/tabs";
+import { useEffect, useRef } from "react";
+import type { GitDiffPaneHandle } from "./GitDiffPane";
 import { GitDiffPane } from "./GitDiffPane";
+
+export type { GitDiffPaneHandle };
 
 type Props = {
   tabs: Tab[];
   activeId: number;
+  registerHandle: (id: number, handle: GitDiffPaneHandle | null) => void;
 };
 
-export function GitDiffStack({ tabs, activeId }: Props) {
+export function GitDiffStack({ tabs, activeId, registerHandle }: Props) {
   const active = tabs.find(
     (t): t is GitDiffTab | GitCommitFileDiffTab =>
       (t.kind === "git-diff" || t.kind === "git-commit-file") &&
       t.id === activeId,
   );
+  const registerRef = useRef(registerHandle);
+  useEffect(() => {
+    registerRef.current = registerHandle;
+  }, [registerHandle]);
+
+  const setRef = (h: GitDiffPaneHandle | null) =>
+    registerRef.current(active?.id ?? -1, h);
+
   if (!active) return null;
   if (active.kind === "git-diff") {
     return (
       <div className="h-full w-full">
         <GitDiffPane
           key={active.id}
+          ref={setRef}
           active
           source={{
             kind: "working",
@@ -34,6 +48,7 @@ export function GitDiffStack({ tabs, activeId }: Props) {
     <div className="h-full w-full">
       <GitDiffPane
         key={active.id}
+        ref={setRef}
         active
         source={{
           kind: "commit",
