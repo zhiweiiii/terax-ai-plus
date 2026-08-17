@@ -31,12 +31,14 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
    - `POST /auth` instead of GET (no more password in URLs/logs).
    - Login rate limit: 5+ consecutive failures lock out for 5 s.
    - Cookie now has `Max-Age=604800`.
-   - The password is compared as a SHA-1 digest (constant-time), not as a
-     plaintext constant.
-   - Still open: the password itself is a hard-coded constant (extractable via
-     `strings`), and `WEB_TOKEN` is a fixed string that never rotates — a
-     stolen cookie stays valid for a week. A per-process random token plus
-     environment/OS-credential configuration would close this for real.
+   - The password is compared as a SHA-1 digest, not a plaintext constant; the
+     digest and the `WEB_TOKEN` are XOR-obfuscated in source and decoded at
+     runtime, so neither appears in `strings` on the binary.
+   - Still open: the obfuscation is not encryption (anyone who can run the
+     code can recover the values), the password is a hard-coded constant, and
+     `WEB_TOKEN` never rotates — a stolen cookie stays valid for a week. A
+     per-process random token plus environment/OS-credential configuration
+     would close this for real.
 4. ~~**"opening" flow deadlocks the auto-attach**~~ — **fixed**
    The frontend clears `attachedId`/`lastAttachedId` when it taps a session,
    records a `pendingAttachId` so the auto-attach targets the *tapped* session
@@ -153,6 +155,36 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     equality~~ — **fixed**: the read-timeout mechanism was removed entirely by
     the non-blocking buffer rework in #41; `read_message` now returns
     `Ok(None)` instead of a string-matched error.
+
+## Web bridge pass (2026-08-17)
+
+43. The web server now reports health to the desktop: `web::web_status`
+    returns `{ running, connections, failed_logins }` from the same atomics
+    the accept loop and auth path maintain, and `WebStatusBadge` in the
+    status bar renders it (polled every 2 s). The badge also surfaces the
+    failed-password counter so a brute-force attempt is visible on the
+    desktop, not just throttled server-side. — **accepted**.
+44. The bind ports moved from 17001/17002 to `34269` (dev) / `34268`
+    (release) and every doc/script reference was updated in the same pass.
+    The `RUNNING` flag is set only after a successful bind, so the status
+    bar's green dot means the accept loop is actually listening. — **fixed**.
+45. The login page title was changed to "请输入密码" (was "Terax Terminal") so
+    the phone page reads as a password prompt rather than an app name. —
+    **fixed**.
+46. The web access password was rotated and its handling hardened. The
+    plaintext is stored nowhere: only the SHA-1 digest exists (as `ENCODED`
+    bytes in `expected_digest()`), and both the digest and the `WEB_TOKEN`
+    cookie value are XOR-obfuscated in source and decoded at runtime via
+    `deobfuscate()` (`web/mod.rs`), so neither shows up in `strings` on the
+    binary. The debug script takes the password from `TERAX_WEB_PASSWORD`
+    (or `argv[3]`) instead of hardcoding it. — **fixed**.
+47. ~~**Explorer had a redundant search button**~~ — **fixed**: the search box
+    is always visible below the toolbar, so the header's search button was
+    removed. In its place a **locate** button (crosshair icon) reveals and
+    selects the active file: it expands every ancestor directory from the
+    root down to the file's parent, clears the auto-sync guard so the loaded
+    row is selected and scrolled into view, and is disabled when no file tab
+    is active. (`explorer/FileExplorer.tsx`.)
 
 ## Window / markdown / terminal scan (2026-08-16)
 

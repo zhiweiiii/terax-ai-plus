@@ -48,7 +48,8 @@ The web terminal is a remote shell: it must not be wide open.
 
 - Password is a server-side constant, compared as a SHA-1 digest
   (constant-time) in `web/mod.rs`.
-- `GET /` without a valid `terax_web` cookie returns a minimal login page.
+- `GET /` without a valid `terax_web` cookie returns a minimal login page
+  (title "请输入密码").
 - The login page POSTs the password to `/auth` (POST only — no credentials in
   URLs); on success the server replies with
   `Set-Cookie: terax_web=<token>; Max-Age=604800` and the browser is
@@ -57,6 +58,22 @@ The web terminal is a remote shell: it must not be wide open.
 - Login is rate-limited: 5+ consecutive failures impose a 5 s lockout.
 - The password digest and token live only in Rust; the page bundle contains
   neither.
+
+## Desktop status indicator
+
+The desktop status bar's bottom-right corner shows the remote service's health
+(`src/modules/statusbar/WebStatusBadge.tsx`, polling the `web_status` command
+every 2 s):
+
+- Green dot: the accept loop is listening (bound + not stopped).
+- Red dot: the server is not running (failed to bind or stopped).
+- Router icon + number: live WebSocket viewer connections right now.
+- Amber key icon + number: consecutive failed password logins since boot
+  (drives the 5 s lockout). Hovering the badge shows the details.
+
+`web_status` is a thin read-only Tauri command in `web/mod.rs` returning
+`{ running, connections, failed_logins }` from the same atomics the server
+maintains (`RUNNING`, `CONNECTIONS`, `FAILED_LOGINS`).
 
 ## WebSocket protocol
 
@@ -151,9 +168,12 @@ The phone's session list groups tabs by space name.
 ## Security notes
 
 - Auth cookie `terax_web` is HttpOnly, SameSite=Lax, `Max-Age=604800`. The
-  token is a fixed server constant and the password is a hard-coded constant
-  (compared via its SHA-1 digest): acceptable for a LAN tool, but anyone with
-  the binary can extract the password. The page bundle contains neither.
+  token and the password's SHA-1 digest are XOR-obfuscated in source and
+  decoded at runtime, so neither appears in `strings` on the binary. The
+  password itself is a hard-coded constant (only its digest is stored): the
+  obfuscation is not encryption and the token never rotates, so this is
+  acceptable for a LAN tool but not a real secret. The page bundle contains
+  neither.
 - Login is POST-only and rate-limited (5 consecutive failures → 5 s lockout).
 - The server binds `0.0.0.0`, so anything reachable on the network can see
   the login page. Put the app behind a firewall / VPN for anything beyond a

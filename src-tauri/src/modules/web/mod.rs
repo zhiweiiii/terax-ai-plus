@@ -51,11 +51,51 @@ const INDEX_HTML: &str = include_str!("../../../web.html");
 
 const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/// Auth cookie value — a fixed string derived from the password. It is only
-/// ever compared in memory, never transmitted to the page bundle; note the
-/// password itself is still a hard-coded constant and the token never rotates
-/// (weakness tracked in docs/issues.md #3).
-const WEB_TOKEN: &str = "terax7hzwyes123token";
+// ──────────────────────────────────────────────────────────────────────────
+// Obfuscated auth constants
+// ──────────────────────────────────────────────────────────────────────────
+// The password digest and the auth cookie token are XOR-obfuscated at compile
+// time and decoded at runtime, so neither the plaintext password nor the token
+// shows up in `strings` on the binary. This is obfuscation, not real security:
+// anyone who can run the code can recover the values (see docs/issues.md #3).
+
+/// Recover an obfuscated byte constant. The caller keeps it in a fixed-size
+/// buffer; nothing is logged or sent to the page bundle.
+fn deobfuscate(encoded: &[u8]) -> Vec<u8> {
+    encoded
+        .iter()
+        .zip(OBFUSCATION_KEY.iter().cycle())
+        .map(|(b, k)| b ^ k)
+        .collect()
+}
+
+/// Key used to encode the constants below.
+const OBFUSCATION_KEY: [u8; 5] = [0x53, 0x2a, 0x7c, 0x91, 0x0d];
+
+/// Auth cookie value — a fixed string, XOR-obfuscated so the token (which is
+/// independent of the password) is not readable from the binary. It is only
+/// ever compared in memory, never transmitted to the page bundle; the token
+/// never rotates (weakness tracked in docs/issues.md #3).
+fn web_token() -> String {
+    const ENCODED: [u8; 48] = [
+        0x6b, 0x13, 0x4d, 0xa1, 0x69, 0x30, 0x4e, 0x4a, 0xa8, 0x38, 0x64, 0x4c,
+        0x19, 0xf3, 0x68, 0x63, 0x1c, 0x1d, 0xa4, 0x35, 0x61, 0x4e, 0x18, 0xf7,
+        0x3f, 0x32, 0x18, 0x4f, 0xf5, 0x6b, 0x60, 0x48, 0x19, 0xa3, 0x3e, 0x65,
+        0x1d, 0x1e, 0xf4, 0x35, 0x61, 0x4b, 0x1a, 0xa4, 0x3d, 0x62, 0x19, 0x4c,
+    ];
+    String::from_utf8(deobfuscate(&ENCODED)).expect("web token is ascii")
+}
+
+/// SHA-1 digest of the access password, XOR-obfuscated. The plaintext password
+/// is never stored anywhere; only this digest exists, decoded at runtime for
+/// the constant-time comparison in `/auth`.
+fn expected_digest() -> Vec<u8> {
+    const ENCODED: [u8; 20] = [
+        0x1c, 0x0a, 0x53, 0x33, 0xdf, 0x92, 0x31, 0x77, 0x18, 0xc1,
+        0x32, 0xba, 0xab, 0x4d, 0xfc, 0xca, 0x2e, 0xc0, 0x92, 0xe0,
+    ];
+    deobfuscate(&ENCODED)
+}
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -455,7 +495,7 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
     }
     let authenticated = cookie
         .as_deref()
-        .map(|c| c.split(';').any(|part| part.trim() == format!("terax_web={WEB_TOKEN}")))
+        .map(|c| c.split(';').any(|part| part.trim() == format!("terax_web={}", web_token())))
         .unwrap_or(false);
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
@@ -523,19 +563,16 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
             hasher.update(pwd.as_bytes());
             hasher.finalize()
         };
-        const EXPECTED: [u8; 20] = [
-            0xb6, 0x67, 0x0f, 0x91, 0xaf, 0x8f, 0xa0, 0x51, 0xed, 0xd9,
-            0xe6, 0x8c, 0xef, 0xae, 0xcc, 0xf6, 0xab, 0x29, 0x4e, 0xe8,
-        ];
-        let ok = digest[..] == EXPECTED;
+        let ok = digest[..] == expected_digest()[..];
         if ok {
             FAILED_LOGINS.store(0, Ordering::Release);
             let body =
                 "<html><body><p>OK</p><script>location.href='/'</script></body></html>";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-                 Set-Cookie: terax_web={WEB_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800\r\n\
+                 Set-Cookie: terax_web={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n",
+                web_token(),
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());

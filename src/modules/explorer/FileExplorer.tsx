@@ -16,7 +16,7 @@ import {
   Folder01Icon,
   FolderAddIcon,
   Refresh01Icon,
-  Search01Icon,
+  Target01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -332,6 +332,27 @@ export const FileExplorer = memo(
       [entryIndexByPath, virtualizer],
     );
 
+    const locateActiveFile = useCallback(() => {
+      if (!rootPath || !activeFilePath) return;
+      const target = activeFilePath.replace(/\\/g, "/");
+      const root = rootPath.replace(/\\/g, "/");
+      if (target === root || !target.startsWith(`${root}/`)) return;
+      // Expand every ancestor dir from the root down to the file's parent so
+      // the file row actually exists in the tree, then select + reveal it.
+      const parts = target.slice(root.length + 1).split("/");
+      let parent = root;
+      for (let i = 0; i < parts.length - 1; i++) {
+        parent = `${parent}/${parts[i]}`;
+        tree.expand(parent);
+      }
+      // Clear the auto-sync guard: expansion loads children asynchronously, so
+      // when the row appears the effect below must select it again (the guard
+      // would otherwise skip it as "already synced").
+      lastSyncedActivePathRef.current = null;
+      setSelectedPath(target);
+      requestAnimationFrame(() => scrollEntryIntoView(target));
+    }, [rootPath, activeFilePath, tree, scrollEntryIntoView]);
+
     const lastSyncedActivePathRef = useRef<string | null>(null);
     useEffect(() => {
       if (
@@ -554,11 +575,12 @@ export const FileExplorer = memo(
             variant="ghost"
             size="icon"
             className="size-6 text-muted-foreground hover:text-foreground"
-            onClick={() => searchRef.current?.focus()}
-            title="Search files"
-            aria-label="Search files"
+            onClick={locateActiveFile}
+            disabled={!activeFilePath}
+            title="Locate active file"
+            aria-label="Locate active file"
           >
-            <HugeiconsIcon icon={Search01Icon} size={13} strokeWidth={2} />
+            <HugeiconsIcon icon={Target01Icon} size={13} strokeWidth={2} />
           </Button>
 
           <Button

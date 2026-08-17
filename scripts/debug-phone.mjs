@@ -36,10 +36,17 @@ await page.goto(url, { waitUntil: "networkidle", timeout: 10000 }).catch((e) => 
   console.error("goto failed:", e.message);
 });
 
-// Login if the login page shows.
+// Login if the login page shows. The password is not stored in the repo;
+// pass it via the TERAX_WEB_PASSWORD env var (or argv[3]).
 const hasPwd = await page.locator("#pwd").count();
 if (hasPwd > 0) {
-  await page.fill("#pwd", "hzwyes123");
+  const pwd = process.env.TERAX_WEB_PASSWORD ?? process.argv[3];
+  if (!pwd) {
+    console.error("login page shown but no password given (TERAX_WEB_PASSWORD or argv[3])");
+    await browser.close();
+    process.exit(2);
+  }
+  await page.fill("#pwd", pwd);
   await page.click("button:has-text('进入')");
   await page.waitForTimeout(1200);
 }

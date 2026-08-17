@@ -4,6 +4,17 @@ This directory holds long-form contributor and maintainer guides. `TERAX.md` at 
 
 If a guide conflicts with `TERAX.md`, `TERAX.md` wins.
 
+## Documentation policy
+
+**Every change must be recorded in the docs before it is considered done.** All of the following go into the appropriate guide (and `TERAX.md` when it changes the architecture):
+
+- New features and behavior changes
+- Bug fixes and the reasoning behind them
+- Known anomalies, accepted trade-offs, and architectural debt
+- Security notes, ports, auth, and other operational details
+
+`docs/issues.md` is the audit log for bugs/risks/debt (numbered scan entries + the "Documentation drift" section); architecture guides capture how things are supposed to work. When you fix or add something, update both so a later maintainer can reconstruct what changed and why. If it's not in the docs, it didn't happen.
+
 ## Getting started
 
 - [TERAX.md](../TERAX.md) - the architecture source of truth; read this first
