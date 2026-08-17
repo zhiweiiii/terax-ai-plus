@@ -831,20 +831,18 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         continue;
                     };
                     // Attach does NOT resize the shared PTY. The desktop owns
-                    // the canonical size; the phone renders at its own fit
-                    // dimensions, so the two views stay independent.
+                    // the canonical size; the phone renders at exactly that
+                    // grid so the byte stream (which is laid out against the
+                    // desktop's cols/rows) parses correctly.
                     let Some((history, tx, rx)) = session.web_subscribe() else {
                         let _ = send_error(&mut conn, "session already exited");
                         continue;
                     };
-                    if !history.is_empty() {
-                        let mut frame = Vec::with_capacity(history.len() + 1);
-                        frame.push(b'0');
-                        frame.extend_from_slice(&history);
-                        if conn.send_frame(OP_BIN, &frame).is_err() {
-                            break;
-                        }
-                    }
+                    // Send the grid size BEFORE the history replay: the phone
+                    // must size its xterm to the PTY grid first, otherwise the
+                    // history bytes (positioned for the desktop grid) are
+                    // parsed at the phone's fit width and every wrapped line /
+                    // cursor move lands wrong.
                     let _ = send_text(
                         &mut conn,
                         &json!({
@@ -855,6 +853,14 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         })
                         .to_string(),
                     );
+                    if !history.is_empty() {
+                        let mut frame = Vec::with_capacity(history.len() + 1);
+                        frame.push(b'0');
+                        frame.extend_from_slice(&history);
+                        if conn.send_frame(OP_BIN, &frame).is_err() {
+                            break;
+                        }
+                    }
                     attached_id = Some(leaf_id);
                     attached = Some((session, tx, rx));
                 } else if parsed.get("list").and_then(|v| v.as_bool()) == Some(true) {

@@ -136,18 +136,19 @@ flusher thread in `session.rs`:
 Input from either end writes to the same `writer`, so commands typed on the
 phone echo on the desktop and vice versa. PTY size is **desktop-owned**: the
 desktop resizes the shared PTY; the phone never sends a resize frame. The
-phone fits in one of two modes, switched by xterm's active buffer
-(`term.buffer.onBufferChange`):
-- **Normal buffer** (plain shell output): free fit to the phone width, so
-  long lines wrap and everything is readable on the small screen.
-- **Alternate buffer** (TUI apps: opencode, vim, htop): the terminal locks
-  its cols to the PTY's own grid (`attached` carries the PTY `cols`/`rows`)
-  so cursor positioning stays correct — the byte stream is laid out for
-  that grid and wrapping elsewhere breaks the TUI. The 120-column canvas is
-  wider than the phone, so the terminal area **scrolls horizontally**
-  (nothing is clipped): the left edge (opencode's main UI) shows by
-  default, and swiping reveals the rest. The session list refreshes the PTY
-  size on a 5 s poll.
+phone renders at **exactly the PTY's grid** (`attached` carries the PTY
+`cols`/`rows`, refreshed on a 5 s poll) in both the normal and alternate
+buffers. This is not a choice: the byte stream is laid out against the
+desktop's grid — apps wrap long lines at the desktop width, do `\r` in-place
+redraws (progress bars, spinners, prompts), and address cells with absolute
+cursor sequences. Any re-wrap (free-fitting to the phone width) changes the
+physical line breaks, so `\r` returns to the middle of the logical line and
+cursor moves land wrong. Wide grids overflow the container horizontally (the
+terminal area scrolls, nothing is clipped); tall grids overflow vertically
+(the normal buffer scrolls; the alt screen clips the bottom — accepted
+trade-off). The server sends the `attached` size **before** the history replay
+so the phone sizes its xterm first; replaying desktop-grid bytes at a
+free-fitted width is what used to garble every wrapped line.
 Each web connection subscribes with its own `SyncSender`; disconnect removes
 exactly that subscription, never the whole table.
 

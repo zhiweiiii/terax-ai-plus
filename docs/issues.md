@@ -270,13 +270,26 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     **fixed**
     Locking the terminal to the PTY grid (needed for TUI cursor
     positioning) clipped long plain-shell lines at the phone width; free
-    fitting wrapped them but broke opencode's layout. The page now switches
-    fit mode by xterm's active buffer: the **normal buffer** free-fits
-    (long lines wrap and stay readable), the **alternate buffer** locks
-    cols to the PTY grid (TUI apps lay out correctly). Nothing is clipped:
-    the terminal area scrolls horizontally so the full 120-column canvas is
-    reachable. (`src/web/main.ts` `applyFitMode` +
-    `term.buffer.onBufferChange`; `src/web/style.css` `.xterm` overflow-x.)
+    fitting wrapped them but broke opencode's layout. The page then switched
+    fit mode by xterm's active buffer: the **normal buffer** free-fitted
+    (long lines wrap), the **alternate buffer** locked cols to the PTY grid.
+    That was wrong for the normal buffer too — see #48.
+    (`src/web/main.ts`.)
+48. ~~**Phone still garbled after the buffer-based fit rework**~~ — **fixed**
+    Root cause: the byte stream is laid out against the desktop's grid, and
+    free-fitting the normal buffer to the phone width re-wrapped lines that
+    the app had already wrapped at the desktop width. `\r` in-place redraws
+    (progress bars, spinners, prompts) then returned to the middle of the
+    logical line and absolute cursor sequences landed on the wrong cells. Two
+    compounding bugs: (1) the server sent the history replay **before** the
+    `attached` size, so the phone parsed desktop-grid history bytes at its
+    free-fitted width; (2) `fitToPty` set `rows` from the fit value instead
+    of the PTY's. Fix: the phone renders at exactly the PTY grid in **both**
+    buffers (`applyFitMode` always locks when cols/rows are known), the
+    server sends `attached` (with cols/rows) **before** the history replay,
+    and `fitToPty` keeps at least the PTY's own rows. Wide grids overflow the
+    container horizontally (scroll); tall grids overflow vertically. (`web/
+    main.ts`; `web/mod.rs` attach path.)
 
 ## Phone grid UI (2026-08-16)
 

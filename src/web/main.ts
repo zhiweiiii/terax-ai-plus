@@ -379,10 +379,9 @@ function attachTo(id: number) {
   pendingAttachId = id;
   term.reset();
   attachedId = null; // clear so auto-attach can retake on reconnect
-  // Attach without a resize: the shared PTY keeps the desktop's size, so
-  // the phone never disturbs the desktop layout. The phone renders at its
-  // own fit dimensions; TUI apps may not lay out perfectly on a narrow
-  // screen, but the two views stay independent.
+  // Attach without a resize: the shared PTY keeps the desktop's size, so the
+  // phone never disturbs the desktop layout. The server replies with the PTY
+  // grid before replaying history, and the phone renders at exactly that grid.
   send({ attach: id });
 }
 
@@ -417,17 +416,19 @@ term.onData((data) => {
 // ── Resize: fit locally ONLY. The shared PTY keeps the desktop's size; the
 // ── phone never sends a resize frame so the desktop layout is never touched.
 //
-// Two rendering modes, chosen by which xterm buffer is active:
-//   - normal buffer (plain shell output): FREE FIT to the phone width, so
-//     long lines wrap and everything is readable.
-//   - alternate buffer (TUI apps: opencode, vim, htop): LOCK cols to the
-//     PTY's own grid — the byte stream is laid out for that grid, wrapping
-//     anywhere else breaks cursor positioning. The right side (opencode's
-//     side panel) is clipped off screen, leaving the main UI readable.
+// The byte stream is laid out against the DESKTOP's grid (cols × rows): the
+// app wraps long lines at the desktop width, does `\r` in-place redraws
+// (progress bars, spinners, prompts) and addresses cells with absolute cursor
+// sequences. Any re-wrap (free-fitting to the phone width) changes physical
+// line breaks, so `\r` returns to the middle of the logical line and cursor
+// moves land wrong. The phone must therefore render at EXACTLY the PTY grid
+// in BOTH buffers. Wide grids overflow horizontally (the container scrolls);
+// tall grids overflow vertically (the normal buffer scrolls; the alt screen
+// clips the bottom - accepted trade-off).
 let inAltScreen = false;
 
 function applyFitMode() {
-  if (inAltScreen && ptyCols !== null && ptyRows !== null) {
+  if (ptyCols !== null && ptyRows !== null && ptyCols >= 8) {
     fitToPty();
   } else {
     try {
@@ -442,17 +443,16 @@ function fitToPty() {
   if (ptyCols === null || ptyRows === null || ptyCols < 8) {
     return;
   }
-  // Keep the readable font size. Lock cols to the PTY grid so the byte
-  // stream's line structure stays intact, and let the container clip the
-  // right side: opencode's side panel sits at the far right and is pushed
-  // off screen, leaving the main UI readable at normal size. Rows use the
-  // fit value (fills the container).
+  // Lock cols to the PTY grid exactly, and keep at least the PTY's own rows so
+  // the app's full grid is present. fit.fit() gives the phone container's
+  // natural rows at the current font; using max() means a phone shorter than
+  // the PTY still keeps the app's grid intact (normal buffer scrolls to it).
   try {
     fit.fit();
   } catch {
     return;
   }
-  term.resize(ptyCols, Math.max(2, term.rows));
+  term.resize(ptyCols, Math.max(1, Math.max(ptyRows, term.rows)));
 }
 
 function resize() {
