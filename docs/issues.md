@@ -290,6 +290,32 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     and `fitToPty` keeps at least the PTY's own rows. Wide grids overflow the
     container horizontally (scroll); tall grids overflow vertically. (`web/
     main.ts`; `web/mod.rs` attach path.)
+49. ~~**Explorer locate button ignored git tabs**~~ — **fixed**:
+    `explorerActiveFilePath` only resolved `editor`/`markdown` tabs, so files
+    opened from the git change panel (git-diff / git-commit-file tabs) never
+    highlighted or revealed in the tree. It now resolves those kinds the same
+    way the status bar does (join `repoRoot` + repo-relative path), and
+    `explorerOpenFilePaths` includes them so the tree marks them open.
+    (`app/App.tsx`.)
+50. ~~**Git change panel: discard targeted the active repo**~~ — **fixed**:
+    `confirmPendingDiscard` ran `git restore`/`git clean` against
+    `repo.repoRoot` (the active repo) even when the file belonged to a
+    different repo in multi-repo workspaces — the pathspec did not match and
+    the discard silently did nothing. `pendingDiscard` now carries the file's
+    own `repoRoot` and `runMutation` receives it as `targetRepoRoot`.
+    (`source-control/useSourceControlPanel.ts`.)
+51. ~~**Git tabs invisible in the "窗口" (open files) panel**~~ — **fixed**:
+    `OpenFilesPanel` filtered `ownerTabId === currentOwnerTabId`, and git
+    tabs (diff / history / commit file) carry no owner, so they vanished as
+    soon as a terminal was active. Git tabs now always show (repo-level, not
+    command-line-scoped); `git-history` / `git-commit-file` were added to the
+    filter and got icons. (`sidebar/OpenFilesPanel.tsx`.)
+52. ~~**Commit / Commit&Push button lagged before showing busy**~~ — **fixed**:
+    `setLocalActionBusy` ran *after* the async pre-commit checks, so the
+    button stayed idle for the check round-trip (slow with hooks installed).
+    The busy state now goes up on the very click; it is released if the
+    targets are empty or pre-commit warnings pause the flow.
+    (`source-control/useSourceControlPanel.ts` runCommit.)
 
 ## Phone grid UI (2026-08-16)
 

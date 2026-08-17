@@ -344,8 +344,12 @@ export function useSourceControlPanel(
   const [selectionTransition, setSelectionTransition] =
     useState<SelectionTransition>("none");
   const [pendingDiscard, setPendingDiscard] = useState<
-    | { scope: "single"; entry: SourceControlEntry }
-    | { scope: "all"; entries: SourceControlEntry[] }
+    | {
+        scope: "single";
+        repoRoot: string;
+        entry: SourceControlEntry;
+      }
+    | { scope: "all"; repoRoot: string; entries: SourceControlEntry[] }
     | null
   >(null);
   const [amendEnabled, setAmendEnabled] = useState(false);
@@ -717,14 +721,18 @@ export function useSourceControlPanel(
   const requestDiscardEntry = useCallback(
     (entry: SourceControlEntry) => {
       if (!repo || summary.busyAction) return;
-      setPendingDiscard({ scope: "single", entry });
+      setPendingDiscard({ scope: "single", repoRoot: repo.repoRoot, entry });
     },
     [repo, summary.busyAction],
   );
 
   const requestDiscardAll = useCallback(() => {
     if (!repo || summary.busyAction || unstagedEntries.length === 0) return;
-    setPendingDiscard({ scope: "all", entries: unstagedEntries });
+    setPendingDiscard({
+      scope: "all",
+      repoRoot: repo.repoRoot,
+      entries: unstagedEntries,
+    });
   }, [repo, summary.busyAction, unstagedEntries]);
 
   const cancelPendingDiscard = useCallback(() => {
@@ -737,6 +745,7 @@ export function useSourceControlPanel(
       pendingDiscard.scope === "single"
         ? [pendingDiscard.entry]
         : pendingDiscard.entries;
+    const discardRepoRoot = pendingDiscard.repoRoot;
     setPendingDiscard(null);
     const entries: GitDiscardEntry[] = list.map((entry) => ({
       path: entry.path,
@@ -748,8 +757,9 @@ export function useSourceControlPanel(
         ? `discard:${list[0].path}`
         : "discard:all",
       (s) => optimisticDiscard(s, paths),
-      () => native.gitDiscard(repo.repoRoot, entries),
+      () => native.gitDiscard(discardRepoRoot, entries),
       [...paths],
+      discardRepoRoot,
     );
   }, [pendingDiscard, repo, runMutation]);
 
@@ -872,6 +882,7 @@ export function useSourceControlPanel(
       if (!repo || summary.busyAction) return;
       setPendingDiscard({
         scope: "single",
+        repoRoot: entry.repoRoot || repo.repoRoot,
         entry: {
           key: `-:${entry.path}`,
           path: entry.path,
@@ -891,6 +902,13 @@ export function useSourceControlPanel(
   const runCommit = useCallback(
     async (andPush: boolean, skipChecks: boolean) => {
       if (summary.busyAction) return;
+      // Busy state goes up BEFORE the async pre-commit checks so the Commit
+      // button flips to "Committing…" on the very click, not after the check
+      // IPC round-trip (which can take a while with hooks installed).
+      const busyKey = andPush ? "commit-and-push" : "commit";
+      setLocalActionBusy(busyKey);
+      setActionMessage(null);
+      setActionError(null);
 
       const targetSha = amendEnabled ? (amendTargetSha ?? "") : "";
       const specificAmend = targetSha !== "";
@@ -912,7 +930,10 @@ export function useSourceControlPanel(
                 },
               ]
             : [];
-      if (targets.length === 0) return;
+      if (targets.length === 0) {
+        setLocalActionBusy(null);
+        return;
+      }
 
       if (!skipChecks) {
         try {
@@ -931,6 +952,9 @@ export function useSourceControlPanel(
             ),
           ];
           if (warnings.length > 0) {
+            // The confirmation dialog re-invokes runCommit with skipChecks;
+            // until then nothing is running, so release the busy state.
+            setLocalActionBusy(null);
             setPendingCommitAndPush(andPush);
             setPreCommitWarnings(warnings);
             return;
@@ -940,9 +964,6 @@ export function useSourceControlPanel(
         }
       }
 
-      setLocalActionBusy(andPush ? "commit-and-push" : "commit");
-      setActionMessage(null);
-      setActionError(null);
       setRewordTarget(null);
       const done: string[] = [];
       const failed: { name: string; error: string }[] = [];

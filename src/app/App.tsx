@@ -822,16 +822,40 @@ export default function App() {
     }
     return null;
   })();
-  const explorerActiveFilePath =
-    activeTab?.kind === "editor" || activeTab?.kind === "markdown"
-      ? activeTab.path
-      : null;
+  const explorerActiveFilePath = (() => {
+    if (activeTab?.kind === "editor" || activeTab?.kind === "markdown")
+      return activeTab.path;
+    if (activeTab?.kind === "git-diff") {
+      if (/^([A-Za-z]:|\/|\\)/.test(activeTab.path)) return activeTab.path;
+      const root = activeTab.repoRoot.replace(/[\\/]+$/, "");
+      const rel = activeTab.path.replace(/^[\\/]+/, "");
+      return `${root}/${rel}`;
+    }
+    if (activeTab?.kind === "git-commit-file") {
+      const root = activeTab.repoRoot.replace(/[\\/]+$/, "");
+      const rel = activeTab.path.replace(/^[\\/]+/, "");
+      return `${root}/${rel}`;
+    }
+    return null;
+  })();
   // Marks every open file in the tree, across spaces, not just this space's.
   const explorerOpenFilePaths = useMemo(
     () =>
       tabs
-        .filter((t) => t.kind === "editor" || t.kind === "markdown")
-        .map((t) => t.path),
+        .filter(
+          (t) =>
+            t.kind === "editor" ||
+            t.kind === "markdown" ||
+            t.kind === "git-diff" ||
+            t.kind === "git-commit-file",
+        )
+        .map((t) =>
+          t.kind === "git-diff" || t.kind === "git-commit-file"
+            ? /^([A-Za-z]:|\/|\\)/.test(t.path)
+              ? t.path
+              : `${t.repoRoot.replace(/[\\/]+$/, "")}/${t.path.replace(/^[\\/]+/, "")}`
+            : t.path,
+        ),
     [tabs],
   );
   const isRepositoryContextCurrent = useCallback(

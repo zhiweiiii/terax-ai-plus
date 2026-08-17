@@ -7,6 +7,7 @@ import {
   ComputerTerminal02Icon,
   GitCompareIcon,
   Globe02Icon,
+  HistoryIcon,
   PencilEdit02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -29,16 +30,21 @@ export function OpenFilesPanel({
 }: Props) {
   // Files belong to the current command line (terminal tab). Switching command
   // lines switches this list. Files with no owner are shown only when there is
-  // no active terminal to scope to.
+  // no active terminal to scope to. Git tabs (diff / history / commit file)
+  // are repo-level, not tied to a command line, so they always show.
+  const isGitTab = (t: Tab) =>
+    t.kind === "git-diff" ||
+    t.kind === "git-history" ||
+    t.kind === "git-commit-file";
   const fileTabs = tabs.filter(
     (t) =>
-      (t.kind === "editor" ||
+      isGitTab(t) ||
+      ((t.kind === "editor" ||
         t.kind === "markdown" ||
-        t.kind === "preview" ||
-        t.kind === "git-diff") &&
-      (currentOwnerTabId !== null
-        ? t.ownerTabId === currentOwnerTabId
-        : t.ownerTabId === undefined),
+        t.kind === "preview") &&
+        (currentOwnerTabId !== null
+          ? t.ownerTabId === currentOwnerTabId
+          : t.ownerTabId === undefined)),
   );
 
   if (fileTabs.length === 0) {
@@ -89,8 +95,10 @@ export function OpenFilesPanel({
               <img src={iconUrl} alt="" className="size-3.5 shrink-0" />
             ) : tab.kind === "preview" ? (
               <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-            ) : tab.kind === "git-diff" ? (
+            ) : tab.kind === "git-diff" || tab.kind === "git-commit-file" ? (
               <HugeiconsIcon icon={GitCompareIcon} size={14} strokeWidth={1.75} className="shrink-0" />
+            ) : tab.kind === "git-history" ? (
+              <HugeiconsIcon icon={HistoryIcon} size={14} strokeWidth={1.75} className="shrink-0" />
             ) : tab.kind === "editor" ? (
               <HugeiconsIcon icon={PencilEdit02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
             ) : (
