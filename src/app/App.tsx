@@ -337,10 +337,17 @@ export default function App() {
     [spaceTabs],
   );
 
+  // ALL terminal tabs across every group: the phone's switcher lists every
+  // group's terminals, not just the currently active group's.
+  const allTerminalTabs = useMemo(
+    () => tabs.filter((t) => t.kind === "terminal"),
+    [tabs],
+  );
+
   // Sync the desktop's command-line tabs to the web layer (phone list) and
   // react to the phone asking to activate a terminal.
   useWebTerminalSync({
-    terminalTabs: headerTabs,
+    terminalTabs: allTerminalTabs,
     activeId,
     activateTab: (id) => setActiveId(id),
   });

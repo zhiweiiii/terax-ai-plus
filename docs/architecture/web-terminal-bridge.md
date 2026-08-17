@@ -10,7 +10,7 @@ Source of truth: `src-tauri/src/modules/web/mod.rs` (server), `src/web/`
 
 ## Ports and process
 
-- Dev builds bind `17001`; packaged (release) builds bind `17002`. Selected
+- Dev builds bind `34269`; packaged (release) builds bind `34268`. Selected
   with `cfg!(debug_assertions)` so the two can run side by side.
 - The main binary is named `terax-prod` in both profiles (Cargo `[[bin]]`);
   the hot-deploy and packaging scripts reference it.
@@ -31,18 +31,16 @@ vite config (`vite.web.config.ts`) into a single self-contained HTML file:
 The desktop build flow (hot-deploy and packaging scripts) runs
 `build-web.mjs` before compiling Rust, so the embedded page is always fresh.
 
-The page renders every desktop terminal as a **window in one scrollable
-grid** — the group (space) name sits in each window's header, so there is no
-session switching at all: the list scrolls infinitely, with roughly five
-windows per screen. Each live window owns its own WebSocket connection and
-xterm.js instance (WebGL renderer); the connection cap therefore allows
-several windows per viewer. A window for a tab the desktop hasn't opened yet
-shows a "tap to activate" placeholder; tapping warms the tab through the
-list connection and the placeholder upgrades to a real terminal when the tab
-turns live. Tapping a window makes it the input target (highlighted border);
-the toolbar's Ctrl+C / Ctrl+D buttons (binary input frames, since mobile
-keyboards have no control keys) act on that window. The phone never resizes
-the shared PTY, so the desktop layout is never disturbed.
+The page is a single xterm.js terminal (WebGL renderer) attached to one
+desktop command line at a time. The ☰ button opens the **window switcher**:
+a flat, scrollable list (~5 entries tall, scrolls without limit) in which
+each group (space) label is an inline row and its terminals follow directly
+underneath — no nested switching, just one scrollable list. Tapping an entry
+attaches to that terminal; a terminal the desktop hasn't opened yet shows as
+"未打开" and tapping it warms the tab through the server's `opening` flow.
+The toolbar provides Ctrl+C / Ctrl+D buttons (binary input frames) because
+mobile keyboards have no control keys. The phone never resizes the shared
+PTY, so the desktop layout is never disturbed.
 
 ## Authentication
 
@@ -66,9 +64,8 @@ Endpoint: `/ws`. The server implements a minimal RFC 6455 server (handshake
 + frame codec, no external WS dependency). Server frames are never masked;
 client data frames must be masked per spec. Messages are capped at 1 MiB
 (frames and reassembled continuations); control frames at 125 bytes.
-Concurrent connections are capped at 24 (503 beyond that) — a phone in grid
-mode holds one connection per visible window plus one list connection. The
-server PINGs every 30 s to keep half-open connections honest.
+Concurrent connections are capped at 8 (503 beyond that). The server PINGs
+every 30 s to keep half-open connections honest.
 
 ### Client -> server
 
@@ -122,15 +119,20 @@ flusher thread in `session.rs`:
 Input from either end writes to the same `writer`, so commands typed on the
 phone echo on the desktop and vice versa. PTY size is **desktop-owned**: the
 desktop resizes the shared PTY; the phone never sends a resize frame. The
-phone instead renders at the **same grid** as the PTY — `attached` carries
-the current `cols`/`rows`, and the session list refreshes them every 5 s —
-and scales the font to fit the phone width. TUI apps (opencode, vim, htop)
-therefore lay out identically on both ends instead of wrapping at the
-wrong column. The trade-off is small text on narrow phones; a 120-column
-desktop PTY squeezes into ~40 phone columns at a correspondingly small font
-size. Each web connection subscribes with its own
-`SyncSender`; disconnect removes exactly that subscription, never the whole
-table.
+phone fits in one of two modes, switched by xterm's active buffer
+(`term.buffer.onBufferChange`):
+- **Normal buffer** (plain shell output): free fit to the phone width, so
+  long lines wrap and everything is readable on the small screen.
+- **Alternate buffer** (TUI apps: opencode, vim, htop): the terminal locks
+  its cols to the PTY's own grid (`attached` carries the PTY `cols`/`rows`)
+  so cursor positioning stays correct — the byte stream is laid out for
+  that grid and wrapping elsewhere breaks the TUI. The 120-column canvas is
+  wider than the phone, so the terminal area **scrolls horizontally**
+  (nothing is clipped): the left edge (opencode's main UI) shows by
+  default, and swiping reveals the rest. The session list refreshes the PTY
+  size on a 5 s poll.
+Each web connection subscribes with its own `SyncSender`; disconnect removes
+exactly that subscription, never the whole table.
 
 ## Tab sync (all desktop terminals visible on the phone)
 

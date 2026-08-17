@@ -234,20 +234,26 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     Residual: when the phone screen is *shorter* than the PTY, the bottom of
     the TUI is off-screen (no scrollback in alt-screen). — **accepted**.
 
+43. ~~**Phone fit mode broke either TUI layout or plain-output wrapping**~~ —
+    **fixed**
+    Locking the terminal to the PTY grid (needed for TUI cursor
+    positioning) clipped long plain-shell lines at the phone width; free
+    fitting wrapped them but broke opencode's layout. The page now switches
+    fit mode by xterm's active buffer: the **normal buffer** free-fits
+    (long lines wrap and stay readable), the **alternate buffer** locks
+    cols to the PTY grid (TUI apps lay out correctly). Nothing is clipped:
+    the terminal area scrolls horizontally so the full 120-column canvas is
+    reachable. (`src/web/main.ts` `applyFitMode` +
+    `term.buffer.onBufferChange`; `src/web/style.css` `.xterm` overflow-x.)
+
 ## Phone grid UI (2026-08-16)
 
-43. ~~**Group switching UX**~~ — **fixed by redesign**
-    The session-list sheet with attach/switch semantics is gone. The page now
-    renders every desktop terminal as a window in one scrollable grid: the
-    space (group) name is a header inside each window, ~5 windows fit per
-    screen, and the list scrolls infinitely. Each live window has its own
-    WebSocket + xterm; cold tabs show a tap-to-activate placeholder that
-    warms the tab via the list connection. Tapping a window sets it as the
-    input target; the toolbar acts on it. (`src/web/main.ts` + `style.css`;
-    `web/mod.rs` MAX_CONNECTIONS 8 → 24.)
-    Residual: each window's history replay is capped by the server ring
-    (256 KiB), so long-running windows show only recent output when the page
-    loads. — **accepted**.
+43. ~~**Window-switcher sheet: groups required nested switching**~~ — **fixed**
+    The switcher sheet is now one flat, scrollable list (~5 entries tall,
+    no scroll limit): each group (space) label renders as an inline header
+    row with its terminals directly underneath — no nested level to switch
+    through. Tapping an entry attaches to that terminal as before.
+    (`src/web/main.ts` + `style.css`.)
 
 ## Frontend (`src/web/main.ts`)
 

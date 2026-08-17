@@ -1,5 +1,5 @@
 //! Web terminal bridge: exposes the running PTY sessions over HTTP + WebSocket
-//! on port 17001 (dev) / 17002 (release) so a phone / other machine can watch
+//! on port 34269 (dev) / 34268 (release) so a phone / other machine can watch
 //! or drive the command lines from a plain browser page.
 //!
 //!   GET /     → embedded mobile page (single-file HTML, served as-is)
@@ -41,9 +41,9 @@ use sha1::{Digest, Sha1};
 use crate::modules::pty::{PtyState, Session, WebMsg};
 use tauri::Manager;
 
-// Dev builds listen on 17001, packaged (release) builds on 17002 — so the two
+// Dev builds listen on 34269, packaged (release) builds on 34268 — so the two
 // can run side by side without clashing, and the phone can pick the right one.
-const PORT: u16 = if cfg!(debug_assertions) { 17001 } else { 17002 };
+const PORT: u16 = if cfg!(debug_assertions) { 34269 } else { 34268 };
 const BIND_ADDR: &str = "0.0.0.0";
 
 // The mobile page is embedded at build time by scripts/build-web.mjs.
@@ -59,13 +59,16 @@ const WEB_TOKEN: &str = "terax7hzwyes123token";
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// True while the accept loop is actually listening (set after a successful
+/// bind, cleared when the loop exits / stop() runs). Drives the desktop's
+/// "remote service" indicator.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
 /// Live WebSocket connections; /ws is rejected once MAX_CONNECTIONS is hit so
-/// a runaway client can't pile up unbounded threads. A phone in grid mode
-/// keeps one connection per visible terminal window, so this must allow a
-/// handful of windows, not just one viewer.
+/// a runaway client can't pile up unbounded threads.
 static CONNECTIONS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-const MAX_CONNECTIONS: usize = 24;
+const MAX_CONNECTIONS: usize = 8;
 
 /// Failed login attempts since boot (rate limit: >=5 consecutive fails = 5s
 /// delay before the next attempt is even evaluated).
@@ -75,11 +78,12 @@ static FAILED_LOGINS: std::sync::atomic::AtomicUsize =
 static LAST_FAIL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
-/// Start the web terminal server on 0.0.0.0:17001 (dev) / 17002 (release).
+/// Start the web terminal server on 0.0.0.0:34269 (dev) / 34268 (release).
 /// Returns an error only if the port cannot be bound; the accept loop runs on
 /// its own thread.
 pub fn start(app: tauri::AppHandle) -> Result<(), String> {
     SHUTDOWN.store(false, Ordering::Release);
+    RUNNING.store(false, Ordering::Release);
     // Make sure the page always has at least one terminal to attach to, even
     // before the desktop opens any tab.
     if let Some(state) = app.try_state::<PtyState>() {
@@ -89,6 +93,7 @@ pub fn start(app: tauri::AppHandle) -> Result<(), String> {
         format!("web terminal: failed to bind {BIND_ADDR}:{PORT}: {e}")
     })?;
     log::info!("web terminal server listening on http://{BIND_ADDR}:{PORT}");
+    RUNNING.store(true, Ordering::Release);
     thread::Builder::new()
         .name("terax-web-accept".into())
         .spawn(move || {
@@ -117,6 +122,29 @@ pub fn start(app: tauri::AppHandle) -> Result<(), String> {
 
 pub fn stop() {
     SHUTDOWN.store(true, Ordering::Release);
+    RUNNING.store(false, Ordering::Release);
+}
+
+/// Snapshot of the web terminal server for the desktop status bar.
+#[derive(serde::Serialize)]
+pub struct WebStatus {
+    /// Whether the accept loop is listening (bound + not stopped).
+    running: bool,
+    /// Live WebSocket viewer connections right now.
+    connections: usize,
+    /// Consecutive failed logins since boot (drives the 5s lockout).
+    failed_logins: usize,
+}
+
+/// Tauri command: report the remote service's connection count and whether it
+/// is up. Polled by the desktop status bar indicator.
+#[tauri::command]
+pub fn web_status() -> WebStatus {
+    WebStatus {
+        running: RUNNING.load(Ordering::Acquire),
+        connections: CONNECTIONS.load(Ordering::Acquire),
+        failed_logins: FAILED_LOGINS.load(Ordering::Acquire),
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -612,7 +640,7 @@ fn serve_login(mut stream: TcpStream) {
 </head>
 <body>
   <div class="card">
-    <h1>Terax Terminal</h1>
+    <h1>请输入密码</h1>
     <input id="pwd" type="password" placeholder="访问密码" autofocus />
     <button onclick="login()">进入</button>
     <div class="err" id="err"></div>
@@ -852,6 +880,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
 
 fn send_sessions(conn: &mut WsConn, state: &PtyState) {
     let tabs = state.web_tabs();
+    let spaces = state.web_spaces();
     let msg = json!({
         "type": "sessions",
         "sessions": tabs.iter().map(|t| json!({
@@ -864,6 +893,8 @@ fn send_sessions(conn: &mut WsConn, state: &PtyState) {
             "cols": t.pty_id.and_then(|id| state.web_get(id)).map(|s| state.web_session_size(&s).0),
             "rows": t.pty_id.and_then(|id| state.web_get(id)).map(|s| state.web_session_size(&s).1),
         })).collect::<Vec<_>>(),
+        // Every group, including empty ones, so the switcher can show all.
+        "spaces": spaces.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
     });
     let _ = send_text(conn, &msg.to_string());
 }

@@ -32,6 +32,14 @@ pub struct WebTab {
     pub space_id: Option<String>,
 }
 
+/// A desktop group (space) synced to the web layer, so the phone's switcher
+/// can show every group, including empty ones.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct WebSpace {
+    pub id: String,
+    pub name: String,
+}
+
 pub struct PtyState {
     sessions: RwLock<HashMap<u32, Arc<Session>>>,
     // Starts at 1 so freshly-handed-out ids are never 0, which the frontend
@@ -39,6 +47,8 @@ pub struct PtyState {
     next_id: AtomicU32,
     /// Desktop terminal tabs advertised to the web page (leaf → metadata).
     web_tabs: Mutex<Vec<WebTab>>,
+    /// All groups (spaces), including empty ones, for the phone's switcher.
+    web_spaces: Mutex<Vec<(String, String)>>,
 }
 
 impl Default for PtyState {
@@ -47,6 +57,7 @@ impl Default for PtyState {
             sessions: RwLock::new(HashMap::new()),
             next_id: AtomicU32::new(1),
             web_tabs: Mutex::new(Vec::new()),
+            web_spaces: Mutex::new(Vec::new()),
         }
     }
 }
@@ -79,6 +90,18 @@ impl PtyState {
     pub fn web_sync_tabs(&self, tabs: Vec<WebTab>) {
         let mut list = self.web_tabs.lock().unwrap();
         *list = tabs;
+    }
+
+    /// Update the group (space) list advertised to the web page. Includes
+    /// empty groups so the phone's switcher shows every group.
+    pub fn web_sync_spaces(&self, spaces: Vec<WebSpace>) {
+        let mut list = self.web_spaces.lock().unwrap();
+        *list = spaces.into_iter().map(|s| (s.id, s.name)).collect();
+    }
+
+    /// Groups (spaces) for the web page's switcher, in desktop order.
+    pub fn web_spaces(&self) -> Vec<(String, String)> {
+        self.web_spaces.lock().unwrap().clone()
     }
 
     /// Record that a leaf's pty session now exists under `pty_id`.
@@ -478,6 +501,13 @@ pub fn pty_list_shells() -> Vec<shell_init::ShellInfo> {
 #[tauri::command]
 pub fn web_sync_tabs(state: tauri::State<PtyState>, tabs: Vec<WebTab>) {
     state.web_sync_tabs(tabs);
+}
+
+/// Frontend syncs its groups (spaces) here — including empty ones — so the
+/// phone's switcher lists every group, not only those with terminals.
+#[tauri::command]
+pub fn web_sync_spaces(state: tauri::State<PtyState>, spaces: Vec<WebSpace>) {
+    state.web_sync_spaces(spaces);
 }
 
 /// Frontend tells us a leaf's pty session id once it has been opened.

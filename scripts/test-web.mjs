@@ -11,7 +11,7 @@ page.on("websocket", (ws) => {
   ws.on("framereceived", (e) => logs.push(`[ws<-] ${String(e.payload).slice(0, 80)}`));
 });
 
-await page.goto("http://127.0.0.1:17001/", { waitUntil: "load", timeout: 10000 });
+await page.goto("http://127.0.0.1:34269/", { waitUntil: "load", timeout: 10000 });
 await page.waitForTimeout(3000);
 
 const state = await page.evaluate(() => {

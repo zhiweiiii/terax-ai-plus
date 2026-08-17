@@ -4,7 +4,7 @@
   --muted: #8b949e;
   --accent: #58a6ff;
   --border: #21262d;
-  --panel: #161b22;
+  --sheet-bg: #161b22;
 }
 
 * {
@@ -43,11 +43,9 @@ body {
   gap: 8px;
   padding: 8px 12px;
   padding-top: calc(8px + env(safe-area-inset-top));
-  background: var(--panel);
+  background: var(--sheet-bg);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  position: relative;
-  z-index: 2;
 }
 
 #title {
@@ -70,113 +68,72 @@ body {
   color: #d29922;
 }
 
-/* ── Window grid (scrollable) ────────────────────────────────────────── */
-.grid {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-/* Each window is ~1/5 of the viewport, so about five windows fit per
-   screen; the grid scrolls infinitely for more. */
-.win {
-  flex-shrink: 0;
-  height: calc((100dvh - 118px) / 5);
-  min-height: 120px;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
-  background: #0b0e14;
-}
-
-.win.active {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.35);
-}
-
-.win.exited {
-  opacity: 0.7;
-}
-
-.win-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  min-width: 0;
-}
-
-.win-space {
-  font-size: 10px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 4px;
-  padding: 1px 6px;
-  flex-shrink: 0;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.win-name {
-  flex: 1;
-  font-size: 12px;
-  font-family: ui-monospace, Consolas, monospace;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.win-badge {
-  flex-shrink: 0;
-  font-size: 10px;
-  color: var(--muted);
-}
-
-.win.active .win-badge::before {
-  content: "输入中";
-  color: var(--accent);
-}
-
-.win-term {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-}
-
-.win-term .xterm {
-  height: 100%;
-  padding: 0 4px;
-}
-
-.win-term .xterm .xterm-rows {
-  font-variant-ligatures: none;
-}
-
-/* Cold (not yet opened) placeholder windows */
-.win.cold .win-term {
+.icon-btn {
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
 }
+.icon-btn:active {
+  background: rgba(255, 255, 255, 0.08);
+}
 
-.cold-hint {
-  color: var(--muted);
+/* ── Terminal ────────────────────────────────────────────────────────── */
+.terminal-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: 6px;
+  overflow: hidden;
+}
+.terminal-wrap .xterm {
+  height: 100%;
+  /* TUI mode locks cols to the PTY grid (e.g. 120); the canvas is wider
+     than the phone, so allow horizontal scrolling instead of clipping the
+     right side. Normal mode fits the container width and never overflows. */
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+}
+/* Tighter cell metrics help TUI apps (opencode/vim) keep rows aligned on
+   phones; xterm computes cell size from the font, these only ensure the
+   wrapper doesn't squeeze it. */
+.terminal-wrap .xterm .xterm-rows {
+  font-variant-ligatures: none;
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom));
+  background: var(--sheet-bg);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.tool-btn {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--fg);
   font-size: 12px;
-  text-align: center;
-  padding: 12px;
+  font-family: ui-monospace, Consolas, monospace;
+  padding: 6px 14px;
+  border-radius: 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tool-btn:active {
+  background: rgba(88, 166, 255, 0.2);
+  border-color: var(--accent);
 }
 
 /* ── Empty state ──────────────────────────────────────────────────────── */
@@ -203,35 +160,85 @@ body {
   padding: 0 32px;
 }
 
-/* ── Toolbar ─────────────────────────────────────────────────────────── */
-.toolbar {
+/* ── Session sheet: flat, scrollable window list ─────────────────────── */
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: rgba(1, 4, 9, 0.6);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--sheet-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The list fills most of the screen so every group is reachable by
+   scrolling: groups and their terminals sit in one flat list, the group
+   label being an inline row. */
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 calc(8px + env(safe-area-inset-bottom));
+  max-height: 80dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  background: var(--sheet-bg);
+}
+
+/* Group label: a flat header row inside the list, not a switch target. */
+.session-group {
+  padding: 8px 16px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--sheet-bg);
+  position: sticky;
+  top: 0;
+}
+
+.session-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  padding-bottom: calc(6px + env(safe-area-inset-bottom));
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  position: relative;
-  z-index: 2;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
 }
-.tool-btn {
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--fg);
-  font-size: 12px;
+.session-item:active {
+  background: rgba(88, 166, 255, 0.12);
+}
+.session-item.active {
+  background: rgba(88, 166, 255, 0.15);
+}
+.session-name {
+  flex: 1;
+  font-size: 13px;
   font-family: ui-monospace, Consolas, monospace;
-  padding: 6px 14px;
-  border-radius: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+.session-viewers {
+  font-size: 11px;
+  color: var(--muted);
   flex-shrink: 0;
 }
-.tool-btn:active {
-  background: rgba(88, 166, 255, 0.2);
-  border-color: var(--accent);
+.session-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 /* ── Toast ───────────────────────────────────────────────────────────── */

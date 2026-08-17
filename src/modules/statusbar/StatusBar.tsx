@@ -9,6 +9,7 @@ import { IncognitoIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { DiagnosticsBadge } from "./DiagnosticsBadge";
+import { WebStatusBadge } from "./WebStatusBadge";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
 
 type Props = {
@@ -52,6 +53,7 @@ export function StatusBar({
           </Tooltip>
         ) : null}
       </div>
+      <WebStatusBadge />
     </footer>
   );
 }

@@ -46,7 +46,7 @@ Terax is a lightweight open-source terminal-first development environment built 
 - Drag files from the explorer or desktop into a terminal as shell-safe quoted paths
 - Per-tab workspace environments (Local, or any installed WSL distro)
 - Spaces restore tabs, working directories, and split layouts across launches
-- **Web terminal bridge**: every desktop command line is reachable from a phone browser on `http://<ip>:17001` (dev) / `17002` (release), password-gated, content-synced both ways
+- **Web terminal bridge**: every desktop command line is reachable from a phone browser on `http://<ip>:34269` (dev) / `34268` (release), password-gated, content-synced both ways
 
 ### Code editor
 
@@ -100,8 +100,8 @@ Latest installers are on the [Releases](https://github.com/crynta/terax-ai/relea
 **Run**
 ```bash
 pnpm install
-pnpm tauri dev          # development (web bridge on port 17001)
-pnpm tauri build        # production bundle (web bridge on port 17002)
+pnpm tauri dev          # development (web bridge on port 34269)
+pnpm tauri build        # production bundle (web bridge on port 34268)
 ```
 
 **Checks**

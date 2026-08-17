@@ -14,6 +14,11 @@ type WebTab = {
   space_id: string | null;
 };
 
+type WebSpace = {
+  id: string;
+  name: string;
+};
+
 type Params = {
   /** All terminal tabs, in the desktop's tab order. */
   terminalTabs: Tab[];
@@ -55,6 +60,18 @@ export function useWebTerminalSync({
     }
     void invoke("web_sync_tabs", { tabs }).catch((e) => {
       console.warn("web_sync_tabs failed:", e);
+    });
+
+    // Sync ALL groups (spaces), including empty ones, so the phone's
+    // switcher shows every group — not just the ones that currently hold
+    // terminals. Kept in the same effect so any tab change also refreshes
+    // the group list (and a page reload always syncs both).
+    const webSpaces: WebSpace[] = spaces.map((sp) => ({
+      id: sp.id,
+      name: sp.name,
+    }));
+    void invoke("web_sync_spaces", { spaces: webSpaces }).catch((e) => {
+      console.warn("web_sync_spaces failed:", e);
     });
   }, [terminalTabs, activeId, spaces]);
 

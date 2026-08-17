@@ -1,12 +1,12 @@
 // Debug the WS handshake: print raw response headers.
 // Usage: node scripts/debug-ws.mjs [port] [cookie]
-//   port   - dev 17001 (default), release 17002
+//   port   - dev 34269 (default), release 34268
 //   cookie - optional raw Cookie header value; without it the server
 //            returns 403 (auth required).
 const key = "dGhlIHNhbXBsZSBub25jZQ==";
 const net = await import("node:net");
 
-const port = Number(process.argv[2] ?? 17001);
+const port = Number(process.argv[2] ?? 34269);
 const cookie = process.argv[3] ?? "";
 const sock = net.connect(port, "127.0.0.1");
 sock.on("connect", () => {

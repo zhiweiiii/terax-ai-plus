@@ -236,6 +236,12 @@ export type GitMergeOptions = {
 
 export type ResetMode = "soft" | "mixed" | "hard";
 
+export type WebStatus = {
+  running: boolean;
+  connections: number;
+  failed_logins: number;
+};
+
 export const native = {
   workspaceCurrentDir: () => invoke<string>("workspace_current_dir"),
   workspaceAuthorize: (path: string) =>
@@ -698,4 +704,5 @@ export const native = {
       sha,
       workspace: currentWorkspaceEnv(),
     }),
+  webStatus: () => invoke<WebStatus>("web_status"),
 };
