@@ -25,6 +25,7 @@ If a guide conflicts with `TERAX.md`, `TERAX.md` wins.
 - [Two-process model and IPC command reference](architecture/two-process-model.md) - Rust owns all OS access; the webview talks through `invoke()`. Command catalog and how to add a new command.
 - [PTY shell integration](architecture/pty-shell-integration.md) - PTY sessions, shell init scripts, OSC 7 / 133, ConPTY, CONPTY_LIFECYCLE_LOCK, Job Object, WSL.
 - [Web terminal bridge](architecture/web-terminal-bridge.md) - embedded HTTP + WebSocket server that shares desktop PTY sessions with a phone browser; auth, protocol, build pipeline.
+- [Mobile conversation view](architecture/mobile-conversation-view.md) - the phone renders a conversation, not a terminal: headless-xterm parsing, alt-screen scroll detection, bubble classification, backlog replay.
 - [Security model](architecture/security-model.md) - workspace authorization, IPC allowlist, OSC trust, and the web terminal auth boundary.
 - [Terminal renderer pool](architecture/terminal-renderer-pool.md) - slot pooling, the DormantRing, and the never-serialize-mid-command invariant.
 - [CLI control plane](architecture/cli-control.md) - bundled CLI, authenticated local protocol, caller targeting, packaging, and current platform limits.

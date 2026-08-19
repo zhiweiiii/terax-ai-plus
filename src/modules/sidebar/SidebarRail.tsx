@@ -5,7 +5,7 @@ import {
   FolderTreeIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type SidebarRailTab, type SidebarViewId } from "./types";
+import type { SidebarRailTab, SidebarViewId } from "./types";
 
 export const SIDEBAR_RAIL_WIDTH = 48;
 

@@ -57,7 +57,8 @@
         "useAriaPropsSupportedByRole": "warn",
         "noSvgWithoutTitle": "warn",
         "noNoninteractiveTabindex": "warn",
-        "noLabelWithoutControl": "warn"
+        "noLabelWithoutControl": "warn",
+        "noAutofocus": "warn"
       },
       "suspicious": {
         "noControlCharactersInRegex": "off",

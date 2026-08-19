@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import { useAppEvent } from "@/modules/events";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { listenFsChanged, watchAdd, watchRemove } from "./watch";
+import { watchAdd, watchRemove } from "./watch";
 
 export type DirEntry = {
   name: string;
@@ -224,27 +225,16 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     };
   }, [rootPath, fetchChildren]);
 
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    void listenFsChanged((paths) => {
-      const current = nodesRef.current;
-      const dirs = new Set<string>();
-      for (const p of paths) {
-        const parent = dirname(p);
-        if (current[parent]?.status === "loaded") dirs.add(parent);
-        if (current[p]?.status === "loaded") dirs.add(p);
-      }
-      for (const d of dirs) void fetchChildren(d);
-    }).then((un) => {
-      if (alive) unlisten = un;
-      else un();
-    });
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, [fetchChildren]);
+  useAppEvent("fs:changed", (payload) => {
+    const current = nodesRef.current;
+    const dirs = new Set<string>();
+    for (const p of payload.paths) {
+      const parent = dirname(p);
+      if (current[parent]?.status === "loaded") dirs.add(parent);
+      if (current[p]?.status === "loaded") dirs.add(p);
+    }
+    for (const d of dirs) void fetchChildren(d);
+  });
 
   useEffect(() => {
     if (!rootPath) return;

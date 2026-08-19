@@ -11,7 +11,15 @@ export type PtyHandlers = {
 export type PtySession = {
   id: number;
   write: (data: string) => Promise<void>;
-  resize: (cols: number, rows: number) => Promise<void>;
+  /**
+   * Ask for a grid. Resolves with the grid the PTY actually ended up at,
+   * which differs from the request while the phone owns the session (see
+   * SizeOwner in the Rust pty module): ownership only moves after a cooldown,
+   * so the desktop has to render at the owner's grid until it takes over.
+   */
+  resize: (cols: number, rows: number) => Promise<{ cols: number; rows: number }>;
+  /** Force a repaint (SIGWINCH) without changing the grid. */
+  kick: (cols: number, rows: number) => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -62,7 +70,11 @@ export async function openPty(
     id,
     // Raw bytes + id header: no JSON round-trip on the per-keystroke path.
     write: (data) => invoke("pty_write", textEncoder.encode(data), { headers }),
-    resize: (c, r) => invoke("pty_resize", { id, cols: c, rows: r }),
+    resize: (c, r) =>
+      invoke<[number, number]>("pty_resize", { id, cols: c, rows: r }).then(
+        ([cols, rows]) => ({ cols, rows }),
+      ),
+    kick: (c, r) => invoke("pty_kick", { id, cols: c, rows: r }),
     close: async () => {
       if (closed) return;
       closed = true;

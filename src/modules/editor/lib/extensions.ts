@@ -3,7 +3,7 @@ import { indentUnit } from "@codemirror/language";
 import { lintGutter } from "@codemirror/lint";
 import { search } from "@codemirror/search";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { chromeTheme } from "./chromeTheme";
 
 // Compartments allow runtime reconfiguration without rebuilding state.
@@ -28,10 +28,33 @@ export const DEFAULT_INDENT: Extension = indentExtension("  ");
 // bracketMatching, closeBrackets, autocompletion, highlightActiveLine,
 // highlightSelectionMatches and the search keymap.
 // Singleton: per-pane instances would inject duplicate style modules.
+
+/** Flag the editor while text is selected, so the theme can drop the active
+ *  line's tint (see the `cm-selecting` rule in the theme below). */
+const selectionClass = ViewPlugin.fromClass(
+  class {
+    constructor(readonly view: EditorView) {
+      view.dom.classList.toggle(
+        "cm-selecting",
+        !view.state.selection.main.empty,
+      );
+    }
+    update(u: ViewUpdate) {
+      if (u.selectionSet || u.docChanged) {
+        u.view.dom.classList.toggle(
+          "cm-selecting",
+          !u.view.state.selection.main.empty,
+        );
+      }
+    }
+  },
+);
+
 const SHARED_EXTENSIONS: readonly Extension[] = Object.freeze([
   search({ top: true }),
   lintGutter(),
   chromeTheme(),
+  selectionClass,
   EditorView.theme({
     "&, &.cm-editor, &.cm-editor.cm-focused": {
       backgroundColor: "transparent !important",
@@ -69,6 +92,13 @@ const SHARED_EXTENSIONS: readonly Extension[] = Object.freeze([
       borderTopRightRadius: "5px",
       borderBottomRightRadius: "5px",
       backgroundColor: "color-mix(in srgb, var(--foreground) 4%, transparent)",
+    },
+    // While text is selected, drop the cursor row's tint: it is the same hue
+    // as the selection at a close opacity, so a selection that starts on the
+    // active line was indistinguishable from the row highlight. With the row
+    // plain, the selection stands alone and reads as selected.
+    "&.cm-selecting .cm-activeLine": {
+      backgroundColor: "transparent",
     },
     ".cm-lineNumbers .cm-activeLineGutter": {
       borderTopLeftRadius: "5px",

@@ -1,11 +1,6 @@
-import {
-  listenFsChanged,
-  parentDir,
-  watchAdd,
-  watchRemove,
-} from "@/modules/explorer/lib/watch";
+import { parentDir, watchAdd, watchRemove } from "@/modules/explorer/lib/watch";
+import { useAppEvent } from "@/modules/events";
 import type { Tab } from "@/modules/tabs";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type RefObject, useEffect, useRef } from "react";
 import type { EditorPaneHandle } from "./EditorPane";
 
@@ -25,27 +20,17 @@ type Params = {
  * of open editor files.
  */
 export function useEditorFileSync({ tabs, tabsRef, editorRefs }: Params) {
-  useEffect(() => {
-    type FileWrittenPayload = { path: string; source?: string };
-    const unlistenPromise =
-      getCurrentWebviewWindow().listen<FileWrittenPayload>(
-        "fs:file-written",
-        (event) => {
-          if (event.payload.source === "editor") return;
-          const normalizedPath = event.payload.path.replace(/\\/g, "/");
-          const currentTabs = tabsRef.current;
-          for (const t of currentTabs) {
-            if (t.kind !== "editor") continue;
-            if (t.path.replace(/\\/g, "/") === normalizedPath) {
-              editorRefs.current.get(t.id)?.reload();
-            }
-          }
-        },
-      );
-    return () => {
-      void unlistenPromise.then((un) => un());
-    };
-  }, [tabsRef, editorRefs]);
+  useAppEvent("fs:written", (payload) => {
+    if (payload.source === "editor") return;
+    const normalizedPath = payload.path.replace(/\\/g, "/");
+    const currentTabs = tabsRef.current;
+    for (const t of currentTabs) {
+      if (t.kind !== "editor") continue;
+      if (t.path.replace(/\\/g, "/") === normalizedPath) {
+        editorRefs.current.get(t.id)?.reload();
+      }
+    }
+  });
 
   const editorWatchRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -59,26 +44,15 @@ export function useEditorFileSync({ tabs, tabsRef, editorRefs }: Params) {
     editorWatchRef.current = want;
   }, [tabs]);
 
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | undefined;
-    void listenFsChanged((paths) => {
-      const changed = new Set(paths.map((p) => p.replace(/\\/g, "/")));
-      for (const t of tabsRef.current) {
-        if (t.kind !== "editor") continue;
-        if (changed.has(t.path.replace(/\\/g, "/"))) {
-          editorRefs.current.get(t.id)?.reload();
-        }
+  useAppEvent("fs:changed", (payload) => {
+    const changed = new Set(payload.paths.map((p) => p.replace(/\\/g, "/")));
+    for (const t of tabsRef.current) {
+      if (t.kind !== "editor") continue;
+      if (changed.has(t.path.replace(/\\/g, "/"))) {
+        editorRefs.current.get(t.id)?.reload();
       }
-    }).then((un) => {
-      if (alive) unlisten = un;
-      else un();
-    });
-    return () => {
-      alive = false;
-      unlisten?.();
-    };
-  }, [tabsRef, editorRefs]);
+    }
+  });
 
   // Backstop for edits the watch above never reports. It misses whenever
   // fs_watch_add was refused (the directory is outside every authorized

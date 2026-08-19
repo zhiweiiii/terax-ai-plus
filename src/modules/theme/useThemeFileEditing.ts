@@ -1,6 +1,7 @@
 import { type RefObject, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { useAppEvent } from "@/modules/events";
 import { setThemeId as persistThemeId } from "@/modules/settings/store";
 import type { Tab } from "@/modules/tabs";
 import { currentWorkspaceEnv } from "@/modules/workspace";
@@ -25,38 +26,27 @@ type Params = {
  * channel opens (or creates) the theme file for editing.
  */
 export function useThemeFileEditing({ tabsRef, openFileTab }: Params) {
-  useEffect(() => {
-    type FileWrittenPayload = { path: string; source?: string };
-    const unlistenPromise =
-      getCurrentWebviewWindow().listen<FileWrittenPayload>(
-        "fs:file-written",
-        (event) => {
-          if (event.payload.source !== "editor") return;
-          if (!isThemeFilePath(event.payload.path)) return;
-          void (async () => {
-            try {
-              const res = await invoke<{ kind: string; content?: string }>(
-                "fs_read_file",
-                { path: event.payload.path, workspace: currentWorkspaceEnv() },
-              );
-              if (res.kind !== "text" || typeof res.content !== "string")
-                return;
-              const parsed = parseThemeFile(res.content);
-              if (!parsed.ok) {
-                console.warn("[terax] theme not applied:", parsed.error);
-                return;
-              }
-              await saveCustomTheme(parsed.theme);
-            } catch (e) {
-              console.warn("[terax] theme ingest failed:", e);
-            }
-          })();
-        },
-      );
-    return () => {
-      void unlistenPromise.then((un) => un());
-    };
-  }, []);
+  useAppEvent("fs:written", (payload) => {
+    if (payload.source !== "editor") return;
+    if (!isThemeFilePath(payload.path)) return;
+    void (async () => {
+      try {
+        const res = await invoke<{ kind: string; content?: string }>(
+          "fs_read_file",
+          { path: payload.path, workspace: currentWorkspaceEnv() },
+        );
+        if (res.kind !== "text" || typeof res.content !== "string") return;
+        const parsed = parseThemeFile(res.content);
+        if (!parsed.ok) {
+          console.warn("[terax] theme not applied:", parsed.error);
+          return;
+        }
+        await saveCustomTheme(parsed.theme);
+      } catch (e) {
+        console.warn("[terax] theme ingest failed:", e);
+      }
+    })();
+  });
 
   useEffect(() => {
     let alive = true;

@@ -31,16 +31,32 @@ vite config (`vite.web.config.ts`) into a single self-contained HTML file:
 The desktop build flow (hot-deploy and packaging scripts) runs
 `build-web.mjs` before compiling Rust, so the embedded page is always fresh.
 
-The page is a single xterm.js terminal (WebGL renderer) attached to one
-desktop command line at a time. The ☰ button opens the **window switcher**:
+`热部署.ps1` frees the dev ports before starting: **1420** (vite dev server —
+`strictPort: true`, so an orphaned server makes startup fail outright with
+"Port 1420 is already in use"), **1421** (vite HMR) and **34269** (this
+server). It deliberately does **not** touch **34268**, and skips any port held
+by `target/release/terax-prod.exe`, so a running packaged app is never killed
+by a dev restart. The orphan is usually a bare `node` process, which the
+script's existing "kill `terax-prod` under `target/debug`" step cannot reach.
+
+The page is a **conversation view**, not a terminal — see
+[Mobile conversation view](mobile-conversation-view.md) for how the PTY byte
+stream is turned into bubbles. It attaches to one desktop command line at a
+time. xterm.js is still a dependency, but only as a headless ANSI parser; no
+renderer (WebGL or DOM) is loaded.
+
+The composer at the bottom sends text plus `\r` to the attached PTY — a shell,
+an agent, a REPL, whatever is on the other end — with a key row for Ctrl+C /
+Ctrl+D / Esc / Tab / arrows / Enter, which soft keyboards lack.
+
+The ☰ button opens the **window switcher**:
 a flat, scrollable list (~5 entries tall, scrolls without limit) in which
 each group (space) label is an inline row and its terminals follow directly
 underneath — no nested switching, just one scrollable list. Tapping an entry
 attaches to that terminal; a terminal the desktop hasn't opened yet shows as
 "未打开" and tapping it warms the tab through the server's `opening` flow.
-The toolbar provides Ctrl+C / Ctrl+D buttons (binary input frames) because
-mobile keyboards have no control keys. The phone never resizes the shared
-PTY, so the desktop layout is never disturbed.
+The phone never resizes the shared PTY, so the desktop layout is never
+disturbed by being watched.
 
 ## Authentication
 
@@ -88,16 +104,18 @@ every 30 s to keep half-open connections honest.
 
 First message is a text frame:
 
-- `{"attach": <leafId>}` - attach to a desktop terminal by its leaf id (not
-  the pty id; the server resolves the mapping). No resize is sent: the
-  desktop owns the canonical PTY size.
+- `{"attach": <leafId>, "cols": C, "rows": R}` - attach to a desktop terminal
+  by its leaf id (not the pty id; the server resolves the mapping). `cols` /
+  `rows` are the phone's *preference*, recorded as its grid and applied when
+  it starts typing (see the grid-ownership note below); watching alone never
+  moves the PTY.
 - `{"list": true}` - request the session list.
 
 Later messages:
 
-- Binary `'0' + bytes` - write input to the attached session.
-- Binary `'1' + JSON{"cols","rows"}` - resize the shared PTY (kept for
-  protocol completeness; the current page never sends it).
+- Binary `'0' + bytes` - write input to the attached session. The first
+  write claims the session and applies the phone's preferred grid.
+- Binary `'1' + JSON{"cols","rows"}` - resize the shared PTY.
 - Text `{"attach": <leafId>}` - switch sessions.
 
 ### Server -> client
@@ -111,9 +129,12 @@ Later messages:
 - Binary `'1' + bytes` - window title (UTF-8). Not implemented yet.
 - Text `{"type":"sessions","sessions":[...]}` - each entry carries
   `id` (leaf), `cwd`, `title`, `active`, `live`, `space`.
-- Text `{"type":"attached","id":N,"cols":C,"rows":R}` - attach confirmed,
-  including the PTY's current grid size (desktop-owned) so the page renders
-  at the same cols/rows and TUI apps don't wrap wrong.
+- Text `{"type":"attached","id":N,"cols":C,"rows":R,"alt":bool}` - attach
+  confirmed, carrying the PTY's *current* grid (the owner's, not necessarily
+  the phone's preference) and whether the alternate screen is active, so the
+  page parses the coming history replay at the right size and buffer mode.
+- Text `{"type":"resized","cols":C,"rows":R}` - the shared grid changed (a
+  claim or a resize); every viewer re-sizes its parser.
 - Text `{"type":"opening","id":N}` - the desktop is spawning this tab; the
   page should re-list shortly (up to 3 retries, then it reports failure).
 - Text `{"type":"exit","id":N,"code":C}` - the session exited; the page
@@ -134,21 +155,33 @@ flusher thread in `session.rs`:
    the PTY; an evicted viewer is told and reconnects).
 
 Input from either end writes to the same `writer`, so commands typed on the
-phone echo on the desktop and vice versa. PTY size is **desktop-owned**: the
-desktop resizes the shared PTY; the phone never sends a resize frame. The
-phone renders at **exactly the PTY's grid** (`attached` carries the PTY
-`cols`/`rows`, refreshed on a 5 s poll) in both the normal and alternate
-buffers. This is not a choice: the byte stream is laid out against the
-desktop's grid — apps wrap long lines at the desktop width, do `\r` in-place
-redraws (progress bars, spinners, prompts), and address cells with absolute
-cursor sequences. Any re-wrap (free-fitting to the phone width) changes the
-physical line breaks, so `\r` returns to the middle of the logical line and
-cursor moves land wrong. Wide grids overflow the container horizontally (the
-terminal area scrolls, nothing is clipped); tall grids overflow vertically
-(the normal buffer scrolls; the alt screen clips the bottom — accepted
-trade-off). The server sends the `attached` size **before** the history replay
-so the phone sizes its xterm first; replaying desktop-grid bytes at a
-free-fitted width is what used to garble every wrapped line.
+phone echo on the desktop and vice versa.
+
+One session has one grid, and **whoever is typing owns it** (`SizeOwner`,
+`claim`, `request_grid` in the pty module, with a 3 s `OWNER_COOLDOWN`).
+Attaching records the phone's preferred grid but watching alone never moves
+the PTY; the phone's first keystroke claims the session and applies that grid,
+repainting the TUI. The desktop reclaims only on real keystrokes — xterm's
+protocol answers (focus reports `ESC[I/O`, OSC 4 palette replies to the TUI's
+palette query) are forwarded to the PTY but deliberately skip the claim
+(`looks_like_protocol_response` in `pty_write`), so a watched session no longer
+ping-pongs between the two ends' sizes after every claim. The byte stream is
+laid out against the *owner's* grid — apps wrap long lines at that width, do
+`\r` in-place redraws (progress bars, spinners, prompts), and address cells
+with absolute cursor sequences — so it can only be parsed at that grid. The
+phone therefore *parses* at exactly the PTY's current `cols`/`rows` (`attached`
+carries them, and `resized` follows every change) but does not *render* a grid
+at all: it extracts logical lines and re-wraps them at the phone's width. See
+[Mobile conversation view](mobile-conversation-view.md). The server sends the
+`attached` size **before** the history replay so the parser is sized first;
+replaying bytes at the wrong width garbles every wrapped line.
+
+The history ring is trimmed by `trim_history`, which drops the requested byte
+count and then keeps dropping to the next ESC (falling back to the next
+newline). Trimming on a raw byte count alone lands inside a CSI sequence, and a
+reconnecting viewer that starts there renders the remainder as literal text —
+that is how a phone came to show `48;2;10;10;10m` instead of a conversation.
+
 Each web connection subscribes with its own `SyncSender`; disconnect removes
 exactly that subscription, never the whole table.
 

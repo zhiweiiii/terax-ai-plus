@@ -3,6 +3,7 @@ import {
   type GitStatusSnapshot,
   native,
 } from "@/lib/native";
+import { invalidateRepoDiffs } from "@/modules/editor/lib/diffCache";
 import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -338,6 +339,11 @@ export function useSourceControl(
           ? activeRoot
           : null);
 
+      // Guarded: a request that has since been superseded must not set the
+      // loading flag, or a rapid project switch could leave the panel on
+      // "loading" forever (the stale request bails later without ever clearing
+      // the flag it set).
+      if (!isCurrentRequest()) return;
       setState((current) =>
         beginSourceControlRefresh(current, contextPath, !!reusableRoot),
       );
@@ -451,6 +457,10 @@ export function useSourceControl(
         }
 
         if (!isCurrentRequest()) return;
+        // The working tree was just re-read, so any cached working-tree diff is
+        // now potentially stale — a file edited twice shows the first diff
+        // otherwise, because the cache key has no content or revision in it.
+        invalidateRepoDiffs(repo.repoRoot);
         setState((current) => ({
           ...current,
           repo,
@@ -588,9 +598,17 @@ export function useSourceControl(
       return;
     }
     setState((current) => ({ ...current, lastRemoteError: null }));
+    const root = stateRef.current.repo?.repoRoot;
+    // Moving to a different repo is the urgent case — a terminal / project
+    // switch. Deferring it to requestIdleCallback (up to 600ms) made the panel
+    // lag a beat behind the active window, and a busy webview could leave it on
+    // the previous repo's status. Refresh immediately; the idle scheduling
+    // below is only for the same-repo freshness check.
+    if (!repositoryContainsContext(root ?? null, contextPath)) {
+      void refresh({ remote: "never" });
+      return;
+    }
     const run = () => {
-      const root = stateRef.current.repo?.repoRoot;
-      const sameRepo = repositoryContainsContext(root ?? null, contextPath);
       const fresh = Date.now() - lastRefreshAtRef.current < SC_STATUS_TTL_MS;
       // An explicit repoRoot (the multi-repo selector) is a hard target: when it
       // names a different repo than the one loaded, the freshness short-circuit
@@ -601,7 +619,7 @@ export function useSourceControl(
         !explicitRoot ||
         (!!root &&
           normalizedContextPath(root) === normalizedContextPath(explicitRoot));
-      if (fresh && sameRepo && rootMatches && stateRef.current.hasRepo) {
+      if (fresh && rootMatches && stateRef.current.hasRepo) {
         setState((current) =>
           current.contextPath === contextPath
             ? current
@@ -675,6 +693,18 @@ export function useSourceControl(
       if (timer) window.clearTimeout(timer);
     };
   }, [refresh, enabled]);
+
+  // Watchdog: if a refresh leaves `isLoading` set without ever resolving — a
+  // stale request superseded at the wrong moment, or a hung git process — the
+  // panel would sit on "loading" (looking empty) until the user hit refresh or
+  // switched away and back. Force another refresh instead of waiting forever.
+  useEffect(() => {
+    if (!_enabled || !state.isLoading) return;
+    const t = window.setTimeout(() => {
+      if (stateRef.current.isLoading) void refresh({ remote: "never" });
+    }, 5000);
+    return () => window.clearTimeout(t);
+  }, [_enabled, state.isLoading, refresh]);
 
   return useMemo<SourceControlSummary>(
     () => ({

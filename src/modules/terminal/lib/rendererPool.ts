@@ -889,6 +889,30 @@ function refitSlot(slot: Slot): void {
     ?.resizePty(slot.term.cols, slot.term.rows);
 }
 
+/**
+ * Force a leaf's grid to one the desktop did not pick, because the phone
+ * claimed the PTY. The byte stream is laid out against the owner's cols/rows,
+ * so the desktop has to render at them too or every wrapped line and absolute
+ * cursor move lands wrong.
+ *
+ * Auto-fit is deliberately left running: any desktop-side fit (window resize,
+ * focus, tab switch) is an activity claim and should take the grid back. The
+ * handover cooldown on the Rust side is what stops the two ends ping-ponging.
+ */
+export function applyExternalGrid(
+  leafId: number,
+  cols: number,
+  rows: number,
+): void {
+  if (cols < 2 || rows < 2) return;
+  const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (!slot) return;
+  if (slot.term.cols === cols && slot.term.rows === rows) return;
+  slot.term.resize(cols, rows);
+  slot.lastCols = cols;
+  slot.lastRows = rows;
+}
+
 export function applyLetterSpacing(spacing: number): void {
   for (const slot of slots) {
     if (slot.term.options.letterSpacing === spacing) continue;

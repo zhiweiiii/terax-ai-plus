@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
+import { emitEvent } from "@/modules/events";
 import type { Tab } from "./useTabs";
 
 type Result = {
@@ -57,6 +58,23 @@ export function useWorkspaceCwd(
     if (lastTerminalCwd.current) return lastTerminalCwd.current;
     return home;
   }, [currentTerminalTab, home]);
+
+  // Announce a command-line (project) switch through the event bus so panels
+  // that cache file-derived data can invalidate without re-rendering on it.
+  // Skip the first value — mounting is not a switch, and subscribers already
+  // initialise from their own context. The owner tab is a new object whenever
+  // its cwd changes, so identity alone covers cwd moves.
+  const firstRef = useRef(true);
+  useEffect(() => {
+    if (firstRef.current) {
+      firstRef.current = false;
+      return;
+    }
+    emitEvent("context:changed", {
+      cwd: currentTerminalTab?.cwd ?? null,
+      terminalId: currentTerminalTab?.id ?? null,
+    });
+  }, [currentTerminalTab]);
 
   const inheritedCwdForNewTab = useCallback((): string | undefined => {
     if (currentTerminalTab?.cwd) return currentTerminalTab.cwd;

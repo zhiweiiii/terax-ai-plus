@@ -326,6 +326,127 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     through. Tapping an entry attaches to that terminal as before.
     (`src/web/main.ts` + `style.css`.)
 
+## Mobile conversation rewrite (2026-08-18)
+
+The phone page stopped being a terminal. Background and design:
+[Mobile conversation view](architecture/mobile-conversation-view.md).
+
+44. ~~**Phone rendered the desktop grid, so text was unreadable**~~ — **fixed**
+    Measured at 192×28 PTY / 335×590 viewport: the grid was scaled 0.238 to
+    fit, giving a **3.3 px** font and leaving **74 %** of the screen blank.
+    Scaling to fit, panning, and re-wrapping are mutually exclusive in a
+    terminal view; the page now renders no grid at all. (`src/web/`.)
+45. ~~**`inAltScreen` was a dead variable**~~ — **fixed by removal**
+    `applyFitMode()` never branched on it, so the documented "normal output
+    wraps to phone width, TUI locks to PTY grid" behaviour was never
+    implemented. Both the variable and the two contradicting comment blocks
+    are gone with the rewrite.
+46. ~~**`applyGridScale` counted padding as usable space**~~ — **fixed by
+    removal**: it read `termWrap.clientWidth`, which includes the wrapper's
+    12 px padding, so the scaled grid still overflowed slightly.
+47. ~~**`scrollCursorIntoView` was dead code**~~ — **fixed by removal**: the
+    element was always scaled to fit, so `scrollWidth <= clientWidth` held
+    and the function early-returned every time.
+48. ~~**Alt-screen scroll detection never fired**~~ — **fixed**
+    `translateToString(true)` leaves trailing whitespace on cells carrying
+    attributes, and a TUI pads to full width with styled blanks, so the same
+    row compared unequal between frames. Measured 158 frames / 0 scrolls;
+    history was being silently lost. Rows are now right-trimmed at capture.
+    `conv.stats` exists to catch a recurrence. (`conversation.ts` flushAlt.)
+49. ~~**Footer stripping swallowed the whole screen**~~ — **fixed**
+    `dropFooter` used `raw !== text` to mean "this row had frame characters",
+    but `stripChrome` also trims indentation, so every indented row counted as
+    furniture and `toBlocks` returned zero blocks. Now judged on frame-character
+    share, a leading rule, or key hints.
+50. ~~**Splash detection flapped**~~ — **fixed**: `isBanner` used a
+    drawing-to-text ratio, which crosses its threshold as soon as one long
+    divider rule is drawn, so the same screen appeared and disappeared. Now
+    keyed on absolute text volume (< 120 letters).
+51. ~~**Single-character messages were dropped**~~ — **fixed**: the `pending`
+    filter carried a `length >= 2` guard, so `1` / `2` / `3` — the exact test
+    case — never rendered. Short sends now require an exact match instead.
+52. ~~**History ring trimmed mid-escape-sequence**~~ — **fixed**
+    `history.drain(..cut)` cut on a raw byte count, so a reconnecting phone
+    replayed from inside a CSI sequence and rendered the remainder as text
+    (`48;2;10;10;10m`). `trim_history` now resyncs to the next ESC, falling
+    back to the next newline. (`session.rs`.)
+53. ~~**Backlog was applied in one write**~~ — **fixed**: every frame a
+    full-screen program had ever painted was applied to the buffer in sequence
+    and only the last was read, collapsing the conversation into the current
+    screen. `writeBacklog` feeds 2 KiB slices with a read between each.
+54. ~~**Rendering stalled in a background tab**~~ — **fixed**:
+    `requestAnimationFrame` never fires while `document.hidden`, which is the
+    normal state on a phone whose screen has locked. Falls back to a timer.
+55. **Backlog restored on attach is not split into bubbles** — the page has no
+    record of what was sent before it connected, so `markEchoes` has nothing to
+    match and the replay arrives as one output block. — **accepted**.
+56. **Bubble classification is heuristic** — how a program repaints is not
+    something it declares. An unrecognised status widget becomes a small stray
+    bubble; an unusual repaint pattern loses history rather than corrupting it.
+    `WIDGET` and `detectProgram` in `conversation.ts` are the only
+    tool-specific knowledge, deliberately kept to one place. — **accepted**.
+57. **Claude Code `1`/`2`/`3` exchange not verified end to end** — startup
+    detection and screen parsing were confirmed; the full exchange was not.
+    Backlog reconstruction was verified for a shell session only. — **partly
+    fixed**: the alternate-screen part is now verified and fixed. Replaying a
+    real 81 KiB OpenCode backlog through `Conversation` showed `detectScroll`
+    never fired (38 frames, 0 scrolls) because `BACKLOG_SLICE` = 2048 bytes was
+    ~15 full lines of a 138-column grid: consecutive reads shared no content,
+    so a session that scrolled lost its whole history on attach. The slice is
+    now about two grid rows (`max(64, min(2048, cols * 2))`); the same replay
+    detects 27/28 scrolls and reconstructs the transcript, and a synthetic
+    alt-screen session that scrolls 120 lines recovers it all. A second bug
+    surfaced in the same replay: `CHROME_LEAD` treated any line opening with a
+    single frame marker (`┃`, `▣`) as a rule, so the footer walk ate every
+    opencode user message rendered under its gutter. Rules are now runs of
+    frame characters, and the input box (a bare path) and status readouts
+    (already `WIDGET` lines) are explicit furniture. — **resolved** (2026-08-19):
+    the full `1`/`2`/`3` exchange was exercised against real opencode and
+    Claude Code sessions driven through the phone bridge (see
+    `docs/architecture/mobile-conversation-view.md` § Test tooling). Claude's
+    trust dialog (`❯ 1. Yes, I trust this folder / 2. No, exit`), permission
+    approval by number, continuous multi-turn conversation, tool calls, the
+    exit / session-save prompt, and long backlogs all parse correctly. Three
+    more bugs surfaced and were fixed along the way:
+    - `sameMessage` matched a short send (`claude`) as a substring anywhere, so
+      Claude's own chrome ("Run claude doctor", the cwd path
+      `…\opencode\claude-fresh`, the `Opus 5 claude-fresh` model line) became
+      fake user bubbles. Matching is now length-tiered (≥10 chars loose, 4–9
+      must be essentially the row, shorter exact).
+    - `detectProgram` matched `/opencode/i` anywhere, so a session whose cwd
+      path contained `opencode` was mislabelled `OpenCode` even while Claude
+      Code ran. OpenCode now requires a bare word (logo / save screen / footer)
+      and Claude Code is matched first (`claude code`, `welcome back`,
+      `Opus <n>`); Claude's `Opus <n> …` model line joined `WIDGET`.
+    - `isBanner` suppressed any sparse screen as a splash, including opencode's
+      exit / session-save prompt drawn under the same ASCII banner ("Session
+      项目介绍 / Continue opencode -s …"), so the reader could not see the
+      choice. Suppression now applies only to the program's first frame.
+    Also verified: the alt-screen exit fold no longer raw-appends the final
+    screen (it goes through the same parse, stripping furniture and marking
+    echoes). A real Claude Code permission dialog was then captured end to end
+    (running Claude with a workspace `defaultMode: "default"` settings file
+    makes it ask): the `1. Yes / 2. Yes, and don't ask again / 3. No` menu
+    renders as visible blocks and `1` approves.
+  - **Claude's status / agent-mode UI leaked into the conversation, and the
+    agent tab was not its own thing** — fixed (2026-08-19): the footer was
+    split by "does this line look like furniture", which broke on Claude's
+    subagent tab (`  ◯ Explore Search repo for README content  0s` — a chrome
+    glyph plus text reads as content), leaking the whole status area into the
+    output. The footer is now split by **position**: anchored on the last
+    status rule in the bottom `FOOTER_WINDOW` rows (a higher rule is a dialog
+    border or divider, not a status rule), and the footer's bottom row is
+    extracted by position as `Conversation.agents` — Claude Code's running
+    subagent strip — rendered as an independent chip strip above the composer
+    (`#agents`, `style.css` `.agent-chip`). No agent name or task text is ever
+    matched, so a renamed agent keeps working. The `Auto-update failed`
+    npm-prefix warning is now a `WIDGET` and is dropped. The status label also
+    drops model/usage readouts and any fragment longer than a status piece (a
+    long run is a sentence leaked from a scrambled mid-repaint frame).
+    Verified on real captures: during the run, `agents = ["Explore 查找 README
+    相关内容 …"]` and `status = "manual mode on · 3 agents · main"`; on the
+    real page the `#agents` chip appears while the subagent runs.
+
 ## Frontend (`src/web/main.ts`)
 
 ### Medium
@@ -338,11 +459,90 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 ### Low
 
 20. ~~**Resize path uses `ws!.send` without a readyState check**~~ — **fixed
-    by design**: the phone no longer sends resize frames at all (local `fit`
-    only), so the throwing code path no longer exists.
+    by design**: the phone no longer sends resize frames at all — since the
+    conversation rewrite it renders no grid, so it has no width to impose.
 21. `lastAttachedId`-based reconnect and the single-attach semantics are
     correct today; just note that switching sessions mid-stream is
     last-attach-wins with no queued history between. — **accepted**.
+
+## 移动端桥接加固（2026-08-19）
+
+本日围绕「手机正常运行 opencode / claude」做了一轮完整适配：修复质量门槛、
+hot-deploy 稳定性、grid 所有权、解析器、agent 模式抽取，并建立了一套可
+复用的捕获/回放/端到端测试工具链。详见
+[mobile-conversation-view.md](architecture/mobile-conversation-view.md)。
+
+### 质量门槛
+- 修复 11 个 clippy 错误：`git/operations.rs` 与 `git/commands.rs` 的
+  `too_many_arguments`（按仓库惯例加 `#[allow]`）、六处 `.as_ref()`、
+  `manual_flatten`、`needless_borrows_for_generic_args`；
+  `proc/job.rs` 的 duplicated attribute。`cargo clippy --locked -D warnings`
+  全绿。
+- `biome.json`：`a11y/noAutofocus` 预存错误按仓库惯例降为 warn。
+
+### Hot-deploy 稳定性（热部署.ps1）
+- 新脚本启动前**等 terax-prod.exe 解锁**（`FileShare.Delete` 探测，最多 10 s）
+  并**等开发端口真正释放**（轮询，最多 10 s）——否则孤儿实例锁住 exe，
+  cargo 覆盖失败（`拒绝访问 (os error 5)`）会连带把整个 `tauri dev` 和
+  vite 一起带走。
+- 顺带清掉了占用 34269 的孤儿旧二进制实例。
+
+### Grid 所有权（手机端）
+- `main.ts` 对齐服务端协议：`attached` 用服务端报告的**真实网格**解析，
+  `resized` 只跟随不抢回，删除 `sendResize`；attach 的 cols/rows 只是偏好，
+  首个按键才 claim。
+- **修复 grid 乒乓**：xterm 的协议应答（OSC 4 调色板应答、`ESC[I/O` 焦点
+  报告）走 `pty_write` 时被当作"桌面打字"把会话抢回桌面网格。新增
+  `looks_like_protocol_response`：应答照常送达 PTY，但不再 claim。实测整场
+  opencode 会话零回抢、网格稳定。
+
+### 解析器（conversation.ts）
+- **alt 退出折叠**：退出时最后一屏改为走与其它帧相同的解析（剥家具、标记
+  回显），不再原样追加——之前输入框、状态行、回显会变成匿名 AI 输出。
+- **`isBanner` 仅限首帧**：opencode 退出/保存提示（"Session 项目介绍 /
+  Continue opencode -s …"）不再被当成启动页吞掉。
+- **`sameMessage` 分层匹配**：≥10 字宽松、4–9 字必须基本等于整行、更短精确
+  ——修掉发的 `claude` 把 Claude 自己的 UI（"Run claude doctor"、cwd 路径
+  `…\opencode\claude-fresh`、`Opus 5 claude-fresh`）误标为用户消息的问题。
+- **`detectProgram` 边界匹配 + Claude 优先**：cwd 路径含 `opencode` 不再把
+  Claude Code 误判为 OpenCode。
+- **WIDGET 扩充**：`Opus <n> …` 模型行、`Auto-update failed`（npm-prefix
+  警告，用户要求屏蔽）——不再出现在气泡里。
+- **位置法 footer + agent 抽取（按用户要求"按位置不按文字"）**：
+  - footer 以底部规则线为锚（`FOOTER_WINDOW = 12` 行内最靠下的一条规则；
+    更高的是对话框边框/正文分隔线）。之前按"像不像家具"自底向上走，会被
+    Claude 的子代理标签（`◯ Explore Search repo …`）卡住，把整块状态区漏进
+    正文。
+  - footer **最底行按位置抽成 `Conversation.agents`**——Claude Code 运行中
+    的子代理标签条，独立渲染成输入框上方的 chip 条（`#agents` +
+    `.agent-chip`，带脉冲圆点），不进气泡、不做状态文本。不匹配任何 agent
+    名字/任务文字，改名也不会失效。唯一例外是输入框（裸路径或按键提示）。
+  - status 加长度护栏：状态片段很短，从过渡帧混进来的长句被丢弃。
+
+### 测试工具链（scripts/）
+- `web-capture.mjs`：驱动手机桥接 WebSocket 录制真实会话（含 cold-leaf 的
+  opening 重试）；`web-replay.mjs`：把捕获按页面同款逻辑回放进
+  `Conversation`（`--trace` 看逐帧 live blocks，`--screen-at` dump 原始屏）。
+- `web-synthetic-test.mjs`：合成屏幕回归（1/2/3 菜单、权限框、启动页、退出
+  提示、agent 位置抽取、输入框排除）——14 项全过。
+- `e2e-phone.mjs`：Playwright 真实页面（cookie 免密码）——登录/列表
+  （`data-leaf`）/attach/发送/气泡。
+
+### 验证结果（真实 opencode / claude 会话）
+- opencode：连续多轮对话、工具调用、退出保存提示全部正确。
+- claude：启动识别、信任对话框（`❯ 1. Yes… / 2. No, exit`）、**真实 Bash
+  权限对话框**（工作区 `defaultMode: "default"` 触发，`1. Yes / 2. … / 3. No`
+  菜单在手机上正确渲染且 `1` 生效）、**子代理运行时 agent chip 独立显示**
+  （`Explore 查找 README 相关内容 0s`）、连续对话。
+- 桌面与手机同屏共用同一会话（桌面打字 + 手机旁观）保持自洽。
+
+### 文档同步
+- `TERAX.md`：grid 所有权描述更新（单会话单网格、谁打字谁拥有、协议应答
+  不 claim、`resized` 广播）。
+- `web-terminal-bridge.md`：`attach` 带偏好网格、`attached` 带真实网格+alt、
+  `resized` 消息。
+- `mobile-conversation-view.md`：位置法 footer/agent、echo 分层匹配、程序
+  识别、isBanner 首帧、权限对话框、测试工具链、Verified/Not 更新。
 
 ## Dead code and stale exports
 
@@ -372,6 +572,27 @@ each before removing; some may be used in Rust or in a build step).
 - `docs/porting-issues.md` and `docs/移植进度.md` reference deleted code
   (`src/modules/ai/`, `vitest.config.ts`, `rebased/`). They are historical
   migration records; keep them as history or delete them. — **accepted**.
+- `热部署.ps1` launches `pnpm tauri dev` as a background process (hidden
+  window, logs to `dev.log`, PID in `.terax-dev.pid`, gitignored), so the
+  script returns immediately. Re-running it kills the recorded process tree
+  first (taskkill /T), `-Stop` only stops. The exe-path and port-based
+  cleanup stays as a fallback for orphaned instances. — **fixed**.
+- `热部署.ps1` could still fail to rebuild: an orphaned dev instance
+  (`src-tauri/target/debug/terax-prod.exe`) whose exe-path kill missed it kept
+  the binary locked, and `cargo run` died with `failed to remove ... 拒绝访问
+  (os error 5)`, taking the whole `tauri dev` (and vite) down. The restart now
+  waits for the debug exe to be unlocked (`FileShare.Delete` probe, up to 10 s)
+  and for the dev ports to actually free up (poll, up to 10 s) before launching,
+  so a stale holder cannot break the next build. — **fixed** (2026-08-19).
+- Grid ping-pong: the phone's first keystroke claims the session and resizes
+  the PTY to its grid; ~5 s later the desktop always wrote the terminal's
+  palette (an OSC 4 answer to the TUI's palette query, plus `ESC[I` focus
+  reports, forwarded by xterm's `onData`), and every such write went through
+  `pty_write`, which claimed the session back at the desktop grid — so a
+  watched session flip-flopped between the two sizes after every claim.
+  `pty_write` now skips the claim for xterm's protocol answers
+  (`looks_like_protocol_response`: focus reports and OSC replies), which still
+  reach the PTY but no longer move the grid. — **fixed** (2026-08-19).
 
 ## Documentation drift
 

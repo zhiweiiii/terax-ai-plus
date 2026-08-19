@@ -38,8 +38,9 @@ use base64::Engine;
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 
-use crate::modules::pty::{PtyState, Session, WebMsg};
-use tauri::Manager;
+use crate::modules::pty;
+use crate::modules::pty::{PtyState, Session, SizeOwner, WebMsg};
+use tauri::{Emitter, Manager};
 
 // Dev builds listen on 34269, packaged (release) builds on 34268 — so the two
 // can run side by side without clashing, and the phone can pick the right one.
@@ -720,6 +721,10 @@ fn serve_page(mut stream: TcpStream) {
 /// Per-connection WS loop: one client watches one session at a time.
 fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
     let state = app.state::<PtyState>();
+    // Grid this phone would render at, learned from its attach / resize frames.
+    // Kept per connection so a keystroke can claim the session without the
+    // phone having to restate its dimensions.
+    let mut web_grid: Option<(u16, u16)> = None;
     // The leaf id this connection is attached to (for exit notices), plus the
     // (session, subscriber sender, live receiver) triple.
     let mut attached_id: Option<u32> = None;
@@ -750,6 +755,15 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         if conn.send_frame(OP_BIN, &frame).is_err() {
                             break;
                         }
+                    }
+                    Ok(WebMsg::Resized(cols, rows)) => {
+                        // The other end took the grid; the phone must re-size
+                        // before the next bytes, which are laid out against it.
+                        let _ = send_text(
+                            &mut conn,
+                            &json!({ "type": "resized", "cols": cols, "rows": rows })
+                                .to_string(),
+                        );
                     }
                     Ok(WebMsg::Exited(code)) => {
                         // Session ended: tell the page, then drop this
@@ -843,13 +857,40 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     // history bytes (positioned for the desktop grid) are
                     // parsed at the phone's fit width and every wrapped line /
                     // cursor move lands wrong.
+                    // The phone parses at its own FIXED grid (the layout parser
+                    // is deterministic only at that size), so attaching takes the
+                    // grid for Web — a deliberate one-shot, unlike the passive
+                    // preference-recording every other attach does. The desktop
+                    // reclaims on its next keystroke.
+                    let grid = parsed
+                        .get("cols")
+                        .and_then(|v| v.as_u64())
+                        .zip(parsed.get("rows").and_then(|v| v.as_u64()))
+                        .map(|(c, r)| (c as u16, r as u16));
+                    if let Some((c, r)) = grid {
+                        web_grid = Some((c, r));
+                        if let Some((c, r)) = session.web_take_grid(c, r) {
+                            log::info!("web: phone took pty grid {c}x{r} leaf={leaf_id}");
+                            let _ = app.emit(
+                                pty::PTY_RESIZED_EVENT,
+                                json!({ "leafId": leaf_id, "cols": c, "rows": r }),
+                            );
+                        }
+                    }
+                    let (cols, rows) = session.size();
                     let _ = send_text(
                         &mut conn,
                         &json!({
                             "type": "attached",
                             "id": id,
-                            "cols": state.web_session_size(&session).0,
-                            "rows": state.web_session_size(&session).1,
+                            "cols": cols,
+                            "rows": rows,
+                            // The phone must parse the replayed backlog in the
+                            // same buffer mode the PTY is in: the history ring
+                            // may have trimmed the alt-screen enter sequence,
+                            // so without this a mid-TUI backlog parses as a
+                            // shell and comes out as garbage.
+                            "alt": session.web_in_alt(),
                         })
                         .to_string(),
                     );
@@ -878,6 +919,17 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                 let data = &payload[1..];
                 match cmd {
                     b'0' => {
+                        // Typing on the phone claims the session back from the
+                        // desktop, at the grid the phone last reported.
+                        if web_grid.is_some() {
+                            if let Some((c, r)) = session.claim(SizeOwner::Web) {
+                                log::info!("web: phone reclaimed pty grid {c}x{r}");
+                                let _ = app.emit(
+                                    pty::PTY_RESIZED_EVENT,
+                                    json!({ "leafId": attached_id, "cols": c, "rows": r }),
+                                );
+                            }
+                        }
                         let mut w = session.writer.lock().unwrap();
                         let _ = w.write_all(data);
                         let _ = w.flush();
@@ -888,14 +940,15 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                                 v.get("cols").and_then(|x| x.as_u64()),
                                 v.get("rows").and_then(|x| x.as_u64()),
                             ) {
-                                let _ = session.master.lock().unwrap().resize(
-                                    portable_pty::PtySize {
-                                        rows: r as u16,
-                                        cols: c as u16,
-                                        pixel_width: 0,
-                                        pixel_height: 0,
-                                    },
-                                );
+                                web_grid = Some((c as u16, r as u16));
+                                if let Some((c, r)) =
+                                    session.request_grid(SizeOwner::Web, c as u16, r as u16)
+                                {
+                                    let _ = app.emit(
+                                        pty::PTY_RESIZED_EVENT,
+                                        json!({ "leafId": attached_id, "cols": c, "rows": r }),
+                                    );
+                                }
                             }
                         }
                     }

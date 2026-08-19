@@ -250,6 +250,7 @@ pub fn run() {
             pty::pty_open,
             pty::pty_write,
             pty::pty_resize,
+            pty::pty_kick,
             pty::pty_close,
             pty::pty_close_all,
             pty::pty_has_foreground_process,

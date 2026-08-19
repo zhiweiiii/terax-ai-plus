@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
-import { leafIds, ptyIdForLeaf } from "@/modules/terminal";
+import { applyExternalGrid, leafIds, ptyIdForLeaf } from "@/modules/terminal";
 import { useSpaces } from "@/modules/spaces";
 import type { Tab } from "@/modules/tabs";
 
@@ -74,6 +74,30 @@ export function useWebTerminalSync({
       console.warn("web_sync_spaces failed:", e);
     });
   }, [terminalTabs, activeId, spaces]);
+
+  // The phone can claim a session while the desktop is idle, in which case
+  // nothing on this side asked for a resize and only this event tells us the
+  // grid moved. Without it the desktop keeps rendering at its old cols/rows
+  // against a byte stream laid out for the phone's.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    (async () => {
+      const off = await listen<{ leafId: number; cols: number; rows: number }>(
+        "terax:pty-resized",
+        (e) => {
+          const { leafId, cols, rows } = e.payload;
+          if (typeof leafId === "number") applyExternalGrid(leafId, cols, rows);
+        },
+      );
+      if (disposed) off();
+      else unlisten = off;
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

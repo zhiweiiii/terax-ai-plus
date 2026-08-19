@@ -45,7 +45,33 @@ const WEB_SUB_QUEUE: usize = 64;
 pub enum WebMsg {
     Output(Vec<u8>),
     Exited(i32),
+    /// The grid changed because the other end claimed the session; the viewer
+    /// has to re-size to it or the byte stream stops parsing correctly.
+    Resized(u16, u16),
 }
+
+/// Which end last claimed a session and therefore owns its PTY grid.
+///
+/// The grid cannot be per-viewer: the byte stream carries absolute cursor
+/// moves and \r redraws laid out against one specific cols x rows, so every
+/// viewer has to render at the same grid. Ownership decides whose grid that
+/// is, and moves to whichever end the user is actually at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SizeOwner {
+    Desktop,
+    Web,
+}
+
+/// Minimum gap between ownership transfers. Every transfer resizes the PTY,
+/// which makes full-screen TUIs repaint, so two ends taking turns must not be
+/// able to ping-pong the grid.
+///
+/// Only a keystroke transfers ownership. Merely looking at a session does not:
+/// attaching the phone, focusing the desktop window, switching tabs and window
+/// resizes all just record that end's preferred grid. Making those claim was
+/// what put a watched session in a loop, since the desktop refits constantly
+/// and would take the grid straight back from a phone that was only watching.
+const OWNER_COOLDOWN: Duration = Duration::from_secs(3);
 
 pub struct Session {
     // Field drop order is intentional. Rust drops fields top-to-bottom:
@@ -75,6 +101,20 @@ pub struct Session {
     history: Mutex<Vec<u8>>,
     /// Web viewers attached to this session (bounded queues).
     web_subs: Mutex<Vec<SyncSender<WebMsg>>>,
+    /// Whether the PTY is currently on the alternate screen (opencode / claude
+    /// / vim). Set by the flusher as it scans output; reported on attach so a
+    /// phone can put its headless parser into the right mode before replaying
+    /// the backlog — otherwise a ring that started mid-TUI parses as a shell.
+    in_alt: AtomicBool,
+    /// End that currently owns the grid, and when it took over.
+    owner: Mutex<(SizeOwner, Instant)>,
+    /// The live PTY grid, mirrored so viewers can be told without asking the
+    /// master (which would need the lock the resize path already holds).
+    size: Mutex<(u16, u16)>,
+    /// Last grid each end asked for. A claim triggered by a keystroke has no
+    /// dimensions of its own, so it restores the claimer's remembered grid.
+    desktop_grid: Mutex<Option<(u16, u16)>>,
+    web_grid: Mutex<Option<(u16, u16)>>,
 }
 
 impl Drop for Session {
@@ -93,6 +133,30 @@ impl Drop for Session {
 #[cfg(windows)]
 static CONPTY_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Drop `want` bytes off the front of the history ring, then keep dropping to
+/// the next escape-sequence boundary.
+///
+/// The ring holds raw PTY bytes, so trimming by a byte count lands wherever it
+/// lands — very often in the middle of a CSI sequence. A viewer replaying from
+/// there has no way to know it joined mid-sequence and renders the remainder
+/// as literal text, which is how a reconnecting phone ended up showing
+/// "48;2;10;10;10m" instead of a conversation.
+///
+/// Resyncing to the next ESC costs at most one sequence and makes the replay
+/// parseable. Falling back to the next newline covers a ring holding plain
+/// text with no escapes in it at all.
+fn trim_history(history: &mut Vec<u8>, want: usize) {
+    let cut = want.min(history.len());
+    history.drain(..cut);
+    let resync = history
+        .iter()
+        .position(|b| *b == 0x1b)
+        .or_else(|| history.iter().position(|b| *b == b'\n').map(|i| i + 1));
+    if let Some(at) = resync {
+        history.drain(..at);
+    }
+}
+
 pub(super) fn drop_session(session: Arc<Session>) {
     #[cfg(windows)]
     let _guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
@@ -100,6 +164,12 @@ pub(super) fn drop_session(session: Arc<Session>) {
 }
 
 impl Session {
+    /// Whether the PTY is on the alternate screen right now, so a phone can
+    /// parse the replayed backlog in the right mode.
+    pub fn web_in_alt(&self) -> bool {
+        self.in_alt.load(Ordering::Acquire)
+    }
+
     /// Attach a Web viewer: returns a snapshot of recent output (to be replayed
     /// first), the sender handle used to cancel this exact subscription, and a
     /// receiver for live chunks. Returns None if the session already exited.
@@ -117,6 +187,133 @@ impl Session {
         let history = self.history.lock().unwrap().clone();
         self.web_subs.lock().unwrap().push(tx.clone());
         Some((history, tx, rx))
+    }
+
+    /// The live PTY grid.
+    pub fn size(&self) -> (u16, u16) {
+        *self.size.lock().unwrap()
+    }
+
+    /// Record the grid an end would like, without claiming ownership. Lets a
+    /// watching viewer keep its preference ready for the moment it does claim.
+    pub fn note_grid(&self, who: SizeOwner, cols: u16, rows: u16) {
+        if cols < 2 || rows < 2 {
+            return;
+        }
+        let slot = match who {
+            SizeOwner::Desktop => &self.desktop_grid,
+            SizeOwner::Web => &self.web_grid,
+        };
+        *slot.lock().unwrap() = Some((cols, rows));
+    }
+
+    /// Ask for a grid on behalf of one end.
+    ///
+    /// Only the owner can move the live grid; anyone else just records what it
+    /// would like, ready for the moment it does take over. This is the path
+    /// every non-keystroke trigger uses: attaching, window focus, tab switches
+    /// and container refits.
+    pub fn request_grid(&self, who: SizeOwner, cols: u16, rows: u16) -> Option<(u16, u16)> {
+        self.note_grid(who, cols, rows);
+        if self.owner.lock().unwrap().0 != who {
+            return None;
+        }
+        self.apply_grid(cols, rows)
+    }
+
+    /// Take ownership on a keystroke and switch to that end's recorded grid.
+    ///
+    /// Returns the new grid only when the PTY was actually resized, so callers
+    /// broadcast exactly once per real change. Returns None when that end
+    /// already owned the session at that size, when the cooldown has not
+    /// elapsed, or when it never recorded a grid.
+    pub fn claim(&self, who: SizeOwner) -> Option<(u16, u16)> {
+        let slot = match who {
+            SizeOwner::Desktop => &self.desktop_grid,
+            SizeOwner::Web => &self.web_grid,
+        };
+        let (cols, rows) = (*slot.lock().unwrap())?;
+        {
+            let mut owner = self.owner.lock().unwrap();
+            if owner.0 != who {
+                if owner.1.elapsed() < OWNER_COOLDOWN {
+                    return None;
+                }
+                *owner = (who, Instant::now());
+            }
+        }
+        self.apply_grid(cols, rows)
+    }
+
+    /// The phone attaches at its own fixed grid and takes the PTY grid for it.
+    /// Deliberate and one-shot (a page load), so it bypasses the ownership
+    /// cooldown; the desktop reclaims on its next keystroke.
+    pub fn web_take_grid(&self, cols: u16, rows: u16) -> Option<(u16, u16)> {
+        if cols < 2 || rows < 2 {
+            return None;
+        }
+        *self.web_grid.lock().unwrap() = Some((cols, rows));
+        {
+            let mut owner = self.owner.lock().unwrap();
+            *owner = (SizeOwner::Web, Instant::now());
+        }
+        self.apply_grid(cols, rows)
+    }
+
+    /// Force a SIGWINCH without changing the session's grid.
+    ///
+    /// (See `trim_history` below for the history ring's own trimming rule.)
+    ///
+    /// Linux only signals when the winsize ioctl actually changes, so this
+    /// bumps a row and puts it straight back. It deliberately skips the size
+    /// mirror, the ownership bookkeeping and the viewer broadcast: the grid
+    /// ends exactly where it started, and telling attached phones about the
+    /// transient made them re-grid twice on every renderer-slot rebind, which
+    /// is constant while a full-screen TUI is running.
+    pub fn kick_grid(&self, cols: u16, rows: u16) {
+        if cols < 2 || rows < 2 || self.exited.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(master) = self.master.lock() else {
+            return;
+        };
+        let at = |r: u16| PtySize {
+            rows: r,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let _ = master.resize(at(rows.saturating_add(1)));
+        let _ = master.resize(at(rows));
+    }
+
+    /// Resize the PTY and tell every attached viewer. Returns None when the
+    /// grid was already the live one, so callers broadcast only real changes.
+    fn apply_grid(&self, cols: u16, rows: u16) -> Option<(u16, u16)> {
+        if cols < 2 || rows < 2 || self.exited.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut size = self.size.lock().unwrap();
+        if *size == (cols, rows) {
+            return None;
+        }
+        self.master
+            .lock()
+            .unwrap()
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .ok()?;
+        *size = (cols, rows);
+        drop(size);
+        self.web_subs
+            .lock()
+            .unwrap()
+            .retain(|s| s.try_send(WebMsg::Resized(cols, rows)).is_ok());
+        Some((cols, rows))
     }
 
     /// Remove one specific subscriber (not the whole table, so other viewers
@@ -236,6 +433,11 @@ pub fn spawn(
         cwd,
         history: Mutex::new(Vec::with_capacity(WEB_HISTORY_CAP.min(64 * 1024))),
         web_subs: Mutex::new(Vec::new()),
+        in_alt: AtomicBool::new(false),
+        owner: Mutex::new((SizeOwner::Desktop, Instant::now())),
+        size: Mutex::new((cols, rows)),
+        desktop_grid: Mutex::new(Some((cols, rows))),
+        web_grid: Mutex::new(None),
     });
 
     let pending: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((
@@ -309,10 +511,17 @@ pub fn spawn(
     let pending_f = pending.clone();
     let done_f = done.clone();
     let session_f = session.clone();
+    // Alternate-screen enter/leave (opencode / claude / vim). Tracked so a
+    // phone can parse the backlog in the right buffer mode.
+    const ENTER_ALT: &[u8] = b"\x1b[?1049h";
+    const LEAVE_ALT: &[u8] = b"\x1b[?1049l";
     thread::Builder::new()
         .name("terax-pty-flusher".into())
         .spawn(move || {
             let (lock, cv) = &*pending_f;
+            // Tail of the previous chunk, so a mode-switch sequence split
+            // across chunk boundaries is still detected.
+            let mut mode_carry: Vec<u8> = Vec::new();
             loop {
                 {
                     let mut g = lock.lock().unwrap();
@@ -330,6 +539,28 @@ pub fn spawn(
                 if chunk.is_empty() {
                     continue;
                 }
+                // Track alternate-screen mode transitions in this chunk. Both
+                // patterns are scanned left to right, so the last transition
+                // in the window wins.
+                let mut mode: Option<bool> = None;
+                {
+                    let mut window: Vec<u8> =
+                        Vec::with_capacity(mode_carry.len() + chunk.len());
+                    window.extend_from_slice(&mode_carry);
+                    window.extend_from_slice(&chunk);
+                    for w in window.windows(ENTER_ALT.len()) {
+                        if w == ENTER_ALT {
+                            mode = Some(true);
+                        } else if w == LEAVE_ALT {
+                            mode = Some(false);
+                        }
+                    }
+                }
+                if let Some(m) = mode {
+                    session_f.in_alt.store(m, Ordering::Release);
+                }
+                mode_carry =
+                    chunk[chunk.len().saturating_sub(ENTER_ALT.len() - 1)..].to_vec();
                 if let Some(cb) = &on_data_ref {
                     cb(chunk.clone());
                 }
@@ -339,8 +570,7 @@ pub fn spawn(
                     let mut history = session_f.history.lock().unwrap();
                     if history.len() + chunk.len() > WEB_HISTORY_CAP {
                         let over = history.len() + chunk.len() - WEB_HISTORY_CAP;
-                        let cut = over.min(history.len());
-                        history.drain(..cut);
+                        trim_history(&mut history, over);
                     }
                     history.extend_from_slice(&chunk);
                 }
@@ -393,8 +623,7 @@ pub fn spawn(
                     let mut history = session_exit_f.history.lock().unwrap();
                     if history.len() + tail.len() > WEB_HISTORY_CAP {
                         let over = history.len() + tail.len() - WEB_HISTORY_CAP;
-                        let cut = over.min(history.len());
-                        history.drain(..cut);
+                        trim_history(&mut history, over);
                     }
                     history.extend_from_slice(&tail);
                 }

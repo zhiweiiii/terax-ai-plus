@@ -5,6 +5,10 @@
   --accent: #58a6ff;
   --border: #21262d;
   --sheet-bg: #161b22;
+  --sent-bg: #1f6feb;
+  --out-bg: #12181f;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Cascadia Mono",
+    "Courier New", monospace;
 }
 
 * {
@@ -83,60 +87,162 @@ body {
   background: rgba(255, 255, 255, 0.08);
 }
 
-/* ── Terminal ────────────────────────────────────────────────────────── */
-.terminal-wrap {
+/* ── Thread ──────────────────────────────────────────────────────────── */
+.thread {
   position: relative;
   flex: 1;
   min-height: 0;
-  padding: 6px;
-  overflow: hidden;
-}
-.terminal-wrap .xterm {
-  height: 100%;
-  /* TUI mode locks cols to the PTY grid (e.g. 120); the canvas is wider
-     than the phone, so allow horizontal scrolling instead of clipping the
-     right side. Normal mode fits the container width and never overflows. */
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  touch-action: pan-x pan-y;
-}
-/* Tighter cell metrics help TUI apps (opencode/vim) keep rows aligned on
-   phones; xterm computes cell size from the font, these only ensure the
-   wrapper doesn't squeeze it. */
-.terminal-wrap .xterm .xterm-rows {
-  font-variant-ligatures: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
 }
 
-/* ── Toolbar ─────────────────────────────────────────────────────────── */
-.toolbar {
+/* One continuous column of bubbles. #turns holds what is settled and
+   #live-blocks holds what a full-screen program is still repainting, but they
+   are styled identically and sit in the same flow, so the reader sees one
+   conversation rather than two regions. */
+.stream {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  padding-bottom: calc(6px + env(safe-area-inset-bottom));
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 12px 20px;
+}
+.bubbles {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Every turn wraps at the phone's width. Nothing here is laid out against
+   the PTY's column count, which is the whole point of the conversation view:
+   the text arrives as logical lines and is re-wrapped here at a normal size. */
+.turn {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+/* What you sent: a bubble on the right, in the UI font — it is a message. */
+.turn.sent {
+  align-self: flex-end;
+  max-width: 85%;
+  background: var(--sent-bg);
+  color: #fff;
+  font-size: 14px;
+  padding: 8px 12px;
+  border-radius: 14px 14px 4px 14px;
+}
+
+/* What came back: full width, monospace, because alignment still carries
+   meaning in command output (tables, diffs, trees). */
+.turn.output {
+  background: var(--out-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.45;
+  color: #c9d1d9;
+}
+/* Still streaming: a soft left edge marks the block as unfinished. */
+.turn.output.live {
+  border-left: 2px solid var(--accent);
+}
+
+/* Not something anyone said — a marker in the thread ("OpenCode 已启动",
+   "会话已退出"). Centred and quiet so it reads as punctuation. */
+.turn.note {
+  align-self: center;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 4px 12px;
+  border-radius: 10px;
+}
+
+/* ── Composer ────────────────────────────────────────────────────────── */
+.composer {
+  flex-shrink: 0;
   background: var(--sheet-bg);
   border-top: 1px solid var(--border);
-  flex-shrink: 0;
+  padding: 6px 10px;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom));
+}
+
+.keyrow {
+  display: flex;
+  gap: 6px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 6px;
 }
-.tool-btn {
+.keyrow::-webkit-scrollbar {
+  display: none;
+}
+.key-btn {
   border: 1px solid var(--border);
   background: rgba(255, 255, 255, 0.04);
   color: var(--fg);
   font-size: 12px;
-  font-family: ui-monospace, Consolas, monospace;
-  padding: 6px 14px;
+  font-family: var(--mono);
+  padding: 5px 12px;
   border-radius: 8px;
   white-space: nowrap;
   flex-shrink: 0;
 }
-.tool-btn:active {
+.key-btn:active {
   background: rgba(88, 166, 255, 0.2);
   border-color: var(--accent);
 }
 
-/* ── Empty state ──────────────────────────────────────────────────────── */
+.inputrow {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  /* 16px keeps iOS Safari from zooming the page when the field is focused. */
+  font-size: 16px;
+  font-family: var(--mono);
+  line-height: 1.4;
+  padding: 9px 12px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.send-btn {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #06101f;
+  font-size: 17px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+.send-btn:active {
+  background: #79b8ff;
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────── */
 .empty-hint {
   position: absolute;
   inset: 0;
@@ -160,7 +266,7 @@ body {
   padding: 0 32px;
 }
 
-/* ── Session sheet: flat, scrollable window list ─────────────────────── */
+/* ── Session sheet ───────────────────────────────────────────────────── */
 .sheet {
   position: fixed;
   inset: 0;
@@ -182,9 +288,6 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
-/* The list fills most of the screen so every group is reachable by
-   scrolling: groups and their terminals sit in one flat list, the group
-   label being an inline row. */
 .session-list {
   list-style: none;
   margin: 0;
@@ -196,7 +299,6 @@ body {
   background: var(--sheet-bg);
 }
 
-/* Group label: a flat header row inside the list, not a switch target. */
 .session-group {
   padding: 8px 16px 4px;
   font-size: 11px;
@@ -224,7 +326,7 @@ body {
 .session-name {
   flex: 1;
   font-size: 13px;
-  font-family: ui-monospace, Consolas, monospace;
+  font-family: var(--mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -244,7 +346,7 @@ body {
 /* ── Toast ───────────────────────────────────────────────────────────── */
 .toast {
   position: fixed;
-  bottom: calc(20px + env(safe-area-inset-bottom));
+  bottom: calc(80px + env(safe-area-inset-bottom));
   left: 50%;
   transform: translateX(-50%);
   background: rgba(22, 27, 34, 0.95);
@@ -256,4 +358,70 @@ body {
   max-width: 85vw;
   text-align: center;
   box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Program status ──────────────────────────────────────────────────── */
+/* The fixed furniture a full-screen tool pins to the bottom of its screen
+   (model, usage, key hints). It is not something anyone said, so it is a
+   label here rather than a bubble, and it does not move with the thread. */
+.progstatus {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  background: rgba(88, 166, 255, 0.06);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Running-agent strip ──────────────────────────────────────────────── */
+/* The tab strip a full-screen tool pins to the bottom (Claude Code's running
+   subagents). It is activity, not conversation, so it is a chip row above the
+   composer rather than a bubble, and it does not move with the thread. */
+.agents {
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+  padding: 4px 10px;
+  overflow-x: auto;
+  background: rgba(139, 92, 246, 0.05);
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  color: var(--muted);
+  font-size: 10px;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.agent-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #8b5cf6;
+  animation: agent-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes agent-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Sent, not yet echoed back by the program. Dimmed until it is confirmed by
+   appearing on the program's own screen. */
+.turn.sent.unconfirmed {
+  opacity: 0.55;
 }

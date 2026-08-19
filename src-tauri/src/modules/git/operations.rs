@@ -1308,6 +1308,7 @@ pub fn delete_branch(
     ensure_success(&output, "git branch delete failed")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn merge(
     registry: &WorkspaceRegistry,
     repo_root: &str,
@@ -1507,9 +1508,9 @@ pub fn compare_branches(
         &repo_root.workspace,
         Some(&repo_root.git_path),
         [
-            "log".as_ref(),
-            "--no-color".as_ref(),
-            "--shortstat".as_ref(),
+            "log",
+            "--no-color",
+            "--shortstat",
             format_arg.as_str(),
             &format!("{right}..{left}"),
         ],
@@ -1521,9 +1522,9 @@ pub fn compare_branches(
         &repo_root.workspace,
         Some(&repo_root.git_path),
         [
-            "log".as_ref(),
-            "--no-color".as_ref(),
-            "--shortstat".as_ref(),
+            "log",
+            "--no-color",
+            "--shortstat",
             format_arg.as_str(),
             &format!("{left}..{right}"),
         ],
@@ -2758,11 +2759,9 @@ pub fn scan_repos(
     drop(tx);
 
     let mut heads: Vec<GitRepoHead> = Vec::with_capacity(spawned);
-    for received in rx {
-        if let Some(head) = received {
-            log::info!("git scan: found repo {} branch {}", head.repo_root, head.branch);
-            heads.push(head);
-        }
+    for head in rx.into_iter().flatten() {
+        log::info!("git scan: found repo {} branch {}", head.repo_root, head.branch);
+        heads.push(head);
     }
 
     log::info!("git scan: {} repo(s) resolved", heads.len());
@@ -2809,7 +2808,7 @@ fn collect_git_dirs(
                     // For WSL we use the original base + subdir convention.
                     format!("{}/{}", git_base.trim_end_matches('/'), name_str)
                 } else {
-                    crate::modules::fs::to_canon(&entry.path())
+                    crate::modules::fs::to_canon(entry.path())
                 };
                 out.push((git_path, max_depth));
             } else {

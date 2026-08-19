@@ -507,6 +507,7 @@ pub async fn git_delete_branch(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn git_merge(
     repo_root: String,
     branch: String,

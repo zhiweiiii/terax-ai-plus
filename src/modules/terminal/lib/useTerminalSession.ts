@@ -37,6 +37,7 @@ import {
   applyTerminalFont,
   applyWebglPreference,
   configureRendererPool,
+  applyExternalGrid,
   discardRetainedSlot,
   disposeLeafSlot,
   focusSlot,
@@ -420,17 +421,26 @@ configureRendererPool({
       resizePty: (cols, rows) => {
         s.cols = cols;
         s.rows = rows;
-        s.pty?.resize(cols, rows);
+        void s.pty
+          ?.resize(cols, rows)
+          .then((eff) => {
+            if (eff.cols === cols && eff.rows === rows) return;
+            // Refused: the phone owns the session inside the cooldown. Render
+            // at its grid rather than the one we asked for.
+            s.cols = eff.cols;
+            s.rows = eff.rows;
+            applyExternalGrid(leafId, eff.cols, eff.rows);
+          })
+          .catch(() => {});
       },
       kickPty: (cols, rows) => {
         const pty = s.pty;
         if (!pty || cols <= 0 || rows <= 0) return;
-        // Linux only emits SIGWINCH when the winsize ioctl actually
-        // changes dims, so bump +1 row then restore. The TUI receives
-        // (possibly two) SIGWINCHes and repaints from scratch.
+        // The bump-and-restore lives in Rust so it never looks like a grid
+        // change: going through resize() broadcast the transient to attached
+        // phones, which then re-gridded twice per rebind while a TUI ran.
         pty
-          .resize(cols, rows + 1)
-          .then(() => pty.resize(cols, rows))
+          .kick(cols, rows)
           .catch((e) => console.warn("[terax] kickPty failed:", e));
       },
     };

@@ -9,13 +9,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
-use portable_pty::PtySize;
 use tauri::ipc::{Channel, Response};
 use tauri::Emitter;
 
 use crate::modules::control::ControlState;
 use crate::modules::workspace::{user_spawn_cwd_or_home, WorkspaceEnv, WorkspaceRegistry};
-pub(crate) use session::{Session, WebMsg};
+pub(crate) use session::{Session, SizeOwner, WebMsg};
+
+/// Emitted when the PTY grid changed because an end claimed the session. The
+/// desktop frontend must resize its xterm to match and stop auto-fitting until
+/// it claims the session back, otherwise its next fit would fight the phone
+/// for the grid.
+pub const PTY_RESIZED_EVENT: &str = "terax:pty-resized";
 
 /// A desktop terminal tab, synced to the web layer so the phone can list and
 /// attach to every command line, not just the ones with a live PTY.
@@ -117,17 +122,13 @@ impl PtyState {
         self.sessions.read().unwrap().get(&id).cloned()
     }
 
-    /// Current PTY dimensions of a session (desktop-owned). The web page uses
-    /// these to render at the same cols/rows as the desktop, so TUI apps
-    /// (opencode, vim, htop) lay out identically instead of wrapping wrong.
+    /// Current PTY grid of a session. Reads the session's own mirror rather
+    /// than the master, so every message that carries a grid (the session
+    /// list, "attached", "resized") reports the same number. Asking the master
+    /// separately gave the page a second source that could disagree, and it
+    /// then flipped between the two on every poll.
     pub fn web_session_size(&self, s: &Arc<Session>) -> (u16, u16) {
-        let Ok(master) = s.master.lock() else {
-            return (80, 24);
-        };
-        match master.get_size() {
-            Ok(size) => (size.cols, size.rows),
-            Err(_) => (80, 24),
-        }
+        s.size()
     }
 
     /// Resolve a desktop leaf to its live pty session. When the tab has never
@@ -280,6 +281,18 @@ pub async fn pty_open(
 
 // Input is the latency-critical path: raw body + id header skips JSON
 // serialization of every keystroke on both sides of the IPC boundary.
+
+/// xterm-generated protocol answers, forwarded by the app's onData handler:
+/// focus reports (ESC [ I / ESC [ O) and OSC replies (ESC ] ... BEL|ST).
+/// They are not input and must not claim the session (see pty_write).
+fn looks_like_protocol_response(bytes: &[u8]) -> bool {
+    if bytes == b"\x1b[I" || bytes == b"\x1b[O" {
+        return true;
+    }
+    bytes.starts_with(b"\x1b]")
+        && (bytes.ends_with(b"\x07") || bytes.ends_with(b"\x1b\\"))
+}
+
 #[tauri::command]
 pub fn pty_write(
     state: tauri::State<PtyState>,
@@ -294,6 +307,22 @@ pub fn pty_write(
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("pty_write: expected raw body".to_string());
     };
+    // Typing at the desktop is an activity claim: it takes the grid back from
+    // a phone that had claimed it.
+    //
+    // Not every write is a keystroke: xterm forwards its own protocol answers
+    // through this same command - focus reports (ESC [ I / O, the TUI enabled
+    // reporting) and OSC replies (ESC ] ... BEL|ST, a palette query the TUI
+    // asked for). Those must reach the PTY or the TUI hangs waiting, but they
+    // must not move the grid, or a watched session ping-pongs back to the
+    // desktop's size a few seconds after every phone claim.
+    if !looks_like_protocol_response(bytes) {
+        if let Some(session) = state.sessions.read().unwrap().get(&id) {
+            if let Some((cols, rows)) = session.claim(SizeOwner::Desktop) {
+                log::info!("pty {id}: desktop reclaimed grid {cols}x{rows}");
+            }
+        }
+    }
     let session = state
         .sessions
         .read()
@@ -325,7 +354,7 @@ pub fn pty_resize(
     id: u32,
     cols: u16,
     rows: u16,
-) -> Result<(), String> {
+) -> Result<(u16, u16), String> {
     let session = state
         .sessions
         .read()
@@ -336,21 +365,33 @@ pub fn pty_resize(
             log::warn!("pty_resize: unknown id={id}");
             "no session".to_string()
         })?;
-    let result = session
-        .master
-        .lock()
-        .unwrap()
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| {
-            log::warn!("pty_resize id={id} failed: {e}");
-            e.to_string()
-        });
-    result
+    // Every desktop fit funnels through here: window resize, window focus,
+    // switching to the tab, app start. None of those transfer ownership, or a
+    // desktop sitting idle would keep snatching the grid back from a phone
+    // that is only being watched. It applies when the desktop already owns the
+    // session, and is remembered otherwise.
+    session.request_grid(SizeOwner::Desktop, cols, rows);
+    // Report the grid that actually applies. A phone that claimed the session
+    // inside the cooldown keeps its own, and the desktop has to render at it
+    // rather than at what it just asked for.
+    Ok(session.size())
+}
+
+/// Make a TUI repaint without moving the grid. See Session::kick_grid; this is
+/// deliberately NOT pty_resize, so a repaint nudge never reaches the phone as a
+/// grid change.
+#[tauri::command]
+pub fn pty_kick(
+    state: tauri::State<PtyState>,
+    id: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    let Some(session) = state.web_get(id) else {
+        return Ok(());
+    };
+    session.kick_grid(cols, rows);
+    Ok(())
 }
 
 #[tauri::command]

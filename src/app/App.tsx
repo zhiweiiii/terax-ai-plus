@@ -16,6 +16,7 @@ import { useZoom } from "@/lib/useZoom";
 import { isMarkdownPath } from "@/lib/utils";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import { useControlBridge } from "@/modules/control";
+import { bridgeNativeFileEvents } from "@/modules/events";
 import type { GitDiffPaneHandle } from "@/modules/editor";
 import {
   type EditorPaneHandle,
@@ -285,6 +286,10 @@ export default function App() {
     activeSpaceId: activeSpaceId ?? DEFAULT_SPACE_ID,
     enabled: spacesHydrated,
   });
+
+  // One process-wide fs watch feeds every panel through the event bus; the
+  // bridge is subscribed here for the app's lifetime.
+  useEffect(() => bridgeNativeFileEvents(), []);
 
   // Per-space memory of the terminal tab last focused there. Switching groups
   // should land back on the shell you were working in, so file tabs are never
@@ -649,23 +654,6 @@ export default function App() {
       focusPane,
     ],
   );
-
-  // All running agent terminals (claude / codex / gemini / opencode / ...),
-  // used to let the user pick a target when several agents are open.
-  const agentTargets = useMemo(() => {
-    const { agents } = useAgentActivityStore.getState();
-    const targets: { leafId: number; agent: string; cwd: string | null }[] = [];
-    for (const tab of tabsRef.current) {
-      if (tab.kind !== "terminal") continue;
-      for (const leafId of leafIds(tab.paneTree)) {
-        const ptyId = ptyIdForLeaf(leafId);
-        const agent = ptyId !== null ? agents[ptyId] : undefined;
-        if (!agent) continue;
-        targets.push({ leafId, agent, cwd: leafCwd(leafId) });
-      }
-    }
-    return targets;
-  }, [tabs]);
 
   const {
     popup: selectionAskPopup,
@@ -1297,9 +1285,30 @@ export default function App() {
     [removeTabsForSpace],
   );
 
-  const handleSwitchGroup = useCallback((id: string) => {
-    useSpaces.getState().setActive(id);
+  // Clicking a side-panel button or a group tab leaves keyboard focus on that
+  // control, so the arrow keys then drive the button row instead of the
+  // terminal or the editor. Hand focus back to whatever the main view is.
+  const focusMainView = useCallback(() => {
+    // Deferred: the same click also changes the active tab, and the target
+    // pane may not be mounted until after that render lands.
+    setTimeout(() => {
+      const tab = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (!tab) return;
+      if (tab.kind === "terminal") {
+        terminalRefs.current.get(tab.activeLeafId)?.focus();
+        return;
+      }
+      editorRefs.current.get(tab.id)?.focus();
+    }, 0);
   }, []);
+
+  const handleSwitchGroup = useCallback(
+    (id: string) => {
+      useSpaces.getState().setActive(id);
+      focusMainView();
+    },
+    [focusMainView],
+  );
 
   const spacesList = useSpaces((s) => s.spaces);
 
@@ -1460,6 +1469,7 @@ export default function App() {
                       : sourceControl.changedCount
                   }
                   onSelect={(id) => {
+                    focusMainView();
                     if (sidebarView === id && sidebarOpen) {
                       sidebarRef.current?.collapse();
                     } else {
@@ -1648,7 +1658,6 @@ export default function App() {
             <SelectionAskButton
               x={selectionAskPopup.x}
               y={selectionAskPopup.y}
-              targets={agentTargets}
               onSend={sendSelection}
               onDismiss={() => setSelectionAskPopup(null)}
             />
