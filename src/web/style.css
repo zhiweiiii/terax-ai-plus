@@ -425,3 +425,183 @@ body {
 .turn.sent.unconfirmed {
   opacity: 0.55;
 }
+
+/* ── Mode chip in the status label ───────────────────────────────────── */
+/* Of everything a tool pins to its status bar, the mode is the one piece that
+   changes what sending a message DOES ("auto-accept edits on", opencode's
+   "Build"). It reads first and is set apart from the rest of the readout. */
+.progstatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mode-chip {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(88, 166, 255, 0.16);
+  border: 1px solid rgba(88, 166, 255, 0.3);
+  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.status-rest {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Working indicator ───────────────────────────────────────────────── */
+/* What the program is doing right now, and for how long. A state, not
+   something anyone said: it sits above the composer and is replaced in place,
+   so a run that repaints its timer every 100 ms never enters the thread. */
+.thinking {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 4px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thinking::before {
+  content: "";
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  animation: thinking-spin 0.8s linear infinite;
+}
+
+@keyframes thinking-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── Choice buttons ──────────────────────────────────────────────────── */
+/* A numbered menu the program is waiting on. It answers to a single digit, so
+   a tap sends exactly that - no keyboard, no Enter. Wraps rather than scrolls:
+   a choice pushed off the edge is a choice nobody knows they have. */
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0 8px;
+}
+
+.choice-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  padding: 6px 12px 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--fg);
+  font-size: 12px;
+  text-align: left;
+}
+
+.choice-btn.selected {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.choice-btn:active {
+  background: rgba(88, 166, 255, 0.24);
+}
+
+.choice-key {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.choice-btn.selected .choice-key {
+  background: rgba(88, 166, 255, 0.25);
+  color: var(--accent);
+}
+
+.choice-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Transcript turns ────────────────────────────────────────────────── */
+/* An agent turn read from the agent's own record: what it said, what it
+   worked through, and what it ran. Three different kinds of thing, so three
+   different weights rather than one wall of text. */
+.turn-text {
+  white-space: pre-wrap;
+}
+
+.turn-think {
+  margin-top: 6px;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.turn-think > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  opacity: 0.8;
+}
+
+.turn-think > summary::-webkit-details-marker {
+  display: none;
+}
+
+.turn-think > summary::before {
+  content: "▸ ";
+}
+
+.turn-think[open] > summary::before {
+  content: "▾ ";
+}
+
+.turn-think > div {
+  margin-top: 4px;
+  white-space: pre-wrap;
+}
+
+.turn-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.tool-chip {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}

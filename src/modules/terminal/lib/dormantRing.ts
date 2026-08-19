@@ -54,7 +54,23 @@ export class DormantRing {
     }
   }
 
+  /** Emit the buffered bytes without consuming them. The web bridge seeds a
+   *  phone from this leaf's snapshot plus whatever has arrived since, and the
+   *  desktop still has to render those same bytes when the pane comes back. */
+  peek(write: (bytes: Uint8Array) => void): void {
+    this.emit(write);
+  }
+
   drain(write: (bytes: Uint8Array) => void): void {
+    this.emit(write);
+    this.blocks = [];
+    this.head = 0;
+    this.tailLen = 0;
+    this.total = 0;
+    this.overflowed = false;
+  }
+
+  private emit(write: (bytes: Uint8Array) => void): void {
     const last = this.blocks.length - 1;
     let skip = 0;
     if (this.overflowed && this.head <= last) {
@@ -71,11 +87,6 @@ export class DormantRing {
       const start = i === this.head ? skip : 0;
       if (start < len) write(this.blocks[i].subarray(start, len));
     }
-    this.blocks = [];
-    this.head = 0;
-    this.tailLen = 0;
-    this.total = 0;
-    this.overflowed = false;
   }
 
   byteLength(): number {

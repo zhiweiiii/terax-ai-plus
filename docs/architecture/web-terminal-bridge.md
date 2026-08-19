@@ -104,24 +104,28 @@ every 30 s to keep half-open connections honest.
 
 First message is a text frame:
 
-- `{"attach": <leafId>, "cols": C, "rows": R}` - attach to a desktop terminal
-  by its leaf id (not the pty id; the server resolves the mapping). `cols` /
-  `rows` are the phone's *preference*, recorded as its grid and applied when
-  it starts typing (see the grid-ownership note below); watching alone never
-  moves the PTY.
+- `{"attach": <leafId>}` - attach to a desktop terminal by its leaf id (not
+  the pty id; the server resolves the mapping). The phone sends **no** grid:
+  it renders no terminal, so it has no size to want, and imposing one would
+  resize the shared PTY and reflow the desktop's screen under a program laid
+  out for it. Optional `cols` / `rows` are still accepted for a client that
+  does render a grid; they are recorded as that client's preference and
+  applied when it starts typing (see the grid-ownership note below).
 - `{"list": true}` - request the session list.
 
 Later messages:
 
-- Binary `'0' + bytes` - write input to the attached session. The first
-  write claims the session and applies the phone's preferred grid.
+- Binary `'0' + bytes` - write input to the attached session. The first write
+  claims the session, applying the client's preferred grid if it stated one.
+  A client that stated none (the phone) never claims the size.
 - Binary `'1' + JSON{"cols","rows"}` - resize the shared PTY.
 - Text `{"attach": <leafId>}` - switch sessions.
 
 ### Server -> client
 
-- Binary `'0' + bytes` - terminal output. On attach, the recent history
-  (up to 256 KiB) is replayed first, then live chunks. Reads are
+- Binary `'0' + bytes` - terminal output. On attach, the **seed** is sent
+  first (the desktop terminal's own buffer, serialized), then live chunks.
+  See "Seeding a viewer" below. Reads are
   non-blocking: the server polls for complete frames on a 10 ms cadence
   while draining output, so a phone that only watches still receives live
   output and is never disconnected for idling. Peers that send no bytes at
@@ -129,10 +133,19 @@ Later messages:
 - Binary `'1' + bytes` - window title (UTF-8). Not implemented yet.
 - Text `{"type":"sessions","sessions":[...]}` - each entry carries
   `id` (leaf), `cwd`, `title`, `active`, `live`, `space`.
-- Text `{"type":"attached","id":N,"cols":C,"rows":R,"alt":bool}` - attach
-  confirmed, carrying the PTY's *current* grid (the owner's, not necessarily
-  the phone's preference) and whether the alternate screen is active, so the
-  page parses the coming history replay at the right size and buffer mode.
+- Text `{"type":"attached","id":N,"cols":C,"rows":R,"alt":bool,"seed":bool}` -
+  attach confirmed, carrying the PTY's *current* grid (the owner's) so the page
+  sizes its parser before anything arrives. `seed` says whether a seed frame
+  follows. `alt` is the buffer mode to assume **only when it does not**: a seed
+  carries its own mode (it re-enters the alternate screen itself), so forcing
+  one before writing it would land the desktop's scrollback in the wrong
+  buffer.
+- Text `{"type":"transcript", ...}` - the agent conversation for the attached
+  session, read from the agent's own record. Carries `source`
+  ("claude"/"opencode"), `session_id`, `mode`, `model`, `messages[]` (role,
+  text, `reasoning`, `tools`), `working` (when a turn is still running) and
+  `revision`. Sent only while an agent is actually running, and only when it
+  changed. See "Agent transcript" below.
 - Text `{"type":"resized","cols":C,"rows":R}` - the shared grid changed (a
   claim or a resize); every viewer re-sizes its parser.
 - Text `{"type":"opening","id":N}` - the desktop is spawning this tab; the
@@ -141,7 +154,7 @@ Later messages:
   clears its attached state.
 - Text `{"type":"error","message":...}` - includes `output too fast,
   resubscribe`, sent when the viewer was evicted for falling behind (the
-  page reconnects, and history replay catches it up).
+  page reconnects, and the seed catches it up).
 
 ## Sharing the PTY
 
@@ -149,19 +162,101 @@ Desktop and web use the same `Arc<Session>` (`PtyState::web_get`). The
 flusher thread in `session.rs`:
 
 1. Sends every chunk to the desktop's Tauri Channel (existing path).
-2. Appends it to a rolling history ring (`WEB_HISTORY_CAP` = 256 KiB).
-3. Broadcasts it to every attached Web viewer
+2. Broadcasts it to every attached Web viewer
    (`Session::web_broadcast`, bounded queues so a slow phone never stalls
    the PTY; an evicted viewer is told and reconnects).
+
+Nothing on the Rust side stores session output. There is no history ring.
 
 Input from either end writes to the same `writer`, so commands typed on the
 phone echo on the desktop and vice versa.
 
+## Seeding a viewer
+
+What a phone shows when it attaches is **the desktop terminal's own buffer**,
+fetched from the window on demand:
+
+1. The server subscribes the viewer first, so output produced during the next
+   step is queued rather than lost.
+2. It emits `terax:web-snapshot` (`{leafId, requestId}`) and blocks up to
+   `SNAPSHOT_TIMEOUT` (1.5 s) on the reply.
+3. The desktop (`useWebTerminalSync`) calls `snapshotLeaf(leafId)` and answers
+   through the `web_snapshot_reply` command. A leaf holding a renderer slot is
+   serialized live (`serializeLeaf` -> `SerializeAddon`); a parked one answers
+   from the snapshot taken when its slot was released plus the output that has
+   arrived since (`DormantRing.peek`), which is the same two pieces the desktop
+   itself replays when the pane comes back.
+4. The server sends `attached` with `seed: true`, then the snapshot as one
+   output frame.
+
+The serialized form reproduces the terminal exactly: scrollback, current
+screen, and, when a full-screen program is running, its alternate screen
+re-entered with `?1049h` at the end. No reply within the timeout means no seed;
+the phone simply follows the live stream from there (`seed: false`).
+
+This replaced a 256 KiB rolling byte ring the server used to keep per session.
+A second copy of the output inevitably drifts from what the desktop shows: it
+outlived a `clear`, and it was bounded in *bytes* where a terminal is bounded
+in *lines*, so an idle shell's ring spanned days. The phone opened on records
+the desktop no longer had, and then lost them again as the parser's own line
+cap trimmed from the front. The desktop's buffer is the only honest answer to
+"what does this command line show".
+
+The few milliseconds between step 1 and step 3 can appear both in the seed and
+in the queue, so a busy session may show a small duplicate at the join. That is
+the accepted cost of not making the window count bytes for us.
+
+## Agent transcript
+
+What a coding agent said is read from where the agent writes it down, not
+parsed off its screen (`src-tauri/src/modules/transcript/`):
+
+| Agent | Source |
+|---|---|
+| Claude Code | `~/.claude/projects/<escaped cwd>/<session>.jsonl` |
+| opencode | `~/.local/share/opencode/opencode.db` (SQLite, read-only) |
+
+Both are normalised into one shape: user/assistant turns with the agent's
+`reasoning` and the `tools` it ran, plus the session's `mode`, `model` and
+whether a turn is still in flight. Consecutive agent steps are merged into one
+turn - both tools write a row per model round trip, and a reader wants the
+answer rather than the machinery.
+
+Three gates keep an idle session free:
+
+1. **A running agent.** The PTY's own OSC detection (`pty::agent_detect`)
+   records which agent started, and the session reports it (`Session::web_agent`).
+   Without one nothing is read: a directory that ran an agent yesterday must
+   not show that conversation over today's shell prompt.
+2. **A filesystem mark.** `transcript::fingerprint` is a stat of the newest
+   transcript file (and of opencode's database plus its write-ahead log).
+   Unchanged means no read.
+3. **A revision.** Only a transcript whose newest timestamp moved is sent.
+
+Polled every 700 ms rather than watched, because one backend is a SQLite
+database whose commits land in a write-ahead log that no filesystem event
+describes usefully.
+
+**Why opencode's database directly.** Its running TUI opens no port, so there
+is nothing to attach to, and `opencode export` costs a process launch per read.
+The database is opened read-only and never written, so a running opencode is
+unaffected. It is opencode's own storage rather than an interface it promises,
+so every failure path here degrades to "no transcript" and puts the phone back
+on the screen view; a schema that moves under us must not break the page.
+
+The one thing the transcript cannot know is what the program is asking you to
+pick *right now* - a pending permission prompt is live UI state that neither
+tool persists. That stays with the screen parse. See
+[Mobile conversation view](mobile-conversation-view.md).
+
+## Grid ownership
+
 One session has one grid, and **whoever is typing owns it** (`SizeOwner`,
 `claim`, `request_grid` in the pty module, with a 3 s `OWNER_COOLDOWN`).
-Attaching records the phone's preferred grid but watching alone never moves
-the PTY; the phone's first keystroke claims the session and applies that grid,
-repainting the TUI. The desktop reclaims only on real keystrokes — xterm's
+The phone states no grid, so it never claims one: the PTY stays exactly as the
+desktop has it, the program is laid out at the screen the desktop is showing,
+and typing from the phone does not reflow it. The desktop reclaims only on real
+keystrokes - xterm's
 protocol answers (focus reports `ESC[I/O`, OSC 4 palette replies to the TUI's
 palette query) are forwarded to the PTY but deliberately skip the claim
 (`looks_like_protocol_response` in `pty_write`), so a watched session no longer
@@ -173,14 +268,8 @@ phone therefore *parses* at exactly the PTY's current `cols`/`rows` (`attached`
 carries them, and `resized` follows every change) but does not *render* a grid
 at all: it extracts logical lines and re-wraps them at the phone's width. See
 [Mobile conversation view](mobile-conversation-view.md). The server sends the
-`attached` size **before** the history replay so the parser is sized first;
-replaying bytes at the wrong width garbles every wrapped line.
-
-The history ring is trimmed by `trim_history`, which drops the requested byte
-count and then keeps dropping to the next ESC (falling back to the next
-newline). Trimming on a raw byte count alone lands inside a CSI sequence, and a
-reconnecting viewer that starts there renders the remainder as literal text —
-that is how a phone came to show `48;2;10;10;10m` instead of a conversation.
+`attached` size **before** the seed so the parser is sized first; writing the
+desktop's buffer at the wrong width garbles every wrapped line.
 
 Each web connection subscribes with its own `SyncSender`; disconnect removes
 exactly that subscription, never the whole table.

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, ChildKiller, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter, Manager};
 
-use super::agent_detect::AgentDetector;
+use super::agent_detect::{AgentDetector, Transition};
 use super::da_filter::DaFilter;
 use super::shell_init;
 use crate::modules::workspace::WorkspaceEnv;
@@ -29,11 +29,6 @@ const MAX_PENDING: usize = 4 * 1024 * 1024;
 // we're forced to discard backlog.
 const OVERFLOW_NOTICE: &[u8] =
     b"\x1bc\x1b[2m[terax: dropped output due to backpressure]\x1b[0m\r\n";
-
-/// Ring buffer kept for late Web subscribers (page reload, new viewer): a new
-/// subscriber gets this history replayed before live bytes, so the mobile page
-/// opens showing the current screen instead of a blank terminal.
-const WEB_HISTORY_CAP: usize = 256 * 1024;
 
 /// Bounded queue a Web client subscribes with. SyncSender + try_send drops the
 /// oldest chunk when a slow viewer can't keep up, so one laggy phone never
@@ -97,8 +92,11 @@ pub struct Session {
     pub(super) exited: Arc<AtomicBool>,
     /// Display metadata for the web page's session list.
     pub cwd: Option<String>,
-    /// Recent output for late Web subscribers (ring buffer).
-    history: Mutex<Vec<u8>>,
+    /// The coding agent running in this shell, as its own OSC markers
+    /// announced it. Both the gate for reading an agent transcript - a
+    /// directory that once ran one must not show that conversation over an
+    /// idle prompt - and the choice of which transcript to read.
+    agent: Arc<Mutex<Option<String>>>,
     /// Web viewers attached to this session (bounded queues).
     web_subs: Mutex<Vec<SyncSender<WebMsg>>>,
     /// Whether the PTY is currently on the alternate screen (opencode / claude
@@ -133,30 +131,6 @@ impl Drop for Session {
 #[cfg(windows)]
 static CONPTY_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
-/// Drop `want` bytes off the front of the history ring, then keep dropping to
-/// the next escape-sequence boundary.
-///
-/// The ring holds raw PTY bytes, so trimming by a byte count lands wherever it
-/// lands — very often in the middle of a CSI sequence. A viewer replaying from
-/// there has no way to know it joined mid-sequence and renders the remainder
-/// as literal text, which is how a reconnecting phone ended up showing
-/// "48;2;10;10;10m" instead of a conversation.
-///
-/// Resyncing to the next ESC costs at most one sequence and makes the replay
-/// parseable. Falling back to the next newline covers a ring holding plain
-/// text with no escapes in it at all.
-fn trim_history(history: &mut Vec<u8>, want: usize) {
-    let cut = want.min(history.len());
-    history.drain(..cut);
-    let resync = history
-        .iter()
-        .position(|b| *b == 0x1b)
-        .or_else(|| history.iter().position(|b| *b == b'\n').map(|i| i + 1));
-    if let Some(at) = resync {
-        history.drain(..at);
-    }
-}
-
 pub(super) fn drop_session(session: Arc<Session>) {
     #[cfg(windows)]
     let _guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
@@ -170,23 +144,26 @@ impl Session {
         self.in_alt.load(Ordering::Acquire)
     }
 
-    /// Attach a Web viewer: returns a snapshot of recent output (to be replayed
-    /// first), the sender handle used to cancel this exact subscription, and a
-    /// receiver for live chunks. Returns None if the session already exited.
-    pub fn web_subscribe(
-        &self,
-    ) -> Option<(
-        Vec<u8>,
-        SyncSender<WebMsg>,
-        mpsc::Receiver<WebMsg>,
-    )> {
+    /// The coding agent running in this shell right now, if any.
+    pub fn web_agent(&self) -> Option<String> {
+        self.agent.lock().unwrap().clone()
+    }
+
+    /// Attach a Web viewer: returns the sender handle used to cancel this exact
+    /// subscription, and a receiver for live chunks. Returns None if the
+    /// session already exited.
+    ///
+    /// No backlog comes out of here. What a viewer sees first is the desktop
+    /// terminal's own buffer, asked for on attach (`web::request_snapshot`):
+    /// keeping a second copy of every session's output on this side made the
+    /// phone open on a history the desktop no longer had.
+    pub fn web_subscribe(&self) -> Option<(SyncSender<WebMsg>, mpsc::Receiver<WebMsg>)> {
         if self.exited.load(Ordering::Acquire) {
             return None;
         }
         let (tx, rx) = mpsc::sync_channel(WEB_SUB_QUEUE);
-        let history = self.history.lock().unwrap().clone();
         self.web_subs.lock().unwrap().push(tx.clone());
-        Some((history, tx, rx))
+        Some((tx, rx))
     }
 
     /// The live PTY grid.
@@ -261,8 +238,6 @@ impl Session {
     }
 
     /// Force a SIGWINCH without changing the session's grid.
-    ///
-    /// (See `trim_history` below for the history ring's own trimming rule.)
     ///
     /// Linux only signals when the winsize ioctl actually changes, so this
     /// bumps a row and puts it straight back. It deliberately skips the size
@@ -421,6 +396,9 @@ pub fn spawn(
     };
 
     let exited = Arc::new(AtomicBool::new(false));
+    // Shared rather than read off the session: the reader thread that learns
+    // the agent's name is spawned after this value is built.
+    let agent_name: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
     let session = Arc::new(Session {
         #[cfg(windows)]
@@ -431,7 +409,7 @@ pub fn spawn(
         master: Mutex::new(pair.master),
         exited: exited.clone(),
         cwd,
-        history: Mutex::new(Vec::with_capacity(WEB_HISTORY_CAP.min(64 * 1024))),
+        agent: agent_name.clone(),
         web_subs: Mutex::new(Vec::new()),
         in_alt: AtomicBool::new(false),
         owner: Mutex::new((SizeOwner::Desktop, Instant::now())),
@@ -452,6 +430,7 @@ pub fn spawn(
     let pending_r = pending.clone();
     let writer_for_da = writer.clone();
     let app_reader = app.clone();
+    let agent_name_r = agent_name.clone();
     let first_byte_r = first_byte;
     let reader_thread = thread::Builder::new()
         .name("terax-pty-reader".into())
@@ -470,6 +449,15 @@ pub fn spawn(
                             log::debug!("pty first byte after {}ms", spawn_at.elapsed().as_millis());
                         }
                         agent_detect.process(&buf[..n], |t| {
+                            match &t {
+                                Transition::Started { agent } => {
+                                    *agent_name_r.lock().unwrap() = Some(agent.clone());
+                                }
+                                Transition::Exited => {
+                                    *agent_name_r.lock().unwrap() = None;
+                                }
+                                _ => {}
+                            }
                             let _ = app_reader.emit(AGENT_EVENT, t.into_signal(id));
                         });
                         filtered.clear();
@@ -564,16 +552,7 @@ pub fn spawn(
                 if let Some(cb) = &on_data_ref {
                     cb(chunk.clone());
                 }
-                // Keep a rolling window of output for late Web subscribers and
-                // fan the chunk out to currently attached viewers.
-                {
-                    let mut history = session_f.history.lock().unwrap();
-                    if history.len() + chunk.len() > WEB_HISTORY_CAP {
-                        let over = history.len() + chunk.len() - WEB_HISTORY_CAP;
-                        trim_history(&mut history, over);
-                    }
-                    history.extend_from_slice(&chunk);
-                }
+                // Fan the chunk out to currently attached Web viewers.
                 session_f.web_broadcast(&chunk);
             }
         })
@@ -616,17 +595,9 @@ pub fn spawn(
             let (lock, cv) = &*pending_e;
             let tail = std::mem::take(&mut *lock.lock().unwrap());
             if !tail.is_empty() {
-                // The tail is the last output before exit. Desktop channel,
-                // history ring, and Web viewers all get it, so a phone
-                // attached at exit time sees the final lines (issue #5).
-                {
-                    let mut history = session_exit_f.history.lock().unwrap();
-                    if history.len() + tail.len() > WEB_HISTORY_CAP {
-                        let over = history.len() + tail.len() - WEB_HISTORY_CAP;
-                        trim_history(&mut history, over);
-                    }
-                    history.extend_from_slice(&tail);
-                }
+                // The tail is the last output before exit. Both the desktop
+                // channel and attached Web viewers get it, so a phone attached
+                // at exit time sees the final lines (issue #5).
                 session_exit_f.web_broadcast(&tail);
                 if let Some(cb) = &on_data_exit {
                     cb(tail);

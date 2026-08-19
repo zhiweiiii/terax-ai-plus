@@ -72,6 +72,126 @@ unmatched footer rows cannot outvote it.
 This is deliberately generic: it knows nothing about any particular program's
 layout, so it does not break when one changes its box drawing.
 
+## Where the conversation comes from
+
+An agent conversation is **not** read off the screen. It is read from the
+record the agent itself keeps:
+
+| Agent | Source |
+|---|---|
+| Claude Code | `~/.claude/projects/<escaped cwd>/<session>.jsonl` |
+| opencode | `~/.local/share/opencode/opencode.db` (SQLite) |
+
+The Rust `transcript` module normalises both into one shape (user/assistant
+turns, the agent's reasoning, the tools it ran, the mode, the model, and
+whether a turn is still running) and the bridge pushes it to the phone as a
+`transcript` message. See
+[Web terminal bridge](web-terminal-bridge.md) § Agent transcript.
+
+### Why not the screen
+
+The screen parse worked, but it is a parse of a picture, and a picture has no
+idea what is content. Measured against a real opencode session, every one of
+these was a bug that had to be found and fixed individually:
+
+- opencode draws a **right-hand panel** (session name, token count, cost, LSP
+  state, cwd, branch) on the same rows as the conversation. Read as text it
+  interleaved: `1% used` glued to the front of a sentence, a bare cwd path as
+  its own bubble, a timestamp landing inside the echo of what was typed.
+- a spinner line reads as a sentence unless it is recognised as a spinner, and
+  Claude cycles through dozens of verbs.
+- the mode sits on a status bar whose position moves between versions.
+- an agent's own reasoning is not distinguishable from its answer.
+
+None of that is inherent to the task. Both tools already write the
+conversation down in a structured form, with roles, timestamps and reasoning
+stated rather than inferred. Reading that is less code and cannot be wrong
+about who said what.
+
+### What the screen is still for
+
+Exactly one thing the transcript cannot know: **what the program is asking you
+to pick right now**. A permission prompt or a menu is live UI state, not
+conversation, and neither tool persists it while it is pending. So the screen
+parse keeps running and keeps producing `choices`, plus `promptBlocks` - the
+rows the menu is attached to, which is the question and whatever justifies it
+(the command it wants to run, the diff it wants to write). Approving "create
+hello.txt" without seeing what goes in it is a guess, not a decision.
+
+Because the menu is the one thing here that must never be lost, `findChoices`
+runs over the **whole screen before the footer is split off**, and the footer
+is then only allowed to begin below the menu. Making it depend on the footer
+split meant it could vanish: Claude draws its diff between two dashed rules,
+the footer anchored on the lower one, and the entire prompt counted as status.
+
+A plain shell has no transcript at all. The page then falls back to the screen
+for everything, which is what the rest of this document describes.
+
+## Four things, not one stream
+
+A screen is not one kind of information, and flattening it into bubbles buries
+the parts a reader needs continuously. `setLive` takes the screen apart in a
+fixed order, each piece rendered in its own place. Under an agent transcript
+most of these are superseded by the transcript's own stated values; they remain
+the source for a plain shell, and for a full-screen program that keeps no
+record of itself:
+
+| Piece | Screen field | Transcript field | Where it renders |
+|---|---|---|---|
+| Body | `turns`, `liveBlocks` | `messages` | the thread |
+| Working state | `thinking` | `working.since` | above the composer |
+| Mode | `mode` | `mode` | the label at the top |
+| Model | - | `model` | next to the mode |
+| Reasoning | - | `messages[].reasoning` | collapsed under the turn |
+| Tools | - | `messages[].tools` | chips under the turn |
+| Choices | `choices` | (not recorded) | tappable buttons |
+| Running agents | `agents` | - | a chip strip |
+
+Order matters: the working line is taken out **first**, because it is drawn
+right above the input box and can land on the footer's bottom row, which is
+otherwise the agent tab strip. A program that is merely thinking was being
+reported as running a subagent.
+
+### Working state (`splitWorking`)
+
+What it is doing, and for how long. The verb is never matched against a list:
+Claude cycles through dozens of them ("Musing", "Pondering", "Herding") and
+adding a new one must not break this. What is matched is the shape every tool
+draws: a short line, near the input box, that trails off in an ellipsis, often
+with an elapsed time (`1m 5s` or `12s`) somewhere on it. A leading spinner
+glyph is stripped but not required.
+
+It is deliberately not a bubble. "Thinking for 12s" is a state that is true
+until it is not, and pushing each repaint of it into the thread would bury the
+conversation in its own progress bar.
+
+### Mode (`detectMode`)
+
+Of everything a tool pins to its status bar, the mode is the one piece that
+changes what sending a message DOES, so it is pulled out and shown on its own
+rather than folded into the condensed label. Claude phrases it as
+`<something> mode on` / `auto-accept edits on`; opencode puts it first on its
+model line (`Build · <model>`). Both are read **before** `condenseStatus`,
+which drops those lines as readouts.
+
+### Choices (`splitChoices`)
+
+A numbered menu the program is waiting on becomes buttons: it answers to a
+single digit, and on a phone tapping it beats opening the keyboard to type one.
+The options are then not also rendered as bubbles; the question above them
+still is.
+
+Numbering alone cannot identify a menu - an agent writing "1. do this /
+2. do that" in prose is common and must stay prose. Two things separate them:
+
+- every menu these tools draw marks the current row with `❯` or `>`;
+- a menu numbers upward, so a run whose keys do not increase is two adjacent
+  lists, not one menu.
+
+The scan runs upward from the input box, so the menu picked is the one the
+program is actually waiting on, and a key hint or blank below it is not
+mistaken for the end of the run.
+
 ## Reading a screen as bubbles
 
 `toBlocks` turns screen rows into blocks. It relies only on things true of every
@@ -182,31 +302,28 @@ waits in `pending` instead and is dropped as soon as the program paints the
 prompt itself. Leaving the alternate screen folds anything still pending back
 into history, in order.
 
-## Backlog on attach
+## Seed on attach
 
-The server replays the session's rolling output history (`WEB_HISTORY_CAP`,
-256 KiB) immediately after `attached`. That is how a freshly connected phone
-picks up what the desktop's command line already had.
+A freshly connected phone is handed **the desktop terminal's own buffer**,
+serialized, as one frame right after `attached`. Nothing is reconstructed: the
+buffer already IS the result of every frame the program ever painted, which is
+why the desktop is asked for it rather than a byte log being replayed through
+the parser. See [Web terminal bridge](web-terminal-bridge.md) for how it is
+fetched.
 
-It is fed in through `writeBacklog`, in slices of about two grid rows (up to
-2 KiB) with a read between each. Writing it in one go would be useless for a
-full-screen program: every frame it ever painted would be applied to the
-buffer in sequence and only the last would be read, collapsing the whole
-conversation into the current screen. Slicing replays the frames, and the same
-scroll detection that follows a live session reconstructs the history from
-them. Slicing is safe at any byte — xterm carries a partial escape sequence
-over to the next write.
+`writeSeed` writes it as-is, with one split: the alternate-screen enter. A
+serialized terminal running a full-screen program is "scrollback, then
+`?1049h`, then the program's screen", and `flush` only ever reads whichever
+buffer is active. Writing straight past the switch would leave the scrollback
+unread and the phone would open on the TUI's screen alone. So the seed is
+written up to the switch, read out as history, then written the rest of the
+way. The first alt frame after a seed is never treated as a splash: attaching
+mid-session means whatever is on screen is an interaction, not a logo.
 
-The slice size is the trap that used to break this. `detectScroll` needs two
-consecutive reads to share most rows; if one slice scrolls more than about a
-third of the screen, the content below the fold is entirely new and no shift
-matches. The original fixed 2048 bytes was ~15 full lines of a 138-column
-grid, so a session that scrolled (a long conversation, a big diff) lost its
-whole history on attach: replayed on a real 81 KiB OpenCode backlog it
-produced 38 frames and 0 scrolls. The slice is now `max(64, min(2048,
-cols * 2))` — about two grid rows per slice — which keeps consecutive reads
-well above the 70 % overlap threshold at any PTY size. The same replay now
-detects 27/28 scrolls and reconstructs the full transcript.
+`writeBacklog` is the older path and no longer runs in production. It slices a
+raw byte stream and reads between slices so a full-screen program's frames are
+reconstructed by `detectScroll`; the replay harness still drives captures
+through it.
 
 ## Input
 
@@ -247,8 +364,10 @@ XOR-obfuscated constant the Rust side embeds):
   output frame (with timestamps and the user's sends) to a JSONL.
 - `scripts/web-replay.mjs` — replay a capture through the exact `Conversation`
   the page uses (bundled by `scripts/convo-test.config.mjs`), driving
-  setGrid/setAltScreen/writeBacklog like `main.ts`. `--trace` prints live
-  blocks as they change; useful for watching a transient permission menu.
+  setGrid + writeSeed/writeBacklog like `main.ts` (a capture taken since the
+  seed rework carries `seed: true` on `attached`; older ones replay the raw
+  ring). `--trace` prints live blocks as they change, along with the working
+  state, mode and choices; useful for watching a transient permission menu.
 - `scripts/web-synthetic-test.mjs` — feed constructed alt-screen frames (claude
   permission dialogs, `1/2/3` option lists, an exit prompt, a startup splash)
   through the parser and assert they render the way they should. This is the

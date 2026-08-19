@@ -4,8 +4,8 @@
 //   node scripts/web-replay.mjs <capture.jsonl> [--raw] [--blocks]
 //
 // The capture is driven exactly like src/web/main.ts does: setGrid/setAltScreen
-// on "attached", writeBacklog for the first output frame, write() for the
-// rest, setGrid on "resized". Event gaps are replayed with real timing capped
+// on "attached", writeSeed/writeBacklog for the first output frame, write()
+// for the rest, setGrid on "resized". Event gaps are replayed with real timing capped
 // at 150ms so a long capture does not take minutes.
 //
 // Output: the final turns (sent/output/note), the live screen blocks, pending
@@ -28,6 +28,7 @@ const events = readFileSync(file, "utf8")
 const conv = new Conversation(() => {});
 let attached = false;
 let backlog = false;
+let seeded = false;
 let frames = 0;
 // Cap long event gaps at 1s: enough for the 700ms idle close to fire (so
 // output blocks split like they do live) while a long capture still replays
@@ -59,6 +60,11 @@ for (const ev of events) {
       console.log(`\n>>> t=${ev.t}ms live blocks (${conv.liveBlocks.length}):`);
       for (const b of conv.liveBlocks) console.log(`  [${b.role}] ${b.lines.join("\n      ")}`);
       if (conv.agents.length) console.log(`  [agents] ${conv.agents.join(" | ")}`);
+      if (conv.thinking)
+        console.log(`  [working] ${conv.thinking.label} ${conv.thinking.seconds ?? "-"}s`);
+      if (conv.choices.length)
+        console.log(`  [choices] ${conv.choices.map((c) => `${c.key}=${c.label}`).join(" | ")}`);
+      if (conv.mode) console.log(`  [mode] ${conv.mode}`);
       if (conv.status) console.log(`  [status] ${conv.status}`);
     }
   }
@@ -66,7 +72,11 @@ for (const ev of events) {
     const m = ev.payload;
     if (m.type === "attached") {
       conv.setGrid(m.cols ?? 120, m.rows ?? 40);
-      conv.setAltScreen(m.alt === true);
+      // A capture taken since the seed rework carries the desktop's serialized
+      // buffer as its first frame (`seed`), which brings its own buffer mode.
+      // Older captures start with a raw ring replay and need the mode forced.
+      seeded = m.seed === true;
+      if (!seeded) conv.setAltScreen(m.alt === true);
       attached = true;
       backlog = true;
     } else if (m.type === "resized") {
@@ -80,7 +90,9 @@ for (const ev of events) {
     frames++;
     if (backlog) {
       backlog = false;
-      await conv.writeBacklog(bytes);
+      // A seed is the desktop's buffer and is applied as-is; a raw ring
+      // backlog has to be replayed in slices so its frames are reconstructed.
+      await (seeded ? conv.writeSeed(bytes) : conv.writeBacklog(bytes));
     } else {
       conv.write(bytes);
     }

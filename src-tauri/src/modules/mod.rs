@@ -6,5 +6,6 @@ pub mod lsp;
 pub mod proc;
 pub mod pty;
 pub mod shell;
+pub mod transcript;
 pub mod web;
 pub mod workspace;

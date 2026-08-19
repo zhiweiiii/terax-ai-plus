@@ -620,6 +620,24 @@ export function releaseSlot(leafId: number): ReleaseOutput | null {
   return { cols: slot.term.cols, rows: slot.term.rows };
 }
 
+/** Serialize the leaf's terminal right now, without disturbing its slot.
+ *  The web bridge seeds a phone from this: the desktop's own buffer is the
+ *  only honest answer to "what does this command line show", and the addon
+ *  reproduces scrollback, current screen and the alternate screen of a running
+ *  full-screen program in one string.
+ *
+ *  A *retained* slot counts. Parking a pane leaves its content in that slot's
+ *  terminal and clears the session's stored snapshot (the stored copy is
+ *  written back into the slot on bind and dropped), so a leaf that is merely
+ *  hidden has its buffer here and nowhere else. Null only when the slot was
+ *  repurposed, and the caller then falls back to the stored snapshot. */
+export function serializeLeaf(leafId: number): SerializeOutput | null {
+  const slot =
+    slots.find((s) => s.currentLeafId === leafId) ??
+    slots.find((s) => s.currentLeafId === null && s.retainedLeafId === leafId);
+  return slot ? serializeSlot(slot) : null;
+}
+
 function serializeSlot(slot: Slot): SerializeOutput {
   let snapshot: string | null = null;
   try {

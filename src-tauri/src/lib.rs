@@ -262,6 +262,7 @@ pub fn run() {
             pty::web_sync_leaf_pty,
             pty::web_activate_leaf,
             web::web_status,
+            web::web_snapshot_reply,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

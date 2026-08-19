@@ -29,6 +29,22 @@ export type Turn =
   | { kind: "output"; id: number; at: number; lines: string[]; open: boolean }
   | { kind: "note"; id: number; at: number; text: string };
 
+/** `ESC [ ? 1 0 4 9 h` - the alternate-screen enter, as bytes. */
+const ALT_ENTER = new TextEncoder().encode("\x1b[?1049h");
+
+/** Byte offset of the alternate-screen enter, or -1. A serialized terminal
+ *  puts it between the scrollback and a running program's screen. */
+function indexOfAltEnter(bytes: Uint8Array): number {
+  const needle = ALT_ENTER;
+  outer: for (let i = 0; i + needle.length <= bytes.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (bytes[i + j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
 /** Scrollback held by the headless parser before it is recycled. */
 const PARSER_SCROLLBACK = 5000;
 /** Recycle the parser once this many lines have scrolled off. Keeps the
@@ -65,6 +81,9 @@ export class Conversation {
   private inAlt = false;
   /** Previous alt-screen frame, for scroll detection. */
   private prevScreen: string[] = [];
+  /** Column the previous frame's side panel started at, or -1. Rows that
+   *  scroll off are trimmed with the cut of the frame they came from. */
+  private sideCut = -1;
   /** Text we just sent, still waiting to be recognised in the shell's echo. */
   private pendingEcho: string | null = null;
   /** Recently sent text, so a TUI repainting it is not shown twice. */
@@ -97,6 +116,28 @@ export class Conversation {
    *  agent's name or task, and kept separate from the bubbles so agent
    *  activity reads as a status chip rather than as conversation. */
   agents: string[] = [];
+  /** What the program is doing right now, and for how long - the spinner line
+   *  both tools draw above their input box ("✻ Thinking… (12s · …)"). It is a
+   *  state, not something anyone said, so it is kept out of the bubbles and
+   *  shown as its own indicator. Null when nothing is running. */
+  thinking: Thinking | null = null;
+  /** The agent's current mode ("auto-accept edits on", opencode's "Build").
+   *  Pulled out of the footer before the rest is condensed, because it is the
+   *  one status fragment that changes what typing into this session DOES. */
+  mode: string | null = null;
+  /** A numbered menu the program is offering ("1. Yes / 2. No"). Rendered as
+   *  buttons instead of text: the answer is a keystroke, and on a phone
+   *  tapping it beats opening the keyboard to type one digit. */
+  choices: Choice[] = [];
+  /** What the pending menu is attached to: the question, and whatever the
+   *  program is showing to justify it - the command it wants to run, the diff
+   *  it wants to write. Empty unless `choices` is.
+   *
+   *  Separate from `liveBlocks` because under an agent transcript the screen
+   *  is not the conversation and is not rendered, but this part of it has to
+   *  be: approving "create hello.txt" without seeing what goes in it is not a
+   *  decision, it is a guess. */
+  promptBlocks: Block[] = [];
   /** Diagnostics: how many alt-screen frames were seen, and how many of them
    *  were recognised as a scroll. A frame count that climbs while `scrolls`
    *  stays at 0 means the screen is being repainted in a way detectScroll does
@@ -146,16 +187,47 @@ export class Conversation {
     this.scheduleFlush();
   }
 
-  /** Take in the backlog the server replays when a phone attaches — what was
-   *  already on the desktop's command line before anyone connected.
+  /** Take in the seed the server sends when a phone attaches: the desktop
+   *  terminal's own buffer, serialized.
    *
-   *  It arrives as one block of bytes, and writing it in one go would be
-   *  useless for a full-screen program: every frame it ever painted would be
-   *  applied to the buffer in sequence and only the last one would ever be
-   *  read, so the whole conversation would collapse into the current screen.
-   *  Feeding it in slices and reading between them replays the frames instead,
-   *  and the same scroll detection that follows a live session reconstructs
-   *  the history from them.
+   *  There are no frames to reconstruct here - the buffer already IS the
+   *  result of every frame the program ever painted, which is exactly why the
+   *  desktop is asked for it instead of a byte log being replayed through the
+   *  parser. So it is written as-is.
+   *
+   *  The one split that matters is the alternate-screen enter. A serialized
+   *  terminal running a full-screen program is "scrollback, then `?1049h`,
+   *  then the program's screen", and `flush` only ever reads whichever buffer
+   *  is active - so writing straight past the switch would leave the
+   *  scrollback unread and the phone would open on the TUI's screen alone.
+   *  Write up to the switch, read the scrollback out as history, then write
+   *  the rest. */
+  async writeSeed(bytes: Uint8Array) {
+    const at = indexOfAltEnter(bytes);
+    const head = at < 0 ? bytes : bytes.subarray(0, at);
+    if (head.length > 0) {
+      await new Promise<void>((done) => this.term.write(head, () => done()));
+      this.flush();
+      this.emitSeededCursorRow();
+    }
+    if (at < 0) return;
+    // Attaching mid-session: whatever the program has on screen now is an
+    // interaction the reader needs, never the splash it opened with.
+    this.firstFrame = false;
+    const tail = bytes.subarray(at);
+    await new Promise<void>((done) => this.term.write(tail, () => done()));
+    this.flush();
+  }
+
+  /** Replay a raw PTY byte stream through the parser, reading between slices.
+   *
+   *  Production does not use this - a phone is seeded from the desktop's
+   *  buffer (`writeSeed`). It is how the replay harness (`scripts/`) drives
+   *  captured sessions: writing a capture in one go would apply every frame a
+   *  full-screen program painted and read only the last, so the whole
+   *  conversation would collapse into the final screen. Feeding it in slices
+   *  and reading between them replays the frames instead, and the same scroll
+   *  detection that follows a live session reconstructs the history.
    *
    *  Slicing is safe at any byte: xterm carries a partial escape sequence over
    *  to the next write. */
@@ -166,6 +238,27 @@ export class Conversation {
       await new Promise<void>((done) => this.term.write(slice, () => done()));
       this.flush();
     }
+  }
+
+  /** Emit the row the cursor is sitting on.
+   *
+   *  `flushNormal` deliberately stops above the cursor: that row may be a
+   *  half-written prompt or a progress line, and emitting it on every flush
+   *  would churn. A seed has no churn to avoid - the row is exactly what the
+   *  desktop is showing at that moment - and leaving it out opened the phone
+   *  on a blank page whenever the command line was simply sitting at its
+   *  prompt, which is most of the time.
+   *
+   *  The read cursor moves past it, so the live stream does not repeat it. */
+  private emitSeededCursorRow() {
+    const buf = this.term.buffer.active;
+    if (buf.type === "alternate") return;
+    const at = buf.baseY + buf.cursorY;
+    const text = buf.getLine(at)?.translateToString(true) ?? "";
+    if (text.trim() === "") return;
+    this.appendOutput([text]);
+    this.readUpTo = at + 1;
+    this.onChange();
   }
 
   /** Record what the user just sent.
@@ -207,11 +300,16 @@ export class Conversation {
     this.readUpTo = 0;
     this.inAlt = false;
     this.prevScreen = [];
+    this.sideCut = -1;
     this.liveScreen = null;
     this.liveBlocks = [];
     this.pending = [];
     this.status = null;
     this.agents = [];
+    this.thinking = null;
+    this.mode = null;
+    this.choices = [];
+    this.promptBlocks = [];
     this.pendingEcho = null;
     this.recentSends = [];
     this.startNoteId = null;
@@ -285,8 +383,11 @@ export class Conversation {
       // was instead of decaying into anonymous output — and, critically, is
       // not dropped as an "echo" of something we sent.
       this.appendBlocks(
-        markEchoes(toBlocks(this.prevScreen.slice(0, scrolled)), this.recentSends),
-      );
+        markEchoes(
+          toBlocks(dropSideColumn(this.prevScreen.slice(0, scrolled), this.sideCut)),
+          this.recentSends,
+        ),
+        );
     }
     this.prevScreen = cur;
     this.setLive(cur);
@@ -302,7 +403,40 @@ export class Conversation {
         this.startNoteId = null; // named; stop looking
       }
     }
-    const { body, footer } = splitFooter(this.liveScreen);
+    // The menu comes off the screen FIRST, before anything else reads it.
+    const menu = findChoices(this.liveScreen);
+    this.choices = menu?.choices ?? [];
+    // The dialog's own context, bounded: a menu is drawn directly under what
+    // it is asking about, and the rest of the screen is not part of the
+    // question.
+    this.promptBlocks = menu
+      ? toBlocks(
+          this.liveScreen.slice(
+            Math.max(0, menu.start - PROMPT_WINDOW),
+            menu.start,
+          ),
+        )
+      : [];
+    const split = splitFooter(this.liveScreen, menu ? menu.end + 1 : 0);
+    if (menu) {
+      split.body = [
+        ...split.body.slice(0, menu.start),
+        ...split.body.slice(menu.end + 1),
+      ];
+    }
+    // A side panel is not conversation. Found and removed before anything
+    // else reads the screen, so the working line, the menu scan and the
+    // bubbles all see one column. The cut is remembered for the rows that
+    // scroll off the NEXT frame, which are trimmed with the cut of the frame
+    // they came from.
+    this.sideCut = sideColumnCut(split.body);
+    split.body = dropSideColumn(split.body, this.sideCut);
+    // The working line is drawn right above the input box, so it lands either
+    // side of the status rule - including on the footer's bottom row, which is
+    // otherwise the agent tab strip. Take it out first, or a program that is
+    // merely thinking is reported as running a subagent.
+    const { thinking, body, footer } = splitWorking(split.body, split.footer);
+    this.thinking = thinking;
     // The footer's bottom row is the tab strip (Claude's running subagents).
     // Pull it out by position before condensing the rest into the status
     // label, so agent activity becomes its own chip instead of a status
@@ -318,6 +452,12 @@ export class Conversation {
     }
     this.agents =
       strip !== null && !isInputBox(strip) ? [stripChrome(strip).trim()] : [];
+
+    // The mode is read off the footer BEFORE condensing, since the lines
+    // carrying it (opencode's "Build · <model>", Claude's model line) are
+    // dropped as readouts by the condense pass.
+    this.mode = detectMode(footer, body);
+
     this.status = condenseStatus(statusFooter, this.recentSends);
 
     // A splash screen is a logo, not conversation, and it can only be the
@@ -355,7 +495,7 @@ export class Conversation {
       this.inAlt = false;
       if (this.liveScreen && this.liveScreen.length) {
         const blocks = markEchoes(
-          toBlocks(splitFooter(this.liveScreen).body),
+          toBlocks(dropSideColumn(splitFooter(this.liveScreen).body, this.sideCut)),
           this.recentSends,
         );
         this.appendBlocks(blocks);
@@ -374,6 +514,10 @@ export class Conversation {
       this.liveBlocks = [];
       this.status = null;
       this.agents = [];
+      this.thinking = null;
+      this.mode = null;
+      this.choices = [];
+      this.promptBlocks = [];
       // Anything still unpainted goes back into the history, in order, now
       // that there is no live screen for it to sit after.
       for (const text of this.pending) {
@@ -651,6 +795,15 @@ function stripDecoration(line: string): string {
 /** A block of screen content: one bubble. */
 export type Block = { role: "user" | "out"; lines: string[] };
 
+/** The program's working indicator: what it is doing, and for how long. */
+export type Thinking = { label: string; seconds: number | null };
+
+/** One entry of a numbered menu the program is offering. */
+export type Choice = { key: string; label: string; selected: boolean };
+
+/** A menu found on screen, and the rows it occupies. */
+type ChoiceMenu = { choices: Choice[]; start: number; end: number };
+
 /** Status widgets these tools scatter around the screen rather than pin to the
  *  bottom, so the footer walk never reaches them: token counters, timers,
  *  section labels. They are readouts, not conversation, and each would
@@ -722,6 +875,88 @@ export function toBlocks(body: string[]): Block[] {
   return blocks;
 }
 
+/** Blank columns that must precede a side panel, separating it from the
+ *  conversation. */
+const COLUMN_GAP = 2;
+/** A side panel starts at least this far across the screen; a cut nearer the
+ *  left edge would be splitting the conversation, not trimming a panel. */
+const COLUMN_MIN_SHARE = 0.45;
+/** ...and carries at most this share of the text. A right-hand region as full
+ *  as the left one is a layout, not furniture, so it is left alone. */
+const SIDE_MAX_SHARE = 0.5;
+/** Rows that must agree on where the panel starts before it is one. */
+const COLUMN_MIN_ROWS = 3;
+/** Below this width there is no room for two columns. */
+const COLUMN_MIN_WIDTH = 80;
+
+/** Column at which a side panel begins, or -1 if the screen is one column.
+ *
+ *  opencode draws its readouts (session name, token count, cost, LSP state,
+ *  cwd, branch) in a right-hand column on the same rows as the conversation.
+ *  Read as text those rows interleave with what was said - "1% used" glued to
+ *  the front of a sentence, a bare cwd path as its own bubble, a timestamp
+ *  landing inside the echo of what you typed.
+ *
+ *  Found geometrically rather than by matching any of those strings: a panel
+ *  is a set of rows whose last text segment all STARTS at the same column,
+ *  far enough across, with a gutter in front of it. Keying on the starts
+ *  rather than on which columns are empty matters, because we flush every
+ *  60 ms and so catch half-drawn frames: one line painted before the panel was
+ *  repainted over its columns is enough to hide an "all rows blank" gutter,
+ *  and the scan then settles further right and leaves the panel's first entry
+ *  in the conversation.
+ *
+ *  The text either side then has to look like panel and body rather than two
+ *  halves of a layout. A tool that changes its readouts keeps working; one
+ *  that does not draw a panel is untouched. */
+function sideColumnCut(body: string[]): number {
+  const width = body.reduce((n, r) => Math.max(n, r.length), 0);
+  if (width < COLUMN_MIN_WIDTH) return -1;
+  const rows = body.filter((r) => r.trim() !== "");
+  if (rows.length < 4) return -1;
+
+  const from = Math.floor(width * COLUMN_MIN_SHARE);
+  const votes = new Map<number, number>();
+  for (const row of rows) {
+    let last = -1;
+    for (let i = from; i < row.length; i++) {
+      if (row[i] === " " || (i > 0 && row[i - 1] !== " ")) continue;
+      if (i < COLUMN_GAP) continue;
+      let gutter = true;
+      for (let k = i - COLUMN_GAP; k < i; k++) {
+        if (row[k] !== " ") gutter = false;
+      }
+      if (gutter) last = i;
+    }
+    if (last >= 0) votes.set(last, (votes.get(last) ?? 0) + 1);
+  }
+
+  let cut = -1;
+  let best = 0;
+  for (const [column, count] of votes) {
+    if (count > best) {
+      best = count;
+      cut = column;
+    }
+  }
+  if (cut < 0 || best < COLUMN_MIN_ROWS) return -1;
+
+  let left = 0;
+  let right = 0;
+  for (const r of rows) {
+    left += r.slice(0, cut).trim().length;
+    right += r.slice(cut).trim().length;
+  }
+  if (left === 0 || right === 0 || right > left * SIDE_MAX_SHARE) return -1;
+  return cut;
+}
+
+/** Keep only what is left of the side panel. A cut of -1 leaves rows alone. */
+function dropSideColumn(rows: string[], cut: number): string[] {
+  if (cut < 0) return rows;
+  return rows.map((r) => r.slice(0, cut).replace(/\s+$/, ""));
+}
+
 /** A status rule: a line that is essentially a run of frame characters — the
  *  divider both tools draw above their footer. A single gutter marker is
  *  decoration, not a rule. */
@@ -756,8 +991,11 @@ function isInputBox(raw: string): boolean {
  *  a dialog border or a divider mid-screen is content, not a status rule.
  *  Claude draws a second rule above its input strip, so the anchor is the
  *  bottom-most rule in the window. */
-function splitFooter(lines: string[]): { body: string[]; footer: string[] } {
-  const from = Math.max(0, lines.length - FOOTER_WINDOW);
+function splitFooter(
+  lines: string[],
+  floor = 0,
+): { body: string[]; footer: string[] } {
+  const from = Math.max(floor, lines.length - FOOTER_WINDOW);
   for (let i = lines.length - 1; i >= from; i--) {
     if (isRule(lines[i])) {
       return { body: lines.slice(0, i), footer: lines.slice(i) };
@@ -765,11 +1003,16 @@ function splitFooter(lines: string[]): { body: string[]; footer: string[] } {
   }
   // No rule drawn: fall back to the furniture walk.
   let end = lines.length;
-  while (end > 0 && isFurniture(lines[end - 1])) end--;
+  while (end > floor && isFurniture(lines[end - 1])) end--;
   return { body: lines.slice(0, end), footer: lines.slice(end) };
 }
-/** Status bars are only a few rows tall; a rule higher than this is a dialog
- *  border or a divider inside the conversation, not the footer's top edge. */
+/** `floor` is where a menu ended: a rule ABOVE the options is part of the
+ *  dialog, not the footer's top edge. Claude draws the diff it is asking about
+ *  between two dashed rules, and the footer walk anchored on the lower of them
+ *  and swallowed the whole prompt.
+ *
+ *  Status bars are only a few rows tall; a rule higher than the window is a
+ *  dialog border or a divider inside the conversation, not the footer. */
 const FOOTER_WINDOW = 12;
 /** A status fragment is short; anything longer than this is a sentence that
  *  leaked in from a scrambled frame, not a status readout. */
@@ -808,6 +1051,175 @@ function condenseStatus(footer: string[], typed: string[]): string | null {
   if (parts.length === 0) return null;
   const text = parts.join(" · ");
   return text.length > 110 ? `${text.slice(0, 110)}…` : text;
+}
+
+/** Spinner glyphs and bullets these tools put in front of a working line.
+ *  Braille spinners are already gone by here - `stripChrome` covers them. */
+const SPINNER_LEAD = /^[\s*·•‧✻✽✢✳✦✧⏺●○◐◓◑◒⠿-]+/u;
+/** A working line names what it is doing and trails off: "Thinking…",
+ *  "Herding bytes...", "正在思考…". The ellipsis is the giveaway, and both
+ *  tools use it; without one, a line is prose. */
+const WORKING = /^(\p{L}[\p{L}\s]{0,30}?)\s*(?:…|\.{2,})/u;
+/** Elapsed time as these tools print it: "1m 5s" or "12s". */
+const ELAPSED_MS = /(\d+)\s*m\s*(\d+)\s*s/;
+const ELAPSED_S = /(?:^|[^\d.])(\d+)\s*s\b/;
+/** A working line is short. Anything longer is a sentence that happens to
+ *  trail off, which is prose and belongs in a bubble. */
+const WORKING_MAX = 80;
+/** How far up from the input box the working line can sit. It is drawn right
+ *  above the composer; searching the whole screen would let any line of prose
+ *  ending in an ellipsis claim to be a spinner. */
+const WORKING_WINDOW = 4;
+
+/** Pull the program's working line out of the screen.
+ *
+ *  Generic on purpose: a spinner glyph is optional and every tool picks its
+ *  own, but "a short line, near the input box, that trails off in an ellipsis,
+ *  often with an elapsed time" is what all of them draw. The verb itself is
+ *  never matched against a list - Claude cycles through dozens of them
+ *  ("Musing", "Pondering", "Herding") and adding a new one must not break
+ *  this.
+ *
+ *  Returns the screen with that row removed from whichever half held it. */
+function splitWorking(
+  body: string[],
+  footer: string[],
+): { thinking: Thinking | null; body: string[]; footer: string[] } {
+  // The footer is searched first, and from the bottom: when the status rule is
+  // drawn above the spinner, the spinner is the footer's own bottom row.
+  for (let i = footer.length - 1; i >= 0; i--) {
+    const hit = readWorking(footer[i]);
+    if (!hit) continue;
+    return {
+      thinking: hit,
+      body,
+      footer: [...footer.slice(0, i), ...footer.slice(i + 1)],
+    };
+  }
+  const from = Math.max(0, body.length - WORKING_WINDOW);
+  for (let i = body.length - 1; i >= from; i--) {
+    const hit = readWorking(body[i]);
+    if (!hit) continue;
+    return {
+      thinking: hit,
+      body: [...body.slice(0, i), ...body.slice(i + 1)],
+      footer,
+    };
+  }
+  return { thinking: null, body, footer };
+}
+
+function readWorking(raw: string): Thinking | null {
+  const text = stripChrome(raw).replace(SPINNER_LEAD, "").trim();
+  if (text === "" || text.length > WORKING_MAX) return null;
+  const m = WORKING.exec(text);
+  if (!m) return null;
+  const label = m[1].trim();
+  if (label === "" || isWidget(label)) return null;
+  const ms = ELAPSED_MS.exec(text);
+  if (ms) {
+    return { label, seconds: Number(ms[1]) * 60 + Number(ms[2]) };
+  }
+  const sec = ELAPSED_S.exec(text);
+  return { label, seconds: sec ? Number(sec[1]) : null };
+}
+
+/** Modes these tools pin to the status bar. The mode changes what typing into
+ *  the session does, so it is the one status fragment shown on its own rather
+ *  than folded into the condensed label.
+ *
+ *  Claude phrases it as "<something> mode on" / "auto-accept edits on";
+ *  opencode puts the mode first on its model line ("Build · <model>"). */
+const MODE_PHRASE =
+  /\b((?:auto-?accept\s+edits|bypass\s+permissions|accept\s+edits|[\p{L}]+\s+mode)(?:\s+on)?)\b/iu;
+const MODE_LEAD = /^(Build|Plan|Chat)\s*·/i;
+/** How far above the status rule the mode line can sit. */
+const MODE_WINDOW = 6;
+
+function detectMode(footer: string[], body: string[]): string | null {
+  const read = (raw: string): string | null => {
+    const text = collapse(stripChrome(raw));
+    if (text === "") return null;
+    const lead = MODE_LEAD.exec(text);
+    if (lead) return lead[1];
+    const phrase = MODE_PHRASE.exec(text);
+    return phrase ? phrase[1].trim() : null;
+  };
+  for (let i = footer.length - 1; i >= 0; i--) {
+    const hit = read(footer[i]);
+    if (hit) return hit;
+  }
+  // opencode prints its mode on the input box's own row, which sits ABOVE the
+  // status rule and so counts as body. Only the rows next to the box are
+  // searched: the same line appears per-message further up the transcript, and
+  // an old one must not outvote the current setting.
+  const from = Math.max(0, body.length - MODE_WINDOW);
+  for (let i = body.length - 1; i >= from; i--) {
+    const hit = read(body[i]);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** A numbered menu row: "❯ 1. Yes", "  2. No, and tell Claude why". */
+const CHOICE_ROW = /^([>❯]?)\s*(\d{1,2})[.)]\s+(\S.*)$/;
+/** How far up from the input box a menu can start. Both tools draw the
+ *  question and its options directly above the composer. */
+const CHOICE_WINDOW = 14;
+/** How much of the screen above a menu counts as the question it is asking.
+ *  Enough for a prompt plus the diff or command under it; not the whole
+ *  session. */
+const PROMPT_WINDOW = 12;
+
+/** Split a numbered menu off the screen.
+ *
+ *  Two discriminators, because numbering alone is not one: an agent writing
+ *  "1. do this / 2. do that" in prose is common and must stay prose.
+ *   - every menu these tools draw marks the current row with `❯` or `>`;
+ *   - a menu numbers upward, so a run whose keys are not increasing is two
+ *     things that happen to sit next to each other, not one menu.
+ *
+ *  Scanned upward from the input box over the WHOLE screen, before the footer
+ *  is split off. The menu is the one thing here the agent transcript cannot
+ *  know, so it must not depend on the rest of the parse working: Claude draws
+ *  the diff it is asking about between two dashed rules, the footer walk
+ *  anchored on the lower one, and the entire prompt vanished into the status
+ *  area.
+ *
+ *  The question above the options stays in the body: it is what the program is
+ *  asking, and it belongs in the thread. */
+function findChoices(screen: string[]): ChoiceMenu | null {
+  const from = Math.max(0, screen.length - CHOICE_WINDOW);
+  let start = -1;
+  let end = -1;
+  const rows: Choice[] = [];
+  for (let i = screen.length - 1; i >= from; i--) {
+    const text = stripChrome(screen[i]);
+    const m = CHOICE_ROW.exec(text);
+    if (m) {
+      if (end === -1) end = i;
+      start = i;
+      rows.unshift({ key: m[2], label: m[3].trim(), selected: m[1] !== "" });
+      continue;
+    }
+    // A blank row is spacing, inside the menu or above it.
+    if (text.trim() === "") continue;
+    // Anything else ends the run - everything below it was the menu.
+    if (end !== -1) break;
+  }
+  if (rows.length < 2 || !rows.some((r) => r.selected) || !ascending(rows)) {
+    return null;
+  }
+  return { choices: rows, start, end };
+}
+
+/** Menu keys count upward. A run that does not is two lists that happen to be
+ *  adjacent - prose above, the real menu below - not one menu. */
+function ascending(rows: Choice[]): boolean {
+  for (let i = 1; i < rows.length; i++) {
+    if (Number(rows[i].key) <= Number(rows[i - 1].key)) return false;
+  }
+  return true;
 }
 
 /** A splash screen: a logo and a version line, and essentially nothing else.

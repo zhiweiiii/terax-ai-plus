@@ -131,6 +131,17 @@ impl PtyState {
         s.size()
     }
 
+    /// The working directory a desktop leaf reports. Used to find the agent
+    /// transcript that belongs to it.
+    pub fn web_leaf_cwd(&self, leaf_id: u32) -> Option<String> {
+        self.web_tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.leaf_id == leaf_id)
+            .and_then(|t| t.cwd.clone())
+    }
+
     /// Resolve a desktop leaf to its live pty session. When the tab has never
     /// been opened, emit an activation request to the frontend (which spawns
     /// the pty) and return None so the page can retry shortly.

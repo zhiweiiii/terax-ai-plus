@@ -62,6 +62,7 @@ sha1 = "0.10"
 tempfile = "3"
 notify = "8.2.0"
 which = "8.0.4"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

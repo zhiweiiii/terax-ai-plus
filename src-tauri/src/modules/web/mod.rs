@@ -27,7 +27,10 @@
 //! only — because the rest of the crate has no HTTP/WS framework and this is
 //! the only WebSocket endpoint.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::mpsc::SyncSender;
+use std::sync::{Mutex, OnceLock};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -40,6 +43,7 @@ use sha1::{Digest, Sha1};
 
 use crate::modules::pty;
 use crate::modules::pty::{PtyState, Session, SizeOwner, WebMsg};
+use crate::modules::transcript;
 use tauri::{Emitter, Manager};
 
 // Dev builds listen on 34269, packaged (release) builds on 34268 — so the two
@@ -191,6 +195,60 @@ pub fn web_status() -> WebStatus {
 // ──────────────────────────────────────────────────────────────────────────
 // Minimal WebSocket (RFC 6455)
 // ──────────────────────────────────────────────────────────────────────────
+
+// ── Desktop snapshot ─────────────────────────────────────────────────────
+//
+// What a phone sees when it attaches is the desktop terminal's own buffer,
+// fetched from the window on demand. Nothing on this side stores session
+// output: a second copy inevitably drifts from what the desktop shows (it
+// outlives a `clear`, and it is bounded in bytes where the terminal is bounded
+// in lines), and the phone then opened on a history the desktop did not have.
+
+/// How long an attach waits for the window to hand its buffer over. The
+/// webview answers in a few milliseconds; waiting longer would only hold the
+/// attach open while an unresponsive window never replies.
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(1500);
+
+static NEXT_SNAPSHOT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static SNAPSHOT_WAITERS: OnceLock<Mutex<HashMap<u64, SyncSender<String>>>> = OnceLock::new();
+
+fn snapshot_waiters() -> &'static Mutex<HashMap<u64, SyncSender<String>>> {
+    SNAPSHOT_WAITERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Ask the desktop what this command line currently shows. None when the
+/// window does not answer in time, or has nothing for that leaf - the phone
+/// then simply follows the live stream from here on.
+fn request_snapshot(app: &tauri::AppHandle, leaf_id: u32) -> Option<String> {
+    let id = NEXT_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    snapshot_waiters().lock().unwrap().insert(id, tx);
+    let asked = app
+        .emit(
+            "terax:web-snapshot",
+            json!({ "leafId": leaf_id, "requestId": id }),
+        )
+        .is_ok();
+    let reply = if asked {
+        rx.recv_timeout(SNAPSHOT_TIMEOUT).ok()
+    } else {
+        None
+    };
+    snapshot_waiters().lock().unwrap().remove(&id);
+    if reply.is_none() && asked {
+        log::warn!("web: no snapshot from desktop for leaf={leaf_id}");
+    }
+    reply.filter(|s| !s.is_empty())
+}
+
+/// The window's answer to `terax:web-snapshot`.
+#[tauri::command]
+pub fn web_snapshot_reply(request_id: u64, data: String) {
+    let waiter = snapshot_waiters().lock().unwrap().remove(&request_id);
+    if let Some(tx) = waiter {
+        let _ = tx.try_send(data);
+    }
+}
 
 const OP_CONT: u8 = 0x0;
 const OP_TEXT: u8 = 0x1;
@@ -428,7 +486,7 @@ impl WsConn {
     }
 
     /// `write_all` on a non-blocking socket returns WouldBlock mid-write and
-    /// loses the partial write; poll instead so big frames (history replay)
+    /// loses the partial write; poll instead so big frames (the attach seed)
     /// still go out. A peer that never reads eventually errors out.
     fn write_all_blocking(&mut self, mut data: &[u8]) -> Result<(), String> {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -734,6 +792,15 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
         std::sync::mpsc::Receiver<WebMsg>,
     )> = None;
     let mut last_ping = std::time::Instant::now();
+    // What the attached leaf's agent has actually said, read from the agent's
+    // own transcript rather than parsed off its screen. The cheap change
+    // signal and the revision last sent are tracked per connection, so an idle
+    // agent costs a stat per tick and nothing on the wire. The cwd is NOT
+    // cached: a shell can cd, and a transcript read against where the terminal
+    // used to be is a conversation from another project.
+    let mut transcript_mark: Option<i64> = None;
+    let mut transcript_rev: i64 = -1;
+    let mut last_transcript = std::time::Instant::now();
 
     // Push the session list so the page renders without a round trip.
     send_sessions(&mut conn, &state);
@@ -792,6 +859,22 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
             }
         }
 
+        // Follow the agent's transcript. Polled rather than watched: one of
+        // the two backends is a SQLite database whose commits land in a
+        // write-ahead log, which no filesystem event describes usefully.
+        if last_transcript.elapsed() >= TRANSCRIPT_POLL {
+            last_transcript = std::time::Instant::now();
+            let agent = attached.as_ref().and_then(|(s, _, _)| s.web_agent());
+            let cwd = attached_id.and_then(|id| state.web_leaf_cwd(id));
+            push_transcript(
+                &mut conn,
+                cwd.as_deref(),
+                agent.as_deref(),
+                &mut transcript_mark,
+                &mut transcript_rev,
+            );
+        }
+
         // Server heartbeat: keep half-open connections honest and let NAT
         // keep the mapping alive on phones that sleep.
         if last_ping.elapsed() >= Duration::from_secs(30) {
@@ -848,20 +931,26 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     // the canonical size; the phone renders at exactly that
                     // grid so the byte stream (which is laid out against the
                     // desktop's cols/rows) parses correctly.
-                    let Some((history, tx, rx)) = session.web_subscribe() else {
+                    // Subscribe first, so output produced while the window is
+                    // serializing its buffer is queued rather than lost. The
+                    // few milliseconds in between can appear both in the seed
+                    // and in the queue; a small duplicate is the accepted cost
+                    // of not making the window count bytes for us.
+                    let Some((tx, rx)) = session.web_subscribe() else {
                         let _ = send_error(&mut conn, "session already exited");
                         continue;
                     };
-                    // Send the grid size BEFORE the history replay: the phone
+                    // Send the grid size BEFORE the seed: the phone
                     // must size its xterm to the PTY grid first, otherwise the
                     // history bytes (positioned for the desktop grid) are
                     // parsed at the phone's fit width and every wrapped line /
                     // cursor move lands wrong.
-                    // The phone parses at its own FIXED grid (the layout parser
-                    // is deterministic only at that size), so attaching takes the
-                    // grid for Web — a deliberate one-shot, unlike the passive
-                    // preference-recording every other attach does. The desktop
-                    // reclaims on its next keystroke.
+                    // A phone normally sends no grid at all: it renders no
+                    // terminal, so it has no size to want, and taking the grid
+                    // would reflow the desktop's screen under a program laid
+                    // out for it. cols/rows stay accepted for a client that
+                    // does render a grid; without them this viewer never
+                    // claims the size, on attach or on a keystroke.
                     let grid = parsed
                         .get("cols")
                         .and_then(|v| v.as_u64())
@@ -877,6 +966,12 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                             );
                         }
                     }
+                    // The seed is the desktop terminal's own buffer, asked
+                    // for now. It carries its own buffer mode (the serialized
+                    // form re-enters the alternate screen), so the phone must
+                    // not force one before writing it - `alt` below is only
+                    // for the case where no seed came back.
+                    let seed = request_snapshot(&app, leaf_id);
                     let (cols, rows) = session.size();
                     let _ = send_text(
                         &mut conn,
@@ -885,25 +980,26 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                             "id": id,
                             "cols": cols,
                             "rows": rows,
-                            // The phone must parse the replayed backlog in the
-                            // same buffer mode the PTY is in: the history ring
-                            // may have trimmed the alt-screen enter sequence,
-                            // so without this a mid-TUI backlog parses as a
-                            // shell and comes out as garbage.
                             "alt": session.web_in_alt(),
+                            // Whether a seed frame follows this message.
+                            "seed": seed.is_some(),
                         })
                         .to_string(),
                     );
-                    if !history.is_empty() {
-                        let mut frame = Vec::with_capacity(history.len() + 1);
+                    if let Some(seed) = seed {
+                        let bytes = seed.as_bytes();
+                        let mut frame = Vec::with_capacity(bytes.len() + 1);
                         frame.push(b'0');
-                        frame.extend_from_slice(&history);
+                        frame.extend_from_slice(bytes);
                         if conn.send_frame(OP_BIN, &frame).is_err() {
                             break;
                         }
                     }
                     attached_id = Some(leaf_id);
                     attached = Some((session, tx, rx));
+                    transcript_mark = None;
+                    transcript_rev = -1;
+                    last_transcript = std::time::Instant::now();
                 } else if parsed.get("list").and_then(|v| v.as_bool()) == Some(true) {
                     send_sessions(&mut conn, &state);
                 }
@@ -972,6 +1068,52 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
     if let Some((session, tx, _)) = attached {
         session.web_unsubscribe(&tx);
     }
+}
+
+/// How often an attached connection looks for new agent output. Fast enough
+/// that a reply appears while it is still being read, cheap enough that an
+/// idle session costs two stats.
+const TRANSCRIPT_POLL: Duration = Duration::from_millis(700);
+
+/// Send the agent transcript for this leaf, if it moved since the last send.
+///
+/// Three gates, because the phone should not pay for an agent that is idle:
+/// nothing happens unless one is actually running, the filesystem mark is a
+/// stat, and only when that moves is the transcript read and its revision
+/// compared. A shell with no agent sends nothing at all and the page stays on
+/// the screen view.
+fn push_transcript(
+    conn: &mut WsConn,
+    cwd: Option<&str>,
+    agent: Option<&str>,
+    mark: &mut Option<i64>,
+    revision: &mut i64,
+) {
+    // No agent running means no transcript, whatever this directory has on
+    // disk from an earlier session: showing yesterday's conversation over
+    // today's shell prompt would be a lie about what is in front of you.
+    let (Some(cwd), Some(agent)) = (cwd, agent) else {
+        return;
+    };
+    let found = transcript::fingerprint(cwd);
+    if found.is_some() && found == *mark {
+        return;
+    }
+    *mark = found;
+    let Some(t) = transcript::read(cwd, Some(agent)) else {
+        return;
+    };
+    if t.revision == *revision {
+        return;
+    }
+    *revision = t.revision;
+    let Ok(mut payload) = serde_json::to_value(&t) else {
+        return;
+    };
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("type".into(), Value::String("transcript".into()));
+    }
+    let _ = send_text(conn, &payload.to_string());
 }
 
 fn send_sessions(conn: &mut WsConn, state: &PtyState) {

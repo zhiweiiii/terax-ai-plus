@@ -67,10 +67,14 @@ function check(name, cond, detail) {
   rows[34] = "  (up/down to navigate, enter to select)";
   const conv = await parseScreen(rows);
   const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
+  const keys = conv.choices.map((c) => c.key).join(",");
+  const labels = conv.choices.map((c) => c.label).join(" | ");
   check("permission menu shows the question", all.includes("Do you want to proceed?"), all);
-  check("permission menu shows option 1", all.includes("1. Yes"), all);
-  check("permission menu shows option 2", all.includes("2. Yes, and don't ask again"), all);
-  check("permission menu shows option 3", all.includes("3. No"), all);
+  check("permission menu offers 3 choices", keys === "1,2,3", keys);
+  check("permission menu marks the selected row", conv.choices[0]?.selected === true, labels);
+  check("permission menu keeps option labels", labels.includes("Yes, and don't ask again"), labels);
+  // The options are buttons now, so they must NOT also be bubbles.
+  check("permission options are not bubbles too", !all.includes("3. No"), all);
 }
 
 // ---- claude option selector with a numbered list ----
@@ -84,7 +88,16 @@ function check(name, cond, detail) {
   const conv = await parseScreen(rows);
   const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
   check("option menu shows question", all.includes("What would you like to do?"), all);
-  check("option menu shows all four choices", all.includes("4. Nothing"), all);
+  check(
+    "option menu offers all four choices",
+    conv.choices.map((c) => c.key).join(",") === "1,2,3,4",
+    JSON.stringify(conv.choices),
+  );
+  check(
+    "option menu keeps the last label",
+    conv.choices.at(-1)?.label === "Nothing",
+    JSON.stringify(conv.choices),
+  );
 }
 
 // ---- opencode "how should I proceed" selector ----
@@ -95,7 +108,179 @@ function check(name, cond, detail) {
   rows[22] = "    2. Explain first";
   const conv = await parseScreen(rows);
   const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
-  check("opencode selector shows both choices", all.includes("1. Run the command") && all.includes("2. Explain first"), all);
+  check("opencode selector shows the question", all.includes("How should I proceed?"), all);
+  check(
+    "opencode selector offers both choices",
+    conv.choices.map((c) => c.label).join("|") === "Run the command|Explain first",
+    JSON.stringify(conv.choices),
+  );
+}
+
+// ---- a numbered list in prose is NOT a menu ----
+{
+  const rows = blank();
+  rows[20] = "  I can see three options here:";
+  rows[21] = "  1. Rewrite the parser";
+  rows[22] = "  2. Patch the caller";
+  rows[23] = "  3. Leave it alone";
+  rows[24] = "  Let me know which you prefer.";
+  const conv = await parseScreen(rows);
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check("prose list is not turned into buttons", conv.choices.length === 0, JSON.stringify(conv.choices));
+  check("prose list stays in the conversation", all.includes("2. Patch the caller"), all);
+}
+
+// ---- prose list above a real menu: only the menu becomes buttons ----
+{
+  const rows = blank();
+  rows[18] = "  Options I considered:";
+  rows[19] = "  1. Rewrite it";
+  rows[20] = "  2. Patch it";
+  rows[30] = "  Proceed?";
+  rows[31] = "  ❯ 1. Yes";
+  rows[32] = "    2. No";
+  const conv = await parseScreen(rows);
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check(
+    "only the bottom menu becomes buttons",
+    conv.choices.map((c) => c.label).join("|") === "Yes|No",
+    JSON.stringify(conv.choices),
+  );
+  check("prose list above it survives", all.includes("1. Rewrite it"), all);
+}
+
+// ---- working indicator: what it is doing, and for how long ----
+{
+  const rows = blank();
+  rows[20] = "  ⏺ Reading the source now";
+  rows[30] = "  ✻ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)";
+  const conv = await parseScreen(rows);
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check("working line is read as a state", conv.thinking?.label === "Thinking", JSON.stringify(conv.thinking));
+  check("working line carries elapsed seconds", conv.thinking?.seconds === 12, JSON.stringify(conv.thinking));
+  check("working line is not a bubble", !all.includes("Thinking"), all);
+  check("output above it survives", all.includes("Reading the source now"), all);
+}
+
+// ---- an unfamiliar verb still reads as working (Claude cycles through many) ----
+{
+  const rows = blank();
+  rows[30] = "  ✽ Herding bytes… (1m 5s · esc to interrupt)";
+  const conv = await parseScreen(rows);
+  check("unknown verb still reads as working", conv.thinking?.label === "Herding bytes", JSON.stringify(conv.thinking));
+  check("minutes and seconds are added up", conv.thinking?.seconds === 65, JSON.stringify(conv.thinking));
+}
+
+// ---- mode is pulled out of the footer ----
+{
+  const rows = blank();
+  rows[30] = "  Working on it";
+  rows[34] = "  ────────────────────";
+  rows[35] = "  Opus 5 terax";
+  rows[36] = "  auto-accept edits on · main";
+  const conv = await parseScreen(rows);
+  check("claude mode is extracted", conv.mode === "auto-accept edits on", JSON.stringify({ mode: conv.mode, status: conv.status }));
+}
+
+// ---- opencode puts the mode first on its model line ----
+{
+  const rows = blank();
+  rows[30] = "  Working on it";
+  rows[34] = "  ────────────────────";
+  rows[35] = "  Build · claude-opus-5";
+  const conv = await parseScreen(rows);
+  check("opencode mode is extracted", conv.mode === "Build", JSON.stringify({ mode: conv.mode, status: conv.status }));
+}
+
+// ---- seed: a serialized desktop buffer, shell only ----
+{
+  // What SerializeAddon hands back for a quiet command line: settled lines,
+  // then the prompt on the cursor row.
+  const seed =
+    "npm run build\r\n" +
+    "built in 3.2s\r\n" +
+    "PS D:\\work> ";
+  const conv = new Conversation(() => {});
+  conv.setGrid(COLS, ROWS);
+  await conv.writeSeed(new TextEncoder().encode(seed));
+  await wait(900);
+  const text = conv.turns
+    .filter((t) => t.kind === "output")
+    .map((t) => t.lines.join("\n"))
+    .join("\n");
+  check("seed keeps the settled scrollback", text.includes("built in 3.2s"), text);
+  check("seed shows the prompt the desktop is sitting on", text.includes("work>"), text);
+}
+
+// ---- seed: scrollback plus a running full-screen program ----
+{
+  const screen = blank();
+  screen[2] = "  > summarise the readme";
+  screen[4] = "  I read README.md and here is the summary.";
+  screen[30] = "  ✻ Thinking… (7s · esc to interrupt)";
+  screen[34] = "  ────────────────────";
+  screen[35] = "  auto-accept edits on · main";
+  const seed =
+    "cd project\r\n" +
+    "PS D:\\work> claude\r\n" +
+    screenFrame(screen);
+  const conv = new Conversation(() => {});
+  conv.setGrid(COLS, ROWS);
+  await conv.writeSeed(new TextEncoder().encode(seed));
+  await wait(900);
+  const history = conv.turns
+    .filter((t) => t.kind === "output")
+    .map((t) => t.lines.join("\n"))
+    .join("\n");
+  const live = conv.liveBlocks.map((b) => `${b.role}|${b.lines.join(" ")}`).join("\n");
+  check("seed keeps the shell scrollback above the program", history.includes("cd project"), history);
+  check("seed renders the program screen", live.includes("here is the summary"), live);
+  check("seed reads the user message on that screen", live.includes("user|summarise the readme"), live);
+  check("seed picks up the working state", conv.thinking?.seconds === 7, JSON.stringify(conv.thinking));
+  check("seed picks up the mode", conv.mode === "auto-accept edits on", String(conv.mode));
+}
+
+// ---- claude's real permission dialog: a diff, ruled off, above the menu ----
+{
+  // Captured from a live Claude Code session (Write approval). The dashed
+  // rules around the diff are the trap: the footer walk used to anchor on the
+  // lower one and swallow the whole prompt.
+  const rows = blank();
+  rows[25] = "❯ 创建一个 hello.txt 文件";
+  rows[27] = "● Write(hello.txt)";
+  rows[29] = "─".repeat(100);
+  rows[30] = " Create file";
+  rows[31] = " hello.txt";
+  rows[32] = "╌".repeat(100);
+  rows[33] = "  1 hi";
+  rows[34] = "╌".repeat(100);
+  rows[35] = " Do you want to create hello.txt?";
+  rows[36] = " ❯ 1. Yes";
+  rows[37] = "   2. Yes, and switch to accept edits for this session (shift+tab)";
+  rows[38] = "   3. No";
+  rows[40] = " Esc to cancel · Tab to amend";
+  const conv = await parseScreen(rows);
+  const keys = conv.choices.map((c) => c.key).join(",");
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check("permission dialog under a diff offers 3 choices", keys === "1,2,3", keys);
+  check(
+    "the selected option is the first",
+    conv.choices[0]?.selected === true && conv.choices[0]?.label === "Yes",
+    JSON.stringify(conv.choices),
+  );
+  check(
+    "the long option keeps its label",
+    (conv.choices[1]?.label ?? "").includes("accept edits"),
+    JSON.stringify(conv.choices),
+  );
+  check("the question is still shown", all.includes("Do you want to create hello.txt?"), all);
+  check("the options are not bubbles too", !all.includes("3. No"), all);
+  // Under an agent transcript only this part of the screen is rendered, so it
+  // has to carry the question AND what the question is about.
+  const prompt = conv.promptBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check("the prompt context carries the question", prompt.includes("Do you want to create hello.txt?"), prompt);
+  check("the prompt context carries the diff", prompt.includes("hi"), prompt);
+  check("the prompt context stops at the dialog", !prompt.includes("Welcome back"), prompt);
 }
 
 // ---- a menu must NOT be mistaken for a startup splash ----

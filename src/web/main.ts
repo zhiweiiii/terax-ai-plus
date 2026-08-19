@@ -3,13 +3,14 @@ import "./style.css";
 
 // ── WebSocket wire protocol (see src-tauri/src/modules/web/mod.rs) ──────
 // client → server:
-//   first text: { "attach": <id>, "cols": C, "rows": R } or { "list": true }
+//   first text: { "attach": <id> } or { "list": true }
 //   binary:     '0' + bytes        → write input
 //               '1' + JSON         → resize { "cols": N, "rows": N }
 // server → client:
-//   binary '0' + bytes             → terminal output (history replay first)
+//   binary '0' + bytes             → terminal output (seed frame first)
 //   text: { "type": "sessions", "sessions": [...], "spaces": [...] }
-//         { "type": "attached", "id": N, "cols": C, "rows": R, "alt": bool }
+//         { "type": "attached", "id": N, "cols": C, "rows": R, "alt": bool,
+//                               "seed": bool }
 //         { "type": "opening", "id": N }
 //         { "type": "resized", "cols": C, "rows": R }
 //         { "type": "exit", "id": N, "code": C }
@@ -17,13 +18,18 @@ import "./style.css";
 //
 // One session has ONE grid, and whoever is typing owns it (SizeOwner in the
 // Rust pty module). Watching never moves it: `attached` reports the grid the
-// stream is actually laid out against, and the parser follows it. The attach
-// message's cols/rows are only the phone's PREFERENCE: the first keystroke
-// claims the session at that grid, the PTY resizes, every viewer is told via
-// `resized`, and the phone parses on. The `alt` flag tells the parser which
-// buffer mode to start the backlog replay in — the history ring may have
-// trimmed the alt-screen enter sequence, so without it a mid-TUI backlog
-// parses as a shell.
+// stream is actually laid out against, and the parser follows it. The phone
+// sends NO cols/rows on attach: it renders no grid, so it has no size to want,
+// and imposing one would resize the shared PTY and reflow the desktop's screen
+// under a program laid out for it. The PTY stays at the desktop's grid, the
+// phone parses at that grid, and `resized` keeps it in step when the desktop's
+// own window changes.
+//
+// What the phone shows first is the DESKTOP TERMINAL'S OWN BUFFER, serialized
+// and sent as one seed frame - the desktop is the only thing that knows what a
+// command line shows, and a second copy of the output kept server-side drifted
+// from it. `seed` says whether that frame is coming; `alt` is the fallback
+// buffer mode for when it is not.
 
 type SessionInfo = {
   id: number;
@@ -37,6 +43,30 @@ type SessionInfo = {
 };
 
 type SpaceInfo = { id: string; name: string };
+
+/** One turn of an agent conversation, read from the agent's OWN transcript
+ *  (`~/.claude/projects/**.jsonl`, opencode's SQLite) rather than parsed off
+ *  its screen. See the Rust `transcript` module. */
+type TranscriptMessage = {
+  id: string;
+  role: "user" | "assistant";
+  at: number;
+  text: string;
+  reasoning?: string;
+  tools: string[];
+};
+
+type TranscriptMsg = {
+  type: "transcript";
+  source: string;
+  session_id: string;
+  title?: string;
+  mode?: string;
+  model?: string;
+  messages: TranscriptMessage[];
+  working?: { since: number };
+  revision: number;
+};
 
 type SessionsMsg = {
   type: "sessions";
@@ -54,16 +84,26 @@ type ServerMsg = {
   cols?: number;
   rows?: number;
   alt?: boolean;
+  seed?: boolean;
   message?: string;
   sessions?: SessionInfo[];
   spaces?: SpaceInfo[];
 };
 
-/** The grid the phone wants the PTY at when IT types. Watching never imposes
- *  it — a session has one grid, and that grid belongs to whoever is typing
- *  (see SizeOwner in the Rust pty module). Sent on attach as a preference and
- *  applied by the server on the first keystroke, which claims the session. */
-const FIXED_GRID = { cols: 120, rows: 40 } as const;
+/** The agent conversation for the attached session, when one is running.
+ *
+ *  While this is set it IS the conversation: the screen parse still runs, but
+ *  only for the thing the transcript cannot know - what the program is asking
+ *  you to pick right now. A plain shell has no transcript and the page falls
+ *  back to the screen entirely. */
+let transcript: TranscriptMsg | null = null;
+
+/** The grid the parser falls back to if the server ever omits one. The phone
+ *  does not have a grid of its own to want: it renders no terminal, so any
+ *  size it imposed would only reflow the DESKTOP's screen and lay the program
+ *  out at a width nobody is looking at. It attaches without a preference and
+ *  parses at whatever the desktop is at. */
+const PARSE_FALLBACK_GRID = { cols: 120, rows: 40 } as const;
 
 const $ = <T extends HTMLElement>(sel: string): T => {
   const el = document.querySelector<T>(sel);
@@ -93,6 +133,8 @@ app.innerHTML = `
     </div>
   </div>
   <div class="composer">
+    <div id="thinking" class="thinking" hidden></div>
+    <div id="choices" class="choices" hidden></div>
     <div class="keyrow">
       <button class="key-btn" data-ctrl="3">Ctrl+C</button>
       <button class="key-btn" data-ctrl="4">Ctrl+D</button>
@@ -130,6 +172,8 @@ const liveBlocksEl = $("#live-blocks") as HTMLDivElement;
 const pendingEl = $("#pending") as HTMLDivElement;
 const progStatusEl = $("#progstatus") as HTMLDivElement;
 const agentsEl = $("#agents") as HTMLDivElement;
+const thinkingEl = $("#thinking") as HTMLDivElement;
+const choicesEl = $("#choices") as HTMLDivElement;
 
 // ── Rendering ────────────────────────────────────────────────────────────
 // Turns are re-rendered on a rAF so a burst of output costs one DOM pass.
@@ -159,6 +203,112 @@ const nodes = new Map<number, HTMLElement>();
 
 function render() {
   const stick = isNearBottom();
+  if (transcript) {
+    renderTranscript(transcript);
+  } else {
+    renderScreenTurns();
+  }
+  paintLiveScreen();
+  if (stick) scrollToBottom();
+}
+
+/** Rendered transcript turns, keyed by message id. */
+const transcriptNodes = new Map<string, HTMLElement>();
+
+/** The agent conversation, straight from the agent's own record of it.
+ *
+ *  Nothing here is inferred: who said what, what the agent thought, and which
+ *  tools it ran are all stated. That is the whole point of reading the
+ *  transcript instead of the screen. */
+function renderTranscript(t: TranscriptMsg) {
+  if (nodes.size > 0) {
+    for (const node of nodes.values()) node.remove();
+    nodes.clear();
+  }
+  const live = new Set<string>();
+  for (const message of t.messages) {
+    live.add(message.id);
+    let node = transcriptNodes.get(message.id);
+    if (!node) {
+      node = document.createElement("div");
+      transcriptNodes.set(message.id, node);
+      turnsEl.appendChild(node);
+    }
+    paintTranscriptMessage(node, message);
+  }
+  for (const [id, node] of transcriptNodes) {
+    if (live.has(id)) continue;
+    node.remove();
+    transcriptNodes.delete(id);
+  }
+}
+
+function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
+  const sig = `${m.role}:${m.text.length}:${m.reasoning?.length ?? 0}:${m.tools.join(",")}`;
+  if (painted.get(node) === sig) return;
+  painted.set(node, sig);
+  node.className = m.role === "user" ? "turn sent" : "turn output";
+  node.replaceChildren();
+
+  if (m.text) {
+    const body = document.createElement("div");
+    body.className = "turn-text";
+    body.textContent = m.text;
+    node.appendChild(body);
+  }
+  // What the agent worked through before answering. Set apart rather than
+  // hidden: it is the most useful thing on the screen when an answer looks
+  // wrong, and the most skippable when it does not.
+  if (m.reasoning) {
+    const think = document.createElement("details");
+    think.className = "turn-think";
+    const summary = document.createElement("summary");
+    summary.textContent = "思考过程";
+    const text = document.createElement("div");
+    text.textContent = m.reasoning;
+    think.append(summary, text);
+    node.appendChild(think);
+  }
+  if (m.tools.length > 0) {
+    const tools = document.createElement("div");
+    tools.className = "turn-tools";
+    for (const name of dedupeTools(m.tools)) {
+      const chip = document.createElement("span");
+      chip.className = "tool-chip";
+      chip.textContent = name;
+      tools.appendChild(chip);
+    }
+    node.appendChild(tools);
+  }
+}
+
+/** "Read, Read, Bash" reads as noise; "Read x2, Bash" reads as work. */
+function dedupeTools(tools: string[]): string[] {
+  const out: string[] = [];
+  let last = "";
+  let run = 0;
+  const flush = () => {
+    if (last === "") return;
+    out.push(run > 1 ? `${last} x${run}` : last);
+  };
+  for (const name of tools) {
+    if (name === last) {
+      run++;
+      continue;
+    }
+    flush();
+    last = name;
+    run = 1;
+  }
+  flush();
+  return out;
+}
+
+function renderScreenTurns() {
+  if (transcriptNodes.size > 0) {
+    for (const node of transcriptNodes.values()) node.remove();
+    transcriptNodes.clear();
+  }
   const live = new Set<number>();
 
   for (const turn of conv.turns) {
@@ -176,8 +326,6 @@ function render() {
     node.remove();
     nodes.delete(id);
   }
-  paintLiveScreen();
-  if (stick) scrollToBottom();
 }
 
 /** The part of the conversation still on a full-screen program's screen.
@@ -188,7 +336,16 @@ function render() {
  *  appended once and left alone, this part is rebuilt whenever the program
  *  repaints — and between them they cover the conversation exactly once. */
 function paintLiveScreen() {
-  const blocks = conv.liveBlocks;
+  // Under a transcript the screen is not the conversation and must not be
+  // rendered as one - it would repeat what the transcript already says. The
+  // exception is a pending menu: what it is asking ("create this file", and
+  // the diff that goes in it) exists only on the screen, so that part is shown
+  // alongside the buttons and disappears with them.
+  const blocks = transcript
+    ? conv.choices.length > 0
+      ? conv.promptBlocks
+      : []
+    : conv.liveBlocks;
   const sig = blocks.map((b) => `${b.role}:${b.lines.join("\n")}`).join(" ");
   if (liveBlocksEl.dataset.sig !== sig) {
     liveBlocksEl.dataset.sig = sig;
@@ -217,14 +374,40 @@ function paintLiveScreen() {
     );
   }
 
-  // The program's status furniture, as a label rather than a bubble.
-  const status = conv.status;
-  if (status) {
-    if (progStatusEl.textContent !== status) progStatusEl.textContent = status;
+  // The program's status furniture, as a label rather than a bubble. The mode
+  // leads it: of everything pinned to a status bar, the mode is the one piece
+  // that changes what sending a message DOES, so it reads first and is styled
+  // apart from the rest.
+  // The transcript states the mode and the model; the screen only ever
+  // guessed at them from a status bar it had to find first.
+  const mode = transcript?.mode ?? conv.mode;
+  const status = transcript ? (transcript.model ?? null) : conv.status;
+  const label = mode && status ? `${mode} · ${status}` : (mode ?? status);
+  if (label) {
+    if (progStatusEl.dataset.sig !== label) {
+      progStatusEl.dataset.sig = label;
+      progStatusEl.replaceChildren();
+      if (mode) {
+        const chip = document.createElement("span");
+        chip.className = "mode-chip";
+        chip.textContent = mode;
+        progStatusEl.appendChild(chip);
+      }
+      if (status) {
+        const rest = document.createElement("span");
+        rest.className = "status-rest";
+        rest.textContent = status;
+        progStatusEl.appendChild(rest);
+      }
+    }
     progStatusEl.hidden = false;
   } else {
     progStatusEl.hidden = true;
+    progStatusEl.dataset.sig = "";
   }
+
+  paintThinking();
+  paintChoices();
 
   // The tab strip (Claude Code's running subagents), kept independent of the
   // bubbles: a chip row above the composer, not a conversation block.
@@ -247,6 +430,89 @@ function paintLiveScreen() {
       );
     }
   }
+}
+
+/** What the program is doing right now, and for how long.
+ *
+ *  Kept out of the bubbles on purpose: "thinking for 12s" is a state that is
+ *  true until it is not, and pushing each repaint of it into the conversation
+ *  would bury the conversation in its own progress bar. */
+function paintThinking() {
+  // A transcript says when the current turn STARTED, so the page counts up on
+  // its own instead of being told an elapsed time on every poll. The screen's
+  // own spinner is the fallback for a program with no transcript.
+  const working = transcript?.working;
+  const t: typeof conv.thinking = working
+    ? {
+        label: "思考中",
+        seconds: Math.max(0, Math.round((Date.now() - working.since) / 1000)),
+      }
+    : transcript
+      ? null
+      : conv.thinking;
+  if (!t) {
+    thinkingEl.hidden = true;
+    thinkingEl.dataset.sig = "";
+    return;
+  }
+  const sig = `${t.label}:${t.seconds ?? ""}`;
+  if (thinkingEl.dataset.sig !== sig) {
+    thinkingEl.dataset.sig = sig;
+    thinkingEl.textContent =
+      t.seconds === null ? t.label : `${t.label} · ${formatElapsed(t.seconds)}`;
+  }
+  thinkingEl.hidden = false;
+}
+
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}秒`;
+  const m = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest === 0 ? `${m}分` : `${m}分${rest}秒`;
+}
+
+/** A numbered menu the program is offering, as buttons.
+ *
+ *  The program is waiting on a single keystroke, so a tap sends exactly that
+ *  digit - the same thing the desktop keyboard would send. The options are not
+ *  also rendered as bubbles: the question above them still is, and showing the
+ *  answers twice reads as the program having said everything twice. */
+function paintChoices() {
+  const choices = conv.choices;
+  const sig = choices.map((c) => `${c.key}:${c.label}:${c.selected}`).join("|");
+  if (choicesEl.dataset.sig === sig) {
+    choicesEl.hidden = choices.length === 0;
+    return;
+  }
+  choicesEl.dataset.sig = sig;
+  if (choices.length === 0) {
+    choicesEl.hidden = true;
+    choicesEl.replaceChildren();
+    return;
+  }
+  choicesEl.hidden = false;
+  choicesEl.replaceChildren(
+    ...choices.map((c) => {
+      const btn = document.createElement("button");
+      btn.className = c.selected ? "choice-btn selected" : "choice-btn";
+      btn.type = "button";
+      const key = document.createElement("span");
+      key.className = "choice-key";
+      key.textContent = c.key;
+      const text = document.createElement("span");
+      text.className = "choice-label";
+      text.textContent = c.label;
+      btn.append(key, text);
+      btn.addEventListener("click", () => {
+        // The menu is answered with the digit alone; these tools act on the
+        // keypress and do not wait for Enter.
+        if (!writePty(c.key)) return;
+        conv.noteSent(c.key);
+        scrollToBottom();
+      });
+      return btn;
+    }),
+  );
 }
 
 /** Signature of what a node currently shows, so unchanged turns are skipped. */
@@ -272,6 +538,25 @@ function paint(node: HTMLElement, turn: Turn) {
   }
   node.className = `turn output${turn.open ? " live" : ""}`;
   node.textContent = turn.lines.join("\n");
+}
+
+/** Advance the working indicator between transcript polls.
+ *
+ *  The transcript reports when the turn started, not how long it has run, so
+ *  the count-up happens here. Stopped as soon as nothing is running: a timer
+ *  ticking behind an idle session is exactly the kind of cost this page is
+ *  supposed not to have. */
+let workingTimer = 0;
+function startWorkingTicker() {
+  if (workingTimer) return;
+  workingTimer = window.setInterval(() => {
+    if (!transcript?.working) {
+      window.clearInterval(workingTimer);
+      workingTimer = 0;
+      return;
+    }
+    paintThinking();
+  }, 1000);
 }
 
 function isNearBottom(): boolean {
@@ -312,8 +597,8 @@ let pendingAttachId: number | null = null;
 let reconnectTimer: number | null = null;
 let reconnectDelay = 1000;
 let wsSeq = 0;
-/** True between "attached" and the backlog frame the server sends after it. */
-let backlogPending = false;
+/** True between "attached" and the seed frame the server sends after it. */
+let seedPending = false;
 
 function setStatus(text: string, tone: "ok" | "err" | "warn" = "ok") {
   statusEl.textContent = text;
@@ -356,12 +641,11 @@ function connect() {
     if (bytes.length === 0) return;
     if (bytes[0] !== 0x30 /* '0' */) return;
     const payload = bytes.subarray(1);
-    // The first output frame after attaching is the backlog: everything the
-    // desktop's command line already had. It needs replaying frame by frame,
-    // not applying in one go — see Conversation.writeBacklog.
-    if (backlogPending) {
-      backlogPending = false;
-      void conv.writeBacklog(payload);
+    // The first output frame after attaching is the seed: the desktop
+    // terminal's own buffer, serialized. See Conversation.writeSeed.
+    if (seedPending) {
+      seedPending = false;
+      void conv.writeSeed(payload);
       return;
     }
     conv.write(payload);
@@ -409,28 +693,42 @@ function handleText(raw: unknown) {
       lastAttachedId = msg.id;
       // Parse at the grid the stream is actually laid out against (the
       // owner's), not the phone's preference: the server reports it before
-      // the backlog replay, and any other grid makes the TUI layout parse
-      // wrong. `alt` forces the right buffer mode for that replay.
+      // the seed, and any other grid makes the TUI layout parse wrong.
       conv.setGrid(
-        typeof msg.cols === "number" ? msg.cols : FIXED_GRID.cols,
-        typeof msg.rows === "number" ? msg.rows : FIXED_GRID.rows,
+        typeof msg.cols === "number" ? msg.cols : PARSE_FALLBACK_GRID.cols,
+        typeof msg.rows === "number" ? msg.rows : PARSE_FALLBACK_GRID.rows,
       );
-      conv.setAltScreen(msg.alt === true);
+      // A seed carries its own buffer mode (it re-enters the alternate screen
+      // itself), so forcing one here would land the desktop's scrollback in
+      // the wrong buffer. `alt` is only for the case where no seed came back
+      // and the phone has nothing but the live stream to go on.
+      seedPending = msg.seed === true;
+      if (!seedPending) conv.setAltScreen(msg.alt === true);
       emptyHint.hidden = true;
       setStatus(`会话 #${msg.id}`);
-      // The server replays the session's backlog immediately after this.
-      backlogPending = true;
       send({ list: true });
       break;
+    case "transcript": {
+      const next = raw as TranscriptMsg;
+      if (!Array.isArray(next.messages)) break;
+      transcript = next;
+      render();
+      // A running turn's elapsed time has to advance between polls.
+      startWorkingTicker();
+      break;
+    }
     case "resized":
       // The grid changed because one end claimed the session. Every viewer
       // parses at the same grid (the byte stream is laid out against it), so
-      // follow the owner instead of fighting for FIXED_GRID.
+      // follow the owner. The phone never fights for a grid of its own.
       if (typeof msg.cols === "number" && typeof msg.rows === "number") {
         conv.setGrid(msg.cols, msg.rows);
       }
       break;
     case "exit":
+      // The agent went with the shell; its transcript is no longer what this
+      // session shows.
+      if (attachedId === msg.id) transcript = null;
       toast(`会话 #${msg.id} 已退出 (${msg.code})`);
       conv.note(`会话 #${msg.id} 已退出 (${msg.code})`);
       if (attachedId === msg.id) {
@@ -542,16 +840,17 @@ function attachTo(id: number) {
     return;
   }
   pendingAttachId = id;
-  backlogPending = false;
-  // The server replays this session's history, which is a different stream:
-  // start the conversation over rather than splicing it onto the old one.
+  seedPending = false;
+  transcript = null;
+  // The server seeds from a different terminal's buffer: start the
+  // conversation over rather than splicing it onto the old one.
   conv.reset();
   attachedId = null;
-  // State the phone's preferred grid. Watching does not move the shared PTY
-  // (a session has one grid and it belongs to whoever is typing); the server
-  // records this as the phone's preference and applies it on the first
-  // keystroke, which claims the session.
-  send({ attach: id, cols: FIXED_GRID.cols, rows: FIXED_GRID.rows });
+  // No grid preference: the PTY stays exactly as the desktop has it, so the
+  // program is laid out at the screen the desktop is showing and typing from
+  // the phone never reflows it. Omitting cols/rows is what tells the server
+  // this viewer will not claim the size.
+  send({ attach: id });
 }
 
 function escapeHtml(s: string): string {

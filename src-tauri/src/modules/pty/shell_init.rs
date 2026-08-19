@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use portable_pty::CommandBuilder;
 
@@ -547,7 +547,7 @@ mod windows {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .filter(|p| p.is_file())
+            .filter(|p| super::is_real_executable(p))
             .unwrap_or_else(super::windows_shell_path);
         let shell_name = shell_path
             .file_name()
@@ -815,7 +815,9 @@ mod windows {
 
     pub fn list_shells() -> Vec<super::ShellInfo> {
         fn add(out: &mut Vec<super::ShellInfo>, name: &str, path: PathBuf, integrated: bool) {
-            if path.is_file() {
+            // Offering an app-execution alias here would let the user pick a
+            // shell that opens and then takes no input.
+            if super::is_real_executable(&path) {
                 out.push(super::ShellInfo {
                     name: name.to_string(),
                     path: path.to_string_lossy().into_owned(),
@@ -1086,11 +1088,32 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
-        if candidate.is_file() {
+        if is_real_executable(&candidate) {
             return Some(candidate);
         }
     }
     None
+}
+
+/// Whether a PATH hit is something we can actually spawn.
+///
+/// A Microsoft Store "app execution alias" is a **zero-length reparse point**
+/// that Explorer resolves on your behalf. ConPTY spawns through
+/// `CreateProcessW`, which does not: the child comes up broken, so a terminal
+/// opens and then accepts no input at all.
+///
+/// These aliases live in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which sits
+/// AHEAD of `C:\Program Files\PowerShell` in the PATH a process inherits
+/// from Explorer. That is why this only ever bit the packaged build: launched
+/// from a dev shell, the real pwsh comes first and the alias is never reached.
+///
+/// Length is the honest test. A real executable is never zero bytes, and
+/// checking the size covers any other alias rather than just the ones that
+/// happen to live in that folder.
+fn is_real_executable(path: &Path) -> bool {
+    path.metadata()
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

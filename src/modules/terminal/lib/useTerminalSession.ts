@@ -49,6 +49,7 @@ import {
   poolSlotStats,
   refreshLeafSlot,
   releaseSlot,
+  serializeLeaf,
   setSlotFocused,
 } from "./rendererPool";
 import {
@@ -328,6 +329,36 @@ export function leafIdForPty(ptyId: number): number | null {
 
 export function ptyIdForLeaf(leafId: number): number | null {
   return sessions.get(leafId)?.pty?.id ?? null;
+}
+
+/**
+ * What this command line currently holds, as a replayable ANSI string.
+ *
+ * This is what a phone is seeded with when it attaches: the desktop's own
+ * terminal buffer is the only honest answer to "what does this command line
+ * show", so the bridge asks for it instead of keeping a second copy of the
+ * output on the Rust side. A leaf with a renderer slot is serialized live; a
+ * parked one answers from the snapshot taken when its slot was released, plus
+ * the output that has arrived since - the same two pieces the desktop itself
+ * replays when the pane comes back.
+ */
+export function snapshotLeaf(leafId: number): string | null {
+  const s = sessions.get(leafId);
+  // The slot's own terminal first (bound or merely parked), then the snapshot
+  // stored when a slot was taken away from this leaf. Only one of the two ever
+  // holds anything: binding writes the stored copy back and clears it.
+  let out = serializeLeaf(leafId)?.snapshot ?? s?.snapshot ?? "";
+  // Output that arrived while the pane had no slot has not reached any
+  // terminal yet, so it is appended the same way the desktop replays it when
+  // the pane comes back.
+  if (s && s.dormantRing.byteLength() > 0) {
+    const decoder = new TextDecoder();
+    s.dormantRing.peek((bytes) => {
+      out += decoder.decode(bytes, { stream: true });
+    });
+    out += decoder.decode();
+  }
+  return out === "" ? null : out;
 }
 
 function leafBusy(s: Session): boolean {

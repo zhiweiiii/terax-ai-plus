@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
-import { applyExternalGrid, leafIds, ptyIdForLeaf } from "@/modules/terminal";
+import {
+  applyExternalGrid,
+  leafIds,
+  ptyIdForLeaf,
+  snapshotLeaf,
+} from "@/modules/terminal";
 import { useSpaces } from "@/modules/spaces";
 import type { Tab } from "@/modules/tabs";
 
@@ -88,6 +93,41 @@ export function useWebTerminalSync({
         (e) => {
           const { leafId, cols, rows } = e.payload;
           if (typeof leafId === "number") applyExternalGrid(leafId, cols, rows);
+        },
+      );
+      if (disposed) off();
+      else unlisten = off;
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // A phone that attaches is seeded with this terminal's own buffer rather
+  // than with a second copy of the output kept on the Rust side: the desktop
+  // is the only thing that knows what this command line actually shows. The
+  // server blocks on the reply, so answer even when there is nothing to send.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    (async () => {
+      const off = await listen<{ leafId: number; requestId: number }>(
+        "terax:web-snapshot",
+        (e) => {
+          const { leafId, requestId } = e.payload;
+          let data: string | null = null;
+          try {
+            data = snapshotLeaf(leafId);
+          } catch (err) {
+            console.warn("[terax] snapshotLeaf failed:", err);
+          }
+          void invoke("web_snapshot_reply", {
+            requestId,
+            data: data ?? "",
+          }).catch((err) => {
+            console.warn("web_snapshot_reply failed:", err);
+          });
         },
       );
       if (disposed) off();

@@ -92,11 +92,16 @@ type InflightRefresh = {
   promise: Promise<void>;
 };
 
+// The explicit repo root belongs in the key: on a project switch the context
+// path moves a beat before the repo scan resolves the new root, so a refresh
+// still aimed at the previous repo would otherwise dedupe the one aimed at
+// the new one and leave the panel on the old branch.
 function sourceControlContextKey(
   workspaceKey: string,
   contextPath: string | null,
+  repoRoot: string | null,
 ): string {
-  return `${workspaceKey}\0${contextPath ?? ""}`;
+  return `${workspaceKey}\0${contextPath ?? ""}\0${repoRoot ?? ""}`;
 }
 
 function normalizedContextPath(path: string): string {
@@ -259,7 +264,11 @@ export function useSourceControl(
   const lastRefreshAtRef = useRef(0);
   const resetWorkspaceKeyRef = useRef(workspaceKey);
   const repoRootRef = useRef(repoRoot ?? null);
-  const contextKey = sourceControlContextKey(workspaceKey, contextPath);
+  const contextKey = sourceControlContextKey(
+    workspaceKey,
+    contextPath,
+    repoRoot ?? null,
+  );
   const contextKeyRef = useRef(contextKey);
   contextKeyRef.current = contextKey;
 
@@ -339,13 +348,23 @@ export function useSourceControl(
           ? activeRoot
           : null);
 
+      // Only the repo already on screen may stay on screen while it reloads.
+      // An explicit root naming a different repo means the panel moved to
+      // another project, and keeping the old repo/branch/changes visible there
+      // is exactly the stale render a switch must not produce.
+      const reuseCurrentRepository =
+        !!reusableRoot &&
+        !!activeRoot &&
+        normalizedContextPath(activeRoot) ===
+          normalizedContextPath(reusableRoot);
+
       // Guarded: a request that has since been superseded must not set the
       // loading flag, or a rapid project switch could leave the panel on
       // "loading" forever (the stale request bails later without ever clearing
       // the flag it set).
       if (!isCurrentRequest()) return;
       setState((current) =>
-        beginSourceControlRefresh(current, contextPath, !!reusableRoot),
+        beginSourceControlRefresh(current, contextPath, reuseCurrentRepository),
       );
 
       try {

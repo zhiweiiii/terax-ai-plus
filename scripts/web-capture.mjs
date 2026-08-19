@@ -105,7 +105,8 @@ async function main() {
   const started = Date.now();
   const attachSent = new Promise((resolve, reject) => {
     const attempts = (n) => {
-      ws.send(JSON.stringify({ attach: leaf, cols: 120, rows: 40 }));
+      // No grid: the phone does not impose one, so neither does the capture.
+      ws.send(JSON.stringify({ attach: leaf }));
       const timer = setInterval(() => {
         if (attached && attached.id === leaf) {
           clearInterval(timer);

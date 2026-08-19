@@ -23,7 +23,7 @@ IDs start at 1 and monotonically increase; they are never reused so the frontend
 `session::spawn` (`session.rs`) starts three threads per session:
 
 1. **Reader** - reads bytes from the PTY master, runs the DA filter and agent detector, and pushes filtered bytes into a pending buffer.
-2. **Flusher** - coalesces output and sends it to the frontend over the data channel. It also appends each chunk to a rolling history ring (`WEB_HISTORY_CAP`, 256 KiB) and broadcasts it to any attached Web viewers (bounded queues so a slow phone never stalls the PTY). See [Web terminal bridge](web-terminal-bridge.md).
+2. **Flusher** - coalesces output and sends it to the frontend over the data channel. It also broadcasts each chunk to any attached Web viewers (bounded queues so a slow phone never stalls the PTY), keeping no copy of it: a Web viewer is seeded from the desktop's own terminal buffer instead. See [Web terminal bridge](web-terminal-bridge.md).
 3. **Waiter** - waits for the child process to exit, flushes the tail, and emits the exit code.
 
 The pending buffer is capped at 4 MiB; on overflow it is discarded and replaced with an SGR-reset notice so xterm state is not corrupted by a sliced CSI sequence.

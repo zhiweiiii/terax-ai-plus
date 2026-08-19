@@ -544,6 +544,205 @@ hot-deploy 稳定性、grid 所有权、解析器、agent 模式抽取，并建�
 - `mobile-conversation-view.md`：位置法 footer/agent、echo 分层匹配、程序
   识别、isBanner 首帧、权限对话框、测试工具链、Verified/Not 更新。
 
+## Phone seeded from the desktop's buffer (2026-08-19)
+
+**The phone opened on records the desktop no longer had, then lost them
+again** - fixed. The initial content came from a 256 KiB rolling byte ring kept
+per session in `session.rs`, which is a second store of the output and drifted
+from the terminal by construction:
+
+- it outlived a `clear` on the desktop (the parser's `turns` are not cleared by
+  a clear in the stream), so content the desktop had dropped came back;
+- it was bounded in **bytes** where a terminal is bounded in **lines**, so an
+  idle shell's ring spanned days of history the desktop had long scrolled past;
+- replaying it meant ~1000 sliced writes with a render between each, so the old
+  records visibly piled up on screen, and then `MAX_LINES` (4000) trimmed them
+  off the front again as the replay continued. Hence "everything appears, then
+  disappears".
+
+The ring is gone. On attach the server subscribes the viewer, asks the window
+for that leaf's terminal buffer (`terax:web-snapshot` ->
+`snapshotLeaf` -> `web_snapshot_reply`), and sends it as one seed frame. A live
+leaf is serialized through `SerializeAddon`, a parked one answers from its
+stored snapshot plus `DormantRing.peek`. `attached` gained `seed`, and the page
+no longer forces a buffer mode when a seed is coming - the serialized form
+re-enters the alternate screen itself. `writeSeed` splits at that `?1049h` so
+the scrollback is read out as history before the TUI screen takes over.
+
+Accepted: the few milliseconds between subscribing and serializing can appear
+in both the seed and the live queue, so a busy session may show a small
+duplicate at the join. The alternative was making the window count bytes.
+
+**The phone imposed its own 120x40 grid** - fixed. `FIXED_GRID` was sent as an
+attach preference and applied on the phone's first keystroke, which resized the
+shared PTY and reflowed the desktop's screen under a program laid out for it.
+The phone renders no grid, so it has no size to want: it now attaches without
+cols/rows and never claims the size. The PTY stays at the desktop's.
+
+**The screen was flattened into bubbles** - fixed. `setLive` now takes it apart
+into body, working state (`thinking`), mode (`mode`), choices (`choices`) and
+the agent strip, each rendered in its own place. See
+[Mobile conversation view](architecture/mobile-conversation-view.md) § Four
+things, not one stream. Two things surfaced building it:
+
+- the working line is drawn right above the input box and can land on the
+  footer's **bottom** row, which is the agent tab strip slot - a program that
+  was merely thinking got reported as running a subagent. It is split out
+  first, from either half of the screen.
+- a first cut of the menu split reset its run on any non-matching row, so a key
+  hint drawn under the options (`(up/down to navigate, enter to select)`)
+  discarded the whole menu. It now scans upward from the input box, and guards
+  against prose numbered lists with two rules: a menu marks its current row
+  (`❯`/`>`), and its keys increase.
+
+`scripts/web-synthetic-test.mjs` covers all of it (36 assertions), including a
+prose list that must stay prose, a prose list sitting above a real menu, and
+two seed shapes (a quiet shell, and scrollback plus a running program).
+
+Two more bugs surfaced driving the real bridge with `scripts/e2e-phone.mjs`
+against a live instance:
+
+- **A parked pane seeded as empty.** `serializeLeaf` only matched a slot by
+  `currentLeafId`, but parking a pane leaves its content in that slot under
+  `retainedLeafId` *and* clears the session's stored snapshot (binding writes
+  the stored copy back into the slot and drops it). So a hidden tab had its
+  buffer in the one place the lookup did not check. It now matches a retained
+  slot too, and `snapshotLeaf` chains slot -> stored snapshot -> dormant ring
+  rather than stopping at the first hit.
+- **A quiet command line rendered as a blank page.** `flushNormal` stops above
+  the cursor row on purpose (it may be a half-written prompt), and a shell
+  sitting at its prompt is nothing but that row. Correct for live output,
+  wrong for a seed: at seed time the row is exactly what the desktop shows.
+  `writeSeed` now emits it once and moves the read cursor past it, so the live
+  stream does not repeat it.
+
+Verified live: seeding a parked leaf and the active leaf both return the
+desktop's real buffer; the phone typing no longer moves the PTY grid (a session
+stayed at the desktop's 138x44 where it used to be forced to 120x40); the full
+`e2e-phone.mjs` round trip (attach, seed rendered, send, echo) passes.
+
+Not verified: a real `claude` / `opencode` session end to end through the phone
+since the rework - the alt-screen seed, working state, mode and menu are
+covered by synthetic screens only.
+
+## Agent conversation read from the agent, not the screen (2026-08-19)
+
+The phone reconstructed an agent conversation by parsing the TUI's screen.
+Driving a real opencode session through the bridge showed what that costs: it
+draws a **right-hand panel** (session name, token count, cost, LSP state, cwd,
+branch) on the same rows as the conversation, so read as text it interleaved -
+`1% used` glued to the front of a sentence, a bare cwd path as its own bubble,
+a timestamp landing inside the echo of what was typed. A geometric side-column
+cut fixed that particular screen, but the class of bug does not end: a spinner
+is a sentence unless recognised as a spinner, the mode moves with the status
+bar's layout, and reasoning is indistinguishable from an answer.
+
+Both tools already write the conversation down. It is now read from there
+(`src-tauri/src/modules/transcript/`): Claude Code from its per-session JSONL,
+opencode from its SQLite database (read-only; its TUI opens no port and
+`opencode export` costs a process per read, so there was no other live source).
+`rusqlite` (bundled) was added for that and nothing else. Both are normalised
+into one shape and pushed as a `transcript` WebSocket message; the page renders
+it as the conversation and stops reading the screen for anything but the menu
+the program is waiting on, which no transcript records because it is live UI
+state.
+
+Verified end to end against real sessions driven through the phone page:
+opencode reports `mode=build`, `model=deepseek-v4-flash`, the user's message,
+the reply, and the reasoning behind it; Claude Code reports `mode=auto` and its
+turns. In both, the live screen blocks render empty - the screen is no longer
+being read as conversation.
+
+Gating, so an idle session stays free: an agent must actually be running
+(`Session::web_agent`, fed by the existing OSC detection - a directory that ran
+one yesterday must not show that conversation over today's prompt), a
+filesystem mark must have moved, and the revision must have changed.
+
+### The permission dialog, driven for real
+
+Exercised against a live Claude Code session with a workspace
+`permissions.defaultMode: "default"`, which makes it ask before writing. One
+bug fell out immediately, and it is the same shape as everything else the
+screen parse got wrong:
+
+**A pending dialog vanished into the status bar.** Claude draws the diff it is
+asking about between two dashed rules (`╌╌╌`), and `splitFooter` anchors on the
+last rule in the bottom of the screen. It picked the lower diff rule, so the
+question and all three options counted as footer and `choices` came back empty
+while the agent sat blocked. The menu scan no longer depends on the footer
+split at all: `findChoices` runs over the whole screen first, and the footer is
+then only allowed to start BELOW the menu it found. That is the right order
+anyway - the menu is the one thing on screen the transcript cannot know, so it
+must not be the thing that breaks when the rest of the parse does.
+
+**The dialog dragged the whole screen in with it.** Under a transcript the
+screen is not rendered, except while a menu is pending. Rendering all of
+`liveBlocks` then put Claude's welcome banner above the question. The dialog's
+own context is now bounded (`promptBlocks`: the rows between the menu and 12
+above it), so what shows is the question, the file, and the diff - approving
+"create hello.txt" without seeing what goes in it is a guess, not a decision.
+
+Verified live, twice: three buttons with the right keys and labels (including
+the long "Yes, and switch to accept edits…"), option 1 marked selected, the
+question and diff beside them, and tapping the button actually answered Claude
+- `hello.txt` and `world.txt` were created on disk with the right contents.
+Covered by a synthetic screen built from the captured dialog, so the
+diff-rule trap cannot come back.
+
+Also fixed while testing: the transcript's cwd was captured at attach and never
+re-read, so a shell that cd'd afterwards kept showing the previous directory's
+conversation. It is looked up per poll now.
+
+## Packaged build spawned a Store alias as the shell (2026-08-19)
+
+**Every terminal in the packaged build opened and then accepted no input.**
+The dev build was fine, which is the whole clue.
+
+`which_in_path` accepted any PATH hit that satisfied `is_file()`. A Microsoft
+Store **app execution alias** satisfies it: it is a zero-length reparse point
+that Explorer resolves on your behalf. ConPTY spawns through `CreateProcessW`,
+which does not resolve it, so the child came up broken - a terminal that opens
+and takes nothing.
+
+Why only the packaged build: the alias lives in
+`%LOCALAPPDATA%\\Microsoft\\WindowsApps`, and in the PATH a process
+inherits from Explorer that directory sits **ahead** of
+`C:\\Program Files\\PowerShell\\7`. Launched from a dev shell the order is the
+other way round, so `cargo run` never reached the alias. Measured on the
+affected machine:
+
+```
+C:\WINDOWS\System32\WindowsPowerShell\v1.0\          (no pwsh.exe here)
+C:\Users\<user>\AppData\Local\Microsoft\WindowsApps  <- 0 bytes, was winning
+C:\Program Files\PowerShell\7\                        <- 301368 bytes, the real one
+```
+
+Not caused by any recent change: the Store PowerShell 7.6.5 was installed two
+days earlier, and that is when the alias appeared on PATH.
+
+Fixed with `is_real_executable`: a PATH hit counts only when it is a file of
+non-zero length. Length is the honest test - a real executable is never zero
+bytes, and it covers any alias rather than just the ones in that one folder.
+Applied to the PATH search, to a user-configured shell override, and to the
+shell picker, so none of the three can hand back something that opens a dead
+terminal. Verified in the actual packaged binary: it now spawns
+`C:\Program Files\PowerShell\7\pwsh.exe`.
+
+**A second, separate cause on the same machine**, worth knowing because it
+looks identical from the outside. `pwsh.exe` was flagged
+`~ RUNASADMIN` under `HKCU\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers`
+("always run as administrator" in the file's properties). A non-elevated
+process spawning it gets `CreateProcessW ... (os error 740)`,
+ERROR_ELEVATION_REQUIRED, and the pane fails to open at all. Before the alias
+fix this was hidden: the resolver picked the zero-byte alias instead, which
+"spawned" and then sat dead, so the elevation problem never surfaced.
+
+Terax does not fall back to another shell when a spawn fails - a shell that is
+present but unspawnable ends the attempt. Deliberate for now: on this machine
+the owner runs Terax elevated, which is what they want anyway (the alternative
+is silently dropping to `cmd.exe` and wondering why the prompt looks wrong).
+Worth revisiting if it turns up on a machine where elevation is not an option.
+
 ## Dead code and stale exports
 
 | Location | What | Status |
