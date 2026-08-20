@@ -1,6 +1,12 @@
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import { joinPath } from "@/modules/explorer/lib/useFileTree";
+import { setDiffCollapseUnchanged } from "@/modules/settings/store";
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import { SparklesIcon, UnfoldLessIcon, UnfoldMoreIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { unifiedMergeView } from "@codemirror/merge";
 import { openSearchPanel } from "@codemirror/search";
 import { EditorState, type Extension } from "@codemirror/state";
@@ -50,6 +56,8 @@ type Props = {
   source: WorkingSource | CommitSource;
   chipLabel?: string;
   active: boolean;
+  /** Hand this file to the agent, the same way the explorer's menu does. */
+  onAttachToAgent?: (absolutePath: string) => void;
 };
 
 const LARGE_FILE_THRESHOLD = 256 * 1024;
@@ -150,9 +158,10 @@ export type GitDiffPaneHandle = {
 };
 
 export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
-  function GitDiffPane({ source, chipLabel, active }, ref) {
+  function GitDiffPane({ source, chipLabel, active, onAttachToAgent }, ref) {
     const cmRef = useRef<ReactCodeMirrorRef>(null);
     const themeExt = useEditorThemeExt();
+    const collapseUnchanged = usePreferencesStore((s) => s.diffCollapseUnchanged);
     const [state, setState] = useState<LoadState>(() =>
       active ? loadStateFromCache(source) : { kind: "idle" },
     );
@@ -243,11 +252,16 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
           highlightChanges: true,
           gutter: true,
           syntaxHighlightDeletions: true,
-          collapseUnchanged: { margin: 3, minSize: 6 },
+          // Folded, the file is only what changed; unfolded it is the file
+          // with the changes marked in it. Both are worth having, so it is a
+          // toggle rather than a decision made here.
+          collapseUnchanged: collapseUnchanged
+            ? { margin: 3, minSize: 6 }
+            : undefined,
         }),
         DIFF_THEME,
       ],
-      [originalContent, langExt],
+      [originalContent, langExt, collapseUnchanged],
     );
 
     // Cache-hit path only: the diff came from the cache before the language
@@ -297,7 +311,7 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-3 text-[10.5px] tabular-nums text-muted-foreground">
-            <span className="truncate max-w-80 font-mono">{repoRoot}</span>
+            <span className="truncate max-w-60 font-mono">{repoRoot}</span>
             {useFallback ? (
               <>
                 <span className="text-emerald-600 dark:text-emerald-400">
@@ -307,6 +321,51 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                   −{stats.removed}
                 </span>
               </>
+            ) : null}
+            {/* The fold has nothing to act on in the patch fallback: that view
+                is the patch, which is already only the changes. */}
+            {!useFallback ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 gap-1 px-1.5 text-[10.5px]"
+                title={
+                  collapseUnchanged
+                    ? "显示完整文件"
+                    : "只显示变动的代码"
+                }
+                onClick={() => void setDiffCollapseUnchanged(!collapseUnchanged)}
+              >
+                <HugeiconsIcon
+                  icon={collapseUnchanged ? UnfoldMoreIcon : UnfoldLessIcon}
+                  size={13}
+                  strokeWidth={1.75}
+                />
+                {collapseUnchanged ? "完整文件" : "仅变动"}
+              </Button>
+            ) : null}
+            {onAttachToAgent ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 gap-1 px-1.5 text-[10.5px]"
+                title="添加到 Claude Code"
+                onClick={() =>
+                  onAttachToAgent(
+                    joinPath(
+                      repoRoot.replace(/\\/g, "/"),
+                      path.replace(/\\/g, "/"),
+                    ),
+                  )
+                }
+              >
+                <HugeiconsIcon
+                  icon={SparklesIcon}
+                  size={13}
+                  strokeWidth={1.75}
+                />
+                添加到 Claude Code
+              </Button>
             ) : null}
           </div>
         </div>

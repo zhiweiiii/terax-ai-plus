@@ -9,9 +9,15 @@ type Props = {
   tabs: Tab[];
   activeId: number;
   registerHandle: (id: number, handle: GitDiffPaneHandle | null) => void;
+  onAttachToAgent?: (absolutePath: string) => void;
 };
 
-export function GitDiffStack({ tabs, activeId, registerHandle }: Props) {
+export function GitDiffStack({
+  tabs,
+  activeId,
+  registerHandle,
+  onAttachToAgent,
+}: Props) {
   const active = tabs.find(
     (t): t is GitDiffTab | GitCommitFileDiffTab =>
       (t.kind === "git-diff" || t.kind === "git-commit-file") &&
@@ -40,6 +46,7 @@ export function GitDiffStack({ tabs, activeId, registerHandle }: Props) {
             mode: active.mode,
             originalPath: active.originalPath,
           }}
+          onAttachToAgent={onAttachToAgent}
         />
       </div>
     );
@@ -58,6 +65,7 @@ export function GitDiffStack({ tabs, activeId, registerHandle }: Props) {
           originalPath: active.originalPath,
         }}
         chipLabel={active.shortSha}
+        onAttachToAgent={onAttachToAgent}
       />
     </div>
   );

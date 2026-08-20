@@ -144,8 +144,19 @@ fn parse(file: &Path) -> Option<Transcript> {
     let mut permission: Option<String> = None;
     let mut steps: Vec<Message> = Vec::new();
     let mut revision = 0i64;
-    // A user message with nothing after it means the agent is still answering.
-    let mut working_since: Option<i64> = None;
+    // When the current turn started, and whether it is still running.
+    //
+    // "An assistant entry arrived" is NOT the end of a turn: Claude writes one
+    // per model round trip, so a turn that calls three tools writes four of
+    // them. Treating the first as the end made the working indicator vanish a
+    // second after it appeared, for the whole of a long turn.
+    //
+    // What actually says "still going" is a tool call with no result yet. Tool
+    // results come back as user entries (the ones not typed by a person), so
+    // counting calls out and results in tracks the turn exactly.
+    let mut turn_started: Option<i64> = None;
+    let mut turn_open = false;
+    let mut pending_tools: i32 = 0;
 
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -171,11 +182,13 @@ fn parse(file: &Path) -> Option<Transcript> {
                 if value.get("origin").and_then(|o| o.get("kind")).and_then(Value::as_str)
                     != Some("human")
                 {
+                    pending_tools = (pending_tools - count_blocks(&value, "tool_result")).max(0);
                     continue;
                 }
                 let at = timestamp(&value);
                 revision = revision.max(at);
-                working_since = Some(at);
+                turn_started = Some(at);
+                turn_open = true;
                 steps.push(Message {
                     id: entry_id(&value, steps.len()),
                     role: "user",
@@ -188,8 +201,10 @@ fn parse(file: &Path) -> Option<Transcript> {
             Some("assistant") => {
                 let at = timestamp(&value);
                 revision = revision.max(at);
-                working_since = None;
                 let (text, reasoning, tools) = assistant_blocks(&value);
+                pending_tools += tools.len() as i32;
+                // Still going while a call it just made has not come back.
+                turn_open = pending_tools > 0;
                 steps.push(Message {
                     id: entry_id(&value, steps.len()),
                     role: "assistant",
@@ -217,9 +232,26 @@ fn parse(file: &Path) -> Option<Transcript> {
         mode: permission.or(mode),
         model: None,
         messages: merge_assistant_steps(steps),
-        working: working_since.map(|since| Working { since }),
+        working: turn_open
+            .then(|| turn_started.map(|since| Working { since }))
+            .flatten(),
         revision,
     })
+}
+
+/// How many content blocks of a kind an entry carries.
+fn count_blocks(value: &Value, kind: &str) -> i32 {
+    value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some(kind))
+                .count() as i32
+        })
+        .unwrap_or(0)
 }
 
 fn entry_id(value: &Value, index: usize) -> String {

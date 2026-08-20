@@ -6,13 +6,21 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { GitStatusSnapshot } from "@/lib/native";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { setHideGitIgnored, setShowHidden } from "@/modules/settings/store";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 import type { TerminalPathDropTarget } from "@/modules/terminal";
 import {
   FileAddIcon,
+  FilterIcon,
   Folder01Icon,
   FolderAddIcon,
   Refresh01Icon,
@@ -121,6 +129,7 @@ function buildRows(
   rootPath: string,
   tree: ReturnType<typeof useFileTree>,
   lookup: (path: string) => GitStatusCode | null,
+  hideGitIgnored: boolean,
 ): { rows: Row[]; entryIndexByPath: Map<string, number> } {
   const rows: Row[] = [];
   const entryIndexByPath = new Map<string, number>();
@@ -134,6 +143,10 @@ function buildRows(
       const expanded = isDir && tree.expanded.has(path);
       const isRenaming = tree.renaming === path;
       const gitignored = parentIgnored || entry.gitignored;
+      // An ignored directory takes its subtree with it: `parentIgnored` is
+      // already the inherited answer, so skipping here skips the walk below
+      // as well.
+      if (hideGitIgnored && gitignored) continue;
       const gitStatusCode = gitignored ? null : lookup(path);
       if (isRenaming) {
         rows.push({
@@ -219,6 +232,8 @@ export const FileExplorer = memo(
   ) {
     const tree = useFileTree(rootPath, { onPathRenamed, onPathDeleted });
     const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
+    const hideGitIgnored = usePreferencesStore((s) => s.hideGitIgnored);
+    const showHidden = usePreferencesStore((s) => s.showHidden);
     const { lookup: lookupGitStatus } = useGitStatus(
       rootPath,
       gitDecorations ? gitStatuses : null,
@@ -236,7 +251,7 @@ export const FileExplorer = memo(
           rows: [] as Row[],
           entryIndexByPath: new Map<string, number>(),
         };
-      return buildRows(rootPath, tree, lookupGitStatus);
+      return buildRows(rootPath, tree, lookupGitStatus, hideGitIgnored);
       // `tree` is intentionally omitted: its identity changes every render, but
       // the listed fields are the only inputs buildRows actually reads.
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -247,6 +262,7 @@ export const FileExplorer = memo(
       tree.renaming,
       tree.pendingCreate,
       lookupGitStatus,
+      hideGitIgnored,
     ]);
 
     const rowActions = useMemo<RowActions>(
@@ -601,6 +617,38 @@ export const FileExplorer = memo(
           >
             <HugeiconsIcon icon={FolderAddIcon} size={13} strokeWidth={2} />
           </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "size-6 text-muted-foreground hover:text-foreground",
+                  // Say so when the tree is not showing everything, or a
+                  // missing file looks like a missing file.
+                  (hideGitIgnored || showHidden) && "text-foreground",
+                )}
+                title="过滤"
+                aria-label="过滤"
+              >
+                <HugeiconsIcon icon={FilterIcon} size={13} strokeWidth={2} />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-44">
+              <DropdownMenuCheckboxItem
+                checked={hideGitIgnored}
+                onCheckedChange={(v) => void setHideGitIgnored(v === true)}
+              >
+                隐藏 git 忽略的文件
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuCheckboxItem
+                checked={showHidden}
+                onCheckedChange={(v) => void setShowHidden(v === true)}
+              >
+                显示隐藏文件
+              </DropdownMenuCheckboxItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button
             variant="ghost"
             size="icon"

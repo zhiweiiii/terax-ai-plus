@@ -410,12 +410,7 @@ export class Conversation {
     // it is asking about, and the rest of the screen is not part of the
     // question.
     this.promptBlocks = menu
-      ? toBlocks(
-          this.liveScreen.slice(
-            Math.max(0, menu.start - PROMPT_WINDOW),
-            menu.start,
-          ),
-        )
+      ? toBlocks(this.liveScreen.slice(promptFrom(this.liveScreen, menu.start), menu.start))
       : [];
     const split = splitFooter(this.liveScreen, menu ? menu.end + 1 : 0);
     if (menu) {
@@ -799,7 +794,13 @@ export type Block = { role: "user" | "out"; lines: string[] };
 export type Thinking = { label: string; seconds: number | null };
 
 /** One entry of a numbered menu the program is offering. */
-export type Choice = { key: string; label: string; selected: boolean };
+export type Choice = {
+  key: string;
+  label: string;
+  selected: boolean;
+  /** The option's own description, when the program prints one under it. */
+  detail?: string;
+};
 
 /** A menu found on screen, and the rows it occupies. */
 type ChoiceMenu = { choices: Choice[]; start: number; end: number };
@@ -1165,11 +1166,41 @@ function detectMode(footer: string[], body: string[]): string | null {
 const CHOICE_ROW = /^([>❯]?)\s*(\d{1,2})[.)]\s+(\S.*)$/;
 /** How far up from the input box a menu can start. Both tools draw the
  *  question and its options directly above the composer. */
-const CHOICE_WINDOW = 14;
+const CHOICE_WINDOW = 24;
+/** Rows an option may take before the next one starts.
+ *
+ *  Generous on purpose: an option's description can wrap to several lines, and
+ *  a widget can draw a rule through its own list. Being too tight is what made
+ *  a real question widget parse as "not a menu" - the run broke at the first
+ *  description, which left the tail of the list and none of the selection
+ *  marker. The keys-count-upward and one-row-is-marked rules are what keep a
+ *  prose list from joining across a gap this wide; the gap itself does not
+ *  have to be the guard. */
+const CHOICE_ROW_GAP = 6;
 /** How much of the screen above a menu counts as the question it is asking.
  *  Enough for a prompt plus the diff or command under it; not the whole
  *  session. */
 const PROMPT_WINDOW = 12;
+/** Corners. A run of frame characters WITH one is a box edge; without one it
+ *  is a divider. Both tools open a dialog with a plain divider, and both draw
+ *  boxes elsewhere on screen, so the difference is what tells a widget's top
+ *  edge from the bottom of the welcome banner. */
+const BOX_CORNER = /[┌-┏┐-┓└-┗┘-┛├-┿╔-╬╭-╰]/;
+
+/** Where the question a menu is asking starts.
+ *
+ *  A dialog opens with a divider, so the first one above the menu is its top
+ *  edge and everything under it belongs to the question - which is what keeps
+ *  Claude's diff ("1 hi", between two more dividers) with the prompt that asks
+ *  about it. Box edges are skipped: the welcome banner's bottom is a run of
+ *  frame characters too, and anchoring on it dragged the whole banner in. */
+function promptFrom(screen: string[], menuStart: number): number {
+  const from = Math.max(0, menuStart - PROMPT_WINDOW);
+  for (let i = from; i < menuStart; i++) {
+    if (isRule(screen[i]) && !BOX_CORNER.test(screen[i])) return i + 1;
+  }
+  return from;
+}
 
 /** Split a numbered menu off the screen.
  *
@@ -1190,37 +1221,61 @@ const PROMPT_WINDOW = 12;
  *  asking, and it belongs in the thread. */
 function findChoices(screen: string[]): ChoiceMenu | null {
   const from = Math.max(0, screen.length - CHOICE_WINDOW);
-  let start = -1;
-  let end = -1;
-  const rows: Choice[] = [];
-  for (let i = screen.length - 1; i >= from; i--) {
-    const text = stripChrome(screen[i]);
-    const m = CHOICE_ROW.exec(text);
-    if (m) {
-      if (end === -1) end = i;
-      start = i;
-      rows.unshift({ key: m[2], label: m[3].trim(), selected: m[1] !== "" });
-      continue;
+
+  // Pass one: every numbered row in the window, with where it sat.
+  const hits: { at: number; choice: Choice }[] = [];
+  for (let i = from; i < screen.length; i++) {
+    const m = CHOICE_ROW.exec(stripChrome(screen[i]));
+    if (!m) continue;
+    hits.push({
+      at: i,
+      choice: { key: m[2], label: m[3].trim(), selected: m[1] !== "" },
+    });
+  }
+  if (hits.length < 2) return null;
+
+  // Pass two: the lowest run whose keys count upward and whose rows sit close
+  // enough to be one list. Adjacency cannot be row-by-row: Claude's question
+  // widget gives every option a description line, and draws a rule THROUGH its
+  // own list. Scanning row by row stopped at the first description, which left
+  // the tail of the list and none of the selection marker, so a real menu came
+  // back as "not a menu".
+  let best: { at: number; choice: Choice }[] = [];
+  let run: { at: number; choice: Choice }[] = [];
+  for (const hit of hits) {
+    const prev = run[run.length - 1];
+    const continues =
+      prev !== undefined &&
+      Number(hit.choice.key) > Number(prev.choice.key) &&
+      hit.at - prev.at <= CHOICE_ROW_GAP;
+    run = continues ? [...run, hit] : [hit];
+    // `>=` so the LOWEST run wins a tie: prose numbered higher up must not
+    // outrank the menu the program is actually waiting on.
+    if (run.length >= best.length) best = run;
+  }
+  if (best.length < 2 || !best.some((h) => h.choice.selected)) return null;
+
+  // Whatever sits between one option and the next describes it. On a phone
+  // that matters: "选项 A" alone is not a choice anyone can make.
+  const choices = best.map((hit, i) => {
+    const until = best[i + 1]?.at ?? hit.at + 1;
+    const detail: string[] = [];
+    for (let r = hit.at + 1; r < until; r++) {
+      const text = stripChrome(screen[r]).trim();
+      if (text !== "") detail.push(text);
     }
-    // A blank row is spacing, inside the menu or above it.
-    if (text.trim() === "") continue;
-    // Anything else ends the run - everything below it was the menu.
-    if (end !== -1) break;
-  }
-  if (rows.length < 2 || !rows.some((r) => r.selected) || !ascending(rows)) {
-    return null;
-  }
-  return { choices: rows, start, end };
+    return detail.length > 0
+      ? { ...hit.choice, detail: detail.join(" ") }
+      : hit.choice;
+  });
+
+  return {
+    choices,
+    start: best[0].at,
+    end: best[best.length - 1].at,
+  };
 }
 
-/** Menu keys count upward. A run that does not is two lists that happen to be
- *  adjacent - prose above, the real menu below - not one menu. */
-function ascending(rows: Choice[]): boolean {
-  for (let i = 1; i < rows.length; i++) {
-    if (Number(rows[i].key) <= Number(rows[i - 1].key)) return false;
-  }
-  return true;
-}
 
 /** A splash screen: a logo and a version line, and essentially nothing else.
  *

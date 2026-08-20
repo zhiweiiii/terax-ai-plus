@@ -37,7 +37,7 @@
     "externalBin": [
       "binaries/terax-cli"
     ],
-    "targets": "all",
+    "targets": ["nsis"],
     "createUpdaterArtifacts": true,
     "copyright": "Copyright 2026 Crynta",
     "license": "Apache-2.0",
@@ -76,7 +76,7 @@
         "type": "downloadBootstrapper"
       },
       "nsis": {
-        "installMode": "currentUser",
+        "installMode": "perMachine",
         "languages": [
           "English"
         ],

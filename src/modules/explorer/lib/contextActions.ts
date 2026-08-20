@@ -15,12 +15,29 @@ export function relativePath(rootPath: string, path: string): string {
   return path;
 }
 
+/**
+ * Show the file in the OS file manager, with it selected.
+ *
+ * The path is normalised to native separators first. Everything upstream deals
+ * in forward slashes - the file tree joins them that way, and git hands its
+ * paths back the same - but on Windows this ends at
+ * `explorer.exe /select,<path>`, which does nothing at all when given
+ * `D:/project/foo`. The failure was silent on top of that: the error was
+ * swallowed into the console, so the menu item simply did nothing.
+ */
 export async function revealInFinder(path: string): Promise<void> {
+  const native = isWindows() ? path.replace(/[/\\]+/g, "\\") : path;
   try {
-    await revealItemInDir(path);
+    await revealItemInDir(native);
   } catch (e) {
     console.error("revealItemInDir failed:", e);
+    const message = typeof e === "string" ? e : String(e);
+    toast.error(`Could not reveal in the file manager: ${message}`);
   }
+}
+
+function isWindows(): boolean {
+  return navigator.userAgent.includes("Windows");
 }
 
 /**

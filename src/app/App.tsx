@@ -1617,6 +1617,7 @@ export default function App() {
                       onPreviewUrlChange={handlePreviewUrl}
                       registerMarkdownHandle={registerMarkdownHandle}
                       registerGitDiffHandle={registerGitDiffHandle}
+                      onAttachToAgent={handleAttachFileToAgent}
                       registerGitHistoryHandle={registerGitHistoryHandle}
                       onOpenCommitFile={openCommitFileDiffTab}
                       gitHistoryRepos={multiRepo.repos}

@@ -140,7 +140,7 @@ record of itself:
 |---|---|---|---|
 | Body | `turns`, `liveBlocks` | `messages` | the thread |
 | Working state | `thinking` | `working.since` | above the composer |
-| Mode | `mode` | `mode` | the label at the top |
+| Mode | `mode` | `mode` | pinned above the key row |
 | Model | - | `model` | next to the mode |
 | Reasoning | - | `messages[].reasoning` | collapsed under the turn |
 | Tools | - | `messages[].tools` | chips under the turn |

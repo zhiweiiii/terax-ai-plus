@@ -1,4 +1,4 @@
-import { Conversation, type Turn } from "./conversation";
+import { type Block, Conversation, type Turn } from "./conversation";
 import "./style.css";
 
 // ── WebSocket wire protocol (see src-tauri/src/modules/web/mod.rs) ──────
@@ -98,6 +98,15 @@ type ServerMsg = {
  *  back to the screen entirely. */
 let transcript: TranscriptMsg | null = null;
 
+/** What this page has sent that the transcript has not recorded yet.
+ *
+ *  The screen path has its own version of this (`Conversation.pending`), and
+ *  it drops a message as soon as the PROGRAM paints it. Under a transcript
+ *  that is too early: the agent echoes your message on its screen a beat
+ *  before it writes the turn out, so the bubble disappeared and came back.
+ *  Held here instead until the transcript actually has it. */
+let awaitingTranscript: string[] = [];
+
 /** The grid the parser falls back to if the server ever omits one. The phone
  *  does not have a grid of its own to want: it renders no terminal, so any
  *  size it imposed would only reflow the DESKTOP's screen and lay the program
@@ -119,7 +128,6 @@ app.innerHTML = `
     <span id="title">Terax</span>
     <span id="status" class="status"></span>
   </div>
-  <div id="progstatus" class="progstatus" hidden></div>
   <div id="agents" class="agents" hidden></div>
   <div id="thread" class="thread">
     <div id="empty-hint" class="empty-hint" hidden>
@@ -135,11 +143,13 @@ app.innerHTML = `
   <div class="composer">
     <div id="thinking" class="thinking" hidden></div>
     <div id="choices" class="choices" hidden></div>
+    <div id="progstatus" class="progstatus" hidden></div>
     <div class="keyrow">
       <button class="key-btn" data-ctrl="3">Ctrl+C</button>
       <button class="key-btn" data-ctrl="4">Ctrl+D</button>
       <button class="key-btn" data-ctrl="27">Esc</button>
       <button class="key-btn" data-ctrl="9">Tab</button>
+      <button class="key-btn" data-seq="shift-tab">⇧Tab</button>
       <button class="key-btn" data-seq="up">↑</button>
       <button class="key-btn" data-seq="down">↓</button>
       <button class="key-btn" data-ctrl="13">↵</button>
@@ -337,15 +347,23 @@ function renderScreenTurns() {
  *  repaints — and between them they cover the conversation exactly once. */
 function paintLiveScreen() {
   // Under a transcript the screen is not the conversation and must not be
-  // rendered as one - it would repeat what the transcript already says. The
-  // exception is a pending menu: what it is asking ("create this file", and
-  // the diff that goes in it) exists only on the screen, so that part is shown
-  // alongside the buttons and disappears with them.
-  const blocks = transcript
-    ? conv.choices.length > 0
+  // rendered as one - it would repeat what the transcript already says. Two
+  // exceptions, both of them things the transcript cannot know yet:
+  //
+  //   a pending menu - what it is asking ("create this file", and the diff
+  //   that goes in it) exists only on the screen;
+  //
+  //   a turn in flight - the agent writes a step out when the step ENDS, so
+  //   until then the transcript has nothing and the reply is only on screen.
+  //   Showing it there is the difference between watching an answer arrive
+  //   and staring at a spinner until it is finished.
+  const blocks = !transcript
+    ? conv.liveBlocks
+    : conv.choices.length > 0
       ? conv.promptBlocks
-      : []
-    : conv.liveBlocks;
+      : isTurnInFlight()
+        ? unsettledBlocks(transcript)
+        : [];
   const sig = blocks.map((b) => `${b.role}:${b.lines.join("\n")}`).join(" ");
   if (liveBlocksEl.dataset.sig !== sig) {
     liveBlocksEl.dataset.sig = sig;
@@ -359,13 +377,14 @@ function paintLiveScreen() {
     );
   }
 
-  // Sent, but the program has not painted it yet. Rendered last, because it is
-  // the newest thing in the conversation.
-  const psig = conv.pending.join(" ");
+  // Sent, but not yet accounted for by whichever source owns the conversation.
+  // Rendered last, because it is the newest thing in it.
+  const pending = transcript ? awaitingTranscript : conv.pending;
+  const psig = pending.join(" ");
   if (pendingEl.dataset.sig !== psig) {
     pendingEl.dataset.sig = psig;
     pendingEl.replaceChildren(
-      ...conv.pending.map((text) => {
+      ...pending.map((text) => {
         const node = document.createElement("div");
         node.className = "turn sent unconfirmed";
         node.textContent = text;
@@ -438,18 +457,20 @@ function paintLiveScreen() {
  *  true until it is not, and pushing each repaint of it into the conversation
  *  would bury the conversation in its own progress bar. */
 function paintThinking() {
-  // A transcript says when the current turn STARTED, so the page counts up on
-  // its own instead of being told an elapsed time on every poll. The screen's
-  // own spinner is the fallback for a program with no transcript.
+  // Two sources, and the order matters. The transcript knows when the turn
+  // STARTED, so the page can count up on its own instead of being told an
+  // elapsed time on every poll - but it only learns of a turn when the agent
+  // writes a step out, which is a beat late. The screen's own spinner is live.
+  // So: prefer the transcript when it says a turn is open, and fall back to
+  // the screen the rest of the time INCLUDING under a transcript, which is
+  // what makes "thinking" appear during an ordinary reply.
   const working = transcript?.working;
   const t: typeof conv.thinking = working
     ? {
         label: "思考中",
         seconds: Math.max(0, Math.round((Date.now() - working.since) / 1000)),
       }
-    : transcript
-      ? null
-      : conv.thinking;
+    : conv.thinking;
   if (!t) {
     thinkingEl.hidden = true;
     thinkingEl.dataset.sig = "";
@@ -502,6 +523,14 @@ function paintChoices() {
       const text = document.createElement("span");
       text.className = "choice-label";
       text.textContent = c.label;
+      if (c.detail) {
+        // "选项 A" on its own is not a choice anyone can make; the program
+        // printed a description under it and that is the half that decides.
+        const detail = document.createElement("span");
+        detail.className = "choice-detail";
+        detail.textContent = c.detail;
+        text.appendChild(detail);
+      }
       btn.append(key, text);
       btn.addEventListener("click", () => {
         // The menu is answered with the digit alone; these tools act on the
@@ -513,6 +542,48 @@ function paintChoices() {
       return btn;
     }),
   );
+}
+
+/** Whether a transcript already carries this as something the user said. */
+function transcriptHasUserText(t: TranscriptMsg, text: string): boolean {
+  const want = collapse(text);
+  if (want === "") return true;
+  return t.messages
+    .slice(-SETTLED_LOOKBACK * 2)
+    .some((m) => m.role === "user" && collapse(m.text).includes(want));
+}
+
+/** Whether the agent is mid-turn, by either account. */
+function isTurnInFlight(): boolean {
+  return transcript?.working != null || conv.thinking !== null;
+}
+
+/** How many transcript turns to check a screen block against. The overlap is
+ *  always at the end of the conversation; scanning all of it would cost more
+ *  the longer the session ran, for nothing. */
+const SETTLED_LOOKBACK = 3;
+
+/** Screen blocks the transcript has not recorded yet.
+ *
+ *  The two overlap for a moment: the agent finishes a step, the screen still
+ *  shows it, and the poll that will put it in the transcript has not run. Both
+ *  rendering it would say everything twice, so anything the transcript already
+ *  has is dropped here and the rest is shown as the turn in flight. */
+function unsettledBlocks(t: TranscriptMsg): Block[] {
+  const settled = t.messages
+    .slice(-SETTLED_LOOKBACK)
+    .map((m) => collapse(m.text))
+    .filter((text) => text !== "");
+  return conv.liveBlocks.filter((b) => {
+    const text = collapse(b.lines.join(" "));
+    if (text === "") return false;
+    return !settled.some((s) => s.includes(text) || text.includes(s));
+  });
+}
+
+/** Runs of whitespace collapsed, for tolerant comparison. */
+function collapse(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /** Signature of what a node currently shows, so unchanged turns are skipped. */
@@ -712,6 +783,9 @@ function handleText(raw: unknown) {
       const next = raw as TranscriptMsg;
       if (!Array.isArray(next.messages)) break;
       transcript = next;
+      awaitingTranscript = awaitingTranscript.filter(
+        (text) => !transcriptHasUserText(next, text),
+      );
       render();
       // A running turn's elapsed time has to advance between polls.
       startWorkingTicker();
@@ -842,6 +916,7 @@ function attachTo(id: number) {
   pendingAttachId = id;
   seedPending = false;
   transcript = null;
+  awaitingTranscript = [];
   // The server seeds from a different terminal's buffer: start the
   // conversation over rather than splicing it onto the old one.
   conv.reset();
@@ -889,11 +964,21 @@ function writePty(data: string) {
 
 function submit() {
   const text = inputEl.value;
-  if (text.trim() === "") return;
+  // An empty Enter is not an empty message. It accepts a default, confirms
+  // a prompt, steps past a pager. Send the newline on its own and record
+  // nothing - there is nothing anyone said.
+  if (text.trim() === "") {
+    writePty("\r");
+    scrollToBottom();
+    return;
+  }
   // Whatever is on the other end — a shell, an agent, a REPL — the phone
   // sends the same thing a keyboard would: the text, then Enter.
   if (!writePty(`${text}\r`)) return;
   conv.noteSent(text);
+  // The transcript will not know about this until the agent writes the turn
+  // out, so the page holds it in the meantime.
+  if (transcript) awaitingTranscript.push(text);
   inputEl.value = "";
   autoGrow();
   scrollToBottom();
@@ -930,6 +1015,10 @@ for (const btn of document.querySelectorAll<HTMLButtonElement>(".key-btn")) {
       writePty("\x1b[A");
     } else if (seq === "down") {
       writePty("\x1b[B");
+    } else if (seq === "shift-tab") {
+      // CSI Z, "cursor backward tabulation". Both agents use it to cycle
+      // modes, which a phone cannot reach any other way.
+      writePty("\x1b[Z");
     }
   });
 }

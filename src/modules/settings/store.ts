@@ -111,6 +111,8 @@ export type Preferences = {
   vimMode: boolean;
   editorWordWrap: boolean;
   showHidden: boolean;
+  /** File tree: leave out anything git ignores. */
+  hideGitIgnored: boolean;
   explorerGitDecorations: boolean;
   /** Branch names that must not be force-pushed / rebased without warning. */
   protectedBranches: string[];
@@ -130,6 +132,8 @@ export type Preferences = {
   editorAutoSave: boolean;
   editorAutoSaveDelay: number;
   editorFormatOnSave: boolean;
+  /** Diff view: fold the unchanged stretches so only the changes are shown. */
+  diffCollapseUnchanged: boolean;
   editorFormatter: EditorFormatter;
   /** languageResolver id -> formatter, overriding the global default. */
   editorFormatterByLang: Record<string, EditorFormatter>;
@@ -178,6 +182,7 @@ const KEY_RESTORE_WINDOW = "restoreWindowState";
 const KEY_VIM_MODE = "vimMode";
 const KEY_EDITOR_WORD_WRAP = "editorWordWrap";
 const KEY_SHOW_HIDDEN = "showHidden";
+const KEY_HIDE_GIT_IGNORED = "hideGitIgnored";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
 const KEY_PROTECTED_BRANCHES = "protectedBranches";
@@ -197,6 +202,7 @@ const KEY_SHORTCUTS = "shortcuts";
 const KEY_EDITOR_AUTO_SAVE = "editorAutoSave";
 const KEY_EDITOR_AUTO_SAVE_DELAY = "editorAutoSaveDelay";
 const KEY_EDITOR_FORMAT_ON_SAVE = "editorFormatOnSave";
+const KEY_DIFF_COLLAPSE_UNCHANGED = "diffCollapseUnchanged";
 const KEY_EDITOR_FORMATTER = "editorFormatter";
 const KEY_EDITOR_FORMATTER_BY_LANG = "editorFormatterByLang";
 const KEY_EDITOR_CUSTOM_FORMAT_COMMAND = "editorCustomFormatCommand";
@@ -239,6 +245,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   vimMode: false,
   editorWordWrap: false,
   showHidden: false,
+  hideGitIgnored: false,
   explorerGitDecorations: true,
   protectedBranches: ["main", "master", "develop"],
   terminalWebglEnabled: true,
@@ -257,6 +264,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorAutoSave: false,
   editorAutoSaveDelay: 1000,
   editorFormatOnSave: false,
+  diffCollapseUnchanged: true,
   editorFormatter: "lsp",
   editorFormatterByLang: {},
   editorCustomFormatCommand: "",
@@ -318,6 +326,9 @@ export async function loadPreferences(): Promise<Preferences> {
       get<boolean>(KEY_SHOW_HIDDEN) ??
       get<boolean>(LEGACY_KEY_SHOW_HIDDEN_DIRS) ??
       DEFAULT_PREFERENCES.showHidden,
+    hideGitIgnored:
+      get<boolean>(KEY_HIDE_GIT_IGNORED) ??
+      DEFAULT_PREFERENCES.hideGitIgnored,
     explorerGitDecorations:
       get<boolean>(KEY_EXPLORER_GIT_DECORATIONS) ??
       DEFAULT_PREFERENCES.explorerGitDecorations,
@@ -371,6 +382,9 @@ export async function loadPreferences(): Promise<Preferences> {
     editorFormatOnSave:
       get<boolean>(KEY_EDITOR_FORMAT_ON_SAVE) ??
       DEFAULT_PREFERENCES.editorFormatOnSave,
+    diffCollapseUnchanged:
+      get<boolean>(KEY_DIFF_COLLAPSE_UNCHANGED) ??
+      DEFAULT_PREFERENCES.diffCollapseUnchanged,
     editorFormatter:
       get<EditorFormatter>(KEY_EDITOR_FORMATTER) ??
       DEFAULT_PREFERENCES.editorFormatter,
@@ -484,6 +498,10 @@ export async function setShowHidden(value: boolean): Promise<void> {
   await writePref(KEY_SHOW_HIDDEN, value);
 }
 
+export async function setHideGitIgnored(value: boolean): Promise<void> {
+  await writePref(KEY_HIDE_GIT_IGNORED, value);
+}
+
 export async function setExplorerGitDecorations(value: boolean): Promise<void> {
   await writePref(KEY_EXPLORER_GIT_DECORATIONS, value);
 }
@@ -589,6 +607,10 @@ export async function setEditorFormatOnSave(value: boolean): Promise<void> {
   await writePref(KEY_EDITOR_FORMAT_ON_SAVE, value);
 }
 
+export async function setDiffCollapseUnchanged(value: boolean): Promise<void> {
+  await writePref(KEY_DIFF_COLLAPSE_UNCHANGED, value);
+}
+
 export async function setEditorFormatter(
   value: EditorFormatter,
 ): Promise<void> {
@@ -641,6 +663,7 @@ export async function onPreferencesChange(
     [KEY_VIM_MODE]: "vimMode",
     [KEY_EDITOR_WORD_WRAP]: "editorWordWrap",
     [KEY_SHOW_HIDDEN]: "showHidden",
+    [KEY_HIDE_GIT_IGNORED]: "hideGitIgnored",
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
     [KEY_PROTECTED_BRANCHES]: "protectedBranches",
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",
@@ -659,6 +682,7 @@ export async function onPreferencesChange(
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
     [KEY_EDITOR_FORMAT_ON_SAVE]: "editorFormatOnSave",
+    [KEY_DIFF_COLLAPSE_UNCHANGED]: "diffCollapseUnchanged",
     [KEY_EDITOR_FORMATTER]: "editorFormatter",
     [KEY_EDITOR_FORMATTER_BY_LANG]: "editorFormatterByLang",
     [KEY_EDITOR_CUSTOM_FORMAT_COMMAND]: "editorCustomFormatCommand",

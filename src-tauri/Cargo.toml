@@ -92,9 +92,16 @@ incremental = true
 split-debuginfo = "unpacked"
 codegen-units = 16
 opt-level = 0
+# Full debuginfo on everything is what made target/debug 37 GB, most of it in
+# `deps`. Line tables keep a backtrace useful - file and line on every frame -
+# at a fraction of the size. `incremental` stays on above: it is what makes an
+# edit-rebuild cycle fast, and it is a cache that can be deleted when it grows.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+# Nobody steps through a dependency here, and they are the bulk of the bytes.
+debug = false
 
 [profile.dev.build-override]
 opt-level = 0

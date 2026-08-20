@@ -30,6 +30,7 @@ type Props = {
     typeof MarkdownStack
   >["registerHandle"];
   registerGitDiffHandle: GitDiffStackProps["registerHandle"];
+  onAttachToAgent?: GitDiffStackProps["onAttachToAgent"];
   registerGitHistoryHandle: GitHistoryStackProps["registerHandle"];
   onOpenCommitFile: GitHistoryStackProps["onOpenCommitFile"];
   gitHistoryRepos?: GitHistoryStackProps["repos"];
@@ -59,6 +60,7 @@ export function WorkspaceSurface({
   onPreviewUrlChange,
   registerMarkdownHandle,
   registerGitDiffHandle,
+  onAttachToAgent,
   registerGitHistoryHandle,
   onOpenCommitFile,
   gitHistoryRepos,
@@ -148,6 +150,7 @@ export function WorkspaceSurface({
           tabs={tabs}
           activeId={activeId}
           registerHandle={registerGitDiffHandle}
+          onAttachToAgent={onAttachToAgent}
         />
       </div>
       <div

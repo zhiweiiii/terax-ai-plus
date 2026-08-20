@@ -11,23 +11,145 @@ wasted work, or gap), **low** (cosmetic, dead code, or naming drift).
 Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 (still outstanding).
 
+## 待办与本轮变更（2026-08-19）
+
+13 条待办里 12 条已经动手，逐条记在下面。**没有一条在真机/真界面上验证过**：开发实例在这轮中途退出了，改完之后没能跑起来看。重启热部署之后需要过一遍。
+
+### 已完成，待验证
+
+**1 + 5 + 3　"思考中"的来源，以及消息不实时**
+
+这三条是同一个问题，一起解决。定下来的分工：
+
+| | 负责 |
+|---|---|
+| transcript | 已定稿的对话：谁说了什么、思考内容、调用了哪些工具 |
+| 屏幕 | 正在进行的这一轮：此刻是否在动、正在打出来的文字 |
+| 页面自己 | 刚发出去的消息，发出那一刻就显示 |
+
+根因是 **Claude Code 在一条消息完成时才写 JSONL，不是边流边写**，所以读文件这条路天然做不到比"一轮"更实时。三处改动（都在 `src/web/main.ts`）：
+
+- `paintThinking` 在 transcript 没说"有轮次在跑"时**回落到屏幕的 spinner**，而不是直接不显示：这就是普通对话执行时"思考中"能出现的原因（第 3 条）。
+- 轮次进行中时渲染屏幕上 transcript 还没收录的内容（`unsettledBlocks`），按文本包含关系去重，避免两边都画同一句。
+- 发出去的消息由页面自己扣住（`awaitingTranscript`），直到 transcript 真的收录了它。原先复用屏幕路径的 `pending`，而那个是**程序把消息画到屏幕上**就丢弃：比 transcript 收录早一拍，于是气泡会闪一下消失再回来。
+
+Rust 侧（`transcript/claude.rs`）改的是轮次是否结束的判定：一条 assistant 记录**不等于**一轮结束，Claude 每次模型往返都写一条，所以"看到 assistant 就清掉进行中"会让指示器出现一秒就没。改成数**发出去的工具调用 vs 收回来的结果**，两者持平才算结束。
+
+**2　移动端 Tab / Shift+Tab / 空回车**
+
+Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 agent 都用它切换模式，手机上原本没有任何途径能发出去。另外空输入的回车不再被 `submit()` 拦掉：**空回车不是空消息**，它用来接受默认值、确认提示、翻页。
+
+**4　状态栏移到底部**　从顶栏挪进 composer，紧贴按键行上方。
+
+**6　git diff 视图：添加到 agent + 折叠开关**
+
+- 「添加到 Claude Code」按钮，拼 `repoRoot` + 仓库相对路径，复用文件树右键菜单用的同一个 `handleAttachFileToAgent`。
+- 「完整文件 / 仅变动」开关，切换 `unifiedMergeView` 的 `collapseUnchanged`，存为偏好项 `diffCollapseUnchanged`（默认开），所以切文件不会重置。
+- 未做：设置窗口里没有对应控件；二进制/大文件的 patch 回退视图里不显示折叠按钮（那个视图本来就只有变动）。
+
+**7　文件树过滤按钮**
+
+工具栏加了「过滤」菜单，两个独立开关：隐藏 git 忽略的文件（新偏好 `hideGitIgnored`）、显示隐藏文件（复用已有的 `showHidden`，原先只能从设置窗口改）。忽略目录连带整棵子树：直接复用了已有的继承结果 `parentIgnored || entry.gitignored`。树没有全部显示时按钮会高亮，否则"文件不见了"看起来像文件真的不见了。
+
+**8　终端右键：不弹菜单**
+
+原先弹的是 webview 的默认菜单：`src/` 里根本没有任何地方监听 `contextmenu`。现在在终端宿主上吞掉它，并按惯例分支：**有选中就复制并清除选中，没选中就粘贴**。只挂在终端面板上，文件树、标签页、编辑器各自的右键菜单不受影响。
+
+**9　"在文件夹中打开"失效**
+
+两个独立缺陷叠在一起：
+
+- 路径是正斜杠的（`D:/project/foo`），而 Windows 上这最终走 `explorer.exe /select,<path>`，给正斜杠它什么都不做。现在按平台转成原生分隔符。
+- 错误被吞进 `console.error`，没有任何提示。现在会弹 toast。
+
+排除过的：**不是权限问题**，`opener:default` 本身就授予了 `allow-reveal-item-in-dir`。
+
+**10　第一次点终端不聚焦**
+
+两个原因，都修了：
+
+- `focusPane` 只改 React state，**从不调 `term.focus()`**。所以点一个"已经是活动 leaf"的终端时什么都没发生，DOM 焦点留在刚才那个按钮上。现在每次 mousedown 都取 DOM 焦点，不再只在活动 leaf 改变时才取。
+- Radix 浮层关闭时会把焦点还给触发元素，晚一拍，正好把终端刚拿到的焦点抢走。新增 `usePointerDismiss`：**只在由指针关闭时**取消这次归还，键盘（Esc）路径保持原样：那种情况下焦点回到触发元素才是对的。挂在 `context-menu` 和 `dropdown-menu` 两个共享基础组件上，不是散在各调用点。
+
+**11　任务栏图标 + 打包**
+
+`bundle.targets` 从 `"all"` 改成 `["nsis"]`。MSI 把图标解压到 `C:\Windows\Installer\{每次都变的 ProductCode}\ProductIcon` 再让快捷方式引用它，重装删掉旧目录，固定项的图标就指空了。NSIS 的 `CreateShortcut` 不带图标参数，图标取自 exe 本身，不会掉。
+
+`installMode` 改成 `perMachine`（`D:\Program Files` 是全机器位置）。**默认目录不需要自定义模板**：NSIS 的 `.onInit` 会调 `RestorePreviousInstallLocation`，安装时也写 `InstallLocation`，所以第一次装选一次目录，以后就记住了。把 `D:` 硬编码进发给别人的安装包是错的。
+
+顺带修了一个现成的 bug：`installer-hooks.nsh` 里「Open in Terax」右键菜单指向 `$INSTDIR	erax.exe`，而实际文件是 `terax-prod.exe`：**这几个菜单项一直是坏的**。同时把注册表写入从 `HKCU` 改成 `SHCTX`，跟随安装模式（perMachine 下是 HKLM），否则提权安装写的是提权账户的 hive。
+
+**换装步骤**：先卸载现在的 MSI 版，再用 `.exe` 装并选 `D:\Program Files\Terax`，然后重新固定一次任务栏。
+
+**12　编译产物**
+
+`src-tauri/target` **40 GB → 2.9 GB**。构成是 debug 37.5 GB（deps 23.1 / incremental 10.4 / build 2.1）、release 2.7 GB：93% 在 debug。
+
+清掉了 `target/debug`（纯产物，可再生）。堵源头的改动在 `[profile.dev]`：`debug = "line-tables-only"`，依赖包 `debug = false`。**全量 debuginfo 才是 23 GB deps 的成因**；line tables 保留 backtrace 里的文件和行号，体积只有一小部分。`incremental` 保持开启：它是编辑-重建循环快的原因，而且是随时可删的缓存。
+
+> 下次 `热部署` 会慢几分钟（debug 依赖要重编一次），之后恢复正常。
+
+### 未完成
+
+**13　文档精简与中文化**
+
+本文件的待办区已改成中文并重写。其余仍是英文、待处理：`TERAX.md`(168 行)、六份架构文档(约 1067 行)、`README.md`(124)、`ROADMAP.md`(47)、`docs/README.md`(36)。`docs/history/` 下三份移植文档本来就是中文，需要的是**抢救而非翻译**：留决策和坑，扔掉按 agent 分的状态表和进度清单。
+
+注意 `TERAX.md` 是 agent memory，每个会话都会加载：按"与架构文档重复"精简，不要按长度砍。另外代码注释全是英文，中文文档配英文注释要么明确接受，要么一起改，别停在半中半英。
+
+**14　终端右键粘贴会粘两次（第 8 条引入的回归）**
+
+一次右键，内容进去两遍。是上面第 8 条加右键粘贴时引入的。
+
+静态排查过的：`src/` 里**只有一处** `contextmenu` 监听（`rendererPool.ts` 的 `createSlot`），处理函数里也只调用一次 `pasteIntoTerminal`。所以第二次写入来自别处，不是"写了两遍"这么直白。
+
+**先确认它是不是只在开发模式下发生。** `slots` 是模块级数组，vite HMR 重新执行 `rendererPool.ts` 时会得到一个新的空数组，而**旧的 host 元素连同旧监听还留在 DOM 里**。如果某个 host 被复用，右键就会命中两个监听。真是这样的话，重启开发实例后就不复现，也就不是真 bug。所以第一步是：**全新启动一次，再试**。
+
+如果重启后仍然复现，按这个顺序查：
+
+1. 在处理函数里打一行日志，先确定是**监听触发了两次**，还是触发一次但写了两遍。这一步能把后面的可能性砍掉一半。
+2. 若是触发一次：看 `term.paste()` 之外是否还有第二条通往 pty 的路径。注意 `createSlot` 里已有一条 Ctrl+V 的粘贴路径（`isTerminalPaste`），它走 `slot.term.paste()`；两条路径本身不冲突，但值得确认右键没有同时触发它。
+3. 若是触发两次：查 host 复用和监听重复绑定，以及 WebView2 是否对右键有自己的行为。
+
+修的时候顺手加个防抖式的守卫（比如同一次事件内只允许粘贴一次），比逐一堵住来源更稳。
+
+
+
+**15　全局剪贴板历史（新功能）**
+
+监听系统剪贴板，把内容存进一个新的 SQLite 库；全局快捷键 `Alt+V` 调起一个剪贴板历史窗口，点条目直接粘贴。相当于 Windows 自带的 `Win+V`，但不限条数。
+
+现有可复用的部分（都确认过）：
+
+- **SQLite 已经有了**。`rusqlite`(bundled) 这轮为读 opencode 的库引进来了，新建一个自己的库不用再加依赖。放 `%LOCALAPPDATA%	erax\` 下，和已有的 `pasted/`、`run/` 同级。
+- **独立窗口有成熟范式**。`open_settings_window`（`lib.rs`）已经在做：白名单化的 URL、`parent(&main)` 绑定生命周期、`decorations(false)` + `transparent(true)`、复用已存在的窗口而不是重开。照它写。
+- **剪贴板读写已经在用**。`clipboardAttachments.ts` 已经能把剪贴板里的图片落盘成文件（agent 需要路径参数），文本读写走 `readTerminalClipboard` / `writeTerminalClipboard`。历史记录要不要也存图片，可以直接沿用这套。
+
+需要新增的，以及三个必须先想清楚的点：
+
+**(1) 全局快捷键需要新插件。** `tauri-plugin-global-shortcut` **不在依赖里**（现有的 `@/modules/shortcuts` 是应用内快捷键，只在窗口有焦点时生效）。`Alt+V` 要在别的程序里也能唤起，必须加这个插件并在 capabilities 里授权。同时注意和 Windows 自带 `Win+V` 的关系，以及 `Alt+V` 在别的程序里可能已被占用，快捷键最好可改。
+
+**(2) 剪贴板监听没有现成事件。** Tauri 不提供剪贴板变化通知。两条路：轮询（简单，但要权衡间隔和耗电，本项目"空闲功能零成本"的标准下不好看），或者 Win32 的 `AddClipboardFormatListener` + 一个消息窗口（准确、事件驱动，但要写平台代码）。项目是 Windows only，后者更贴合质量标准。**无论哪条，都要考虑密码管理器**：很多剪贴板里是密码，全量落盘存无限条是个安全面，需要有排除规则（比如识别 `ExcludeClipboardContentFromMonitorProcessing` 剪贴板格式，密码管理器会设它）和一键清空。
+
+**(3) "点击直接粘贴"要先定义粘贴到哪。** 如果只是粘进 Terax 自己的终端，`pasteIntoLeaf` 现成的，简单。如果是"粘进我刚才那个程序"（`Win+V` 的行为），那要在隐藏窗口后把焦点还给上一个前台窗口，再合成 `Ctrl+V`（Win32 `SendInput`）：这是完全不同量级的工作，而且合成按键容易被其他程序的焦点逻辑绊到。**先定这一条**，它决定了这个功能是小活还是大活。
+
 ## Web terminal bridge (`src-tauri/src/modules/web/`)
 
 ### High
 
-1. ~~**Output drains only when the client sends frames**~~ — **fixed**
+1. ~~**Output drains only when the client sends frames**~~ - **fixed**
    `handle_ws` drains the session's output queue on every 10 ms poll cycle,
    independent of client input, plus a 30 s server PING keeps the connection
    honest. A phone that only watches now receives live output continuously.
    (See #41 for the non-blocking read rework that made polling safe.)
    (`web/mod.rs` handle_ws loop.)
-2. ~~**`web_unsubscribe_all` kicks every other viewer of the same session**~~ —
+2. ~~**`web_unsubscribe_all` kicks every other viewer of the same session**~~ -
    **fixed**
    `Session::web_subscribe` returns the exact `SyncSender` used by a
    connection; disconnects and session switches remove only that sender via
    `Session::web_unsubscribe`, so other viewers of the same session are never
    affected. (`web/mod.rs` attach/exit paths; `session.rs`.)
-3. **Auth is weak for a remote shell on `0.0.0.0`** — partially fixed
+3. **Auth is weak for a remote shell on `0.0.0.0`** - partially fixed
    - `POST /auth` instead of GET (no more password in URLs/logs).
    - Login rate limit: 5+ consecutive failures lock out for 5 s.
    - Cookie now has `Max-Age=604800`.
@@ -36,10 +158,10 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
      runtime, so neither appears in `strings` on the binary.
    - Still open: the obfuscation is not encryption (anyone who can run the
      code can recover the values), the password is a hard-coded constant, and
-     `WEB_TOKEN` never rotates — a stolen cookie stays valid for a week. A
+     `WEB_TOKEN` never rotates - a stolen cookie stays valid for a week. A
      per-process random token plus environment/OS-credential configuration
      would close this for real.
-4. ~~**"opening" flow deadlocks the auto-attach**~~ — **fixed**
+4. ~~**"opening" flow deadlocks the auto-attach**~~ - **fixed**
    The frontend clears `attachedId`/`lastAttachedId` when it taps a session,
    records a `pendingAttachId` so the auto-attach targets the *tapped* session
    (not the first live one), and retries up to 3 times via
@@ -48,21 +170,21 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 
 ### Medium
 
-5. ~~**Exit is never sent to the web**~~ — **fixed**
+5. ~~**Exit is never sent to the web**~~ - **fixed**
    The waiter now broadcasts `WebMsg::Exited(code)` to every attached viewer
    before reaping the session; `handle_ws` forwards it as
    `{ "type": "exit", "id", "code" }` and unsubscribes that viewer. The page
    clears its attached state and shows a toast. (`session.rs` waiter,
    `web/mod.rs` drain loop, `web/main.ts` exit branch.)
-6. ~~**Continuation-frame reassembly has no total-length cap**~~ — **fixed**
+6. ~~**Continuation-frame reassembly has no total-length cap**~~ - **fixed**
    The reassembled message is capped at 1 MiB (`total` tracked across frames),
    and oversized control frames (>125 bytes) are rejected.
-7. ~~**No connection limit, no server heartbeat**~~ — **fixed**
+7. ~~**No connection limit, no server heartbeat**~~ - **fixed**
    Concurrent WS connections are capped at 8 (`MAX_CONNECTIONS`, atomic
    counter + RAII guard); over-limit upgrades get `503`. The server sends a
    PING every 30 s, and the short read timeout lets the loop detect dead
    peers instead of pinning threads.
-8. ~~**`web_leaf_session` can resolve to a stale pty id**~~ — **fixed**
+8. ~~**`web_leaf_session` can resolve to a stale pty id**~~ - **fixed**
    `web_tabs` now clears any `pty_id` whose session is gone from the map, and
    the cwd-based fallback guess was removed entirely: stale ids no longer
    attach the phone to the wrong shell, and an exited tab correctly falls
@@ -73,28 +195,28 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 9. `web_ensure_session`'s fallback session is killed almost immediately by
    `pty_close_all` on frontend boot (`pty/mod.rs:124-157` + `web/main.ts`):
    the "phone always has a terminal" guarantee only exists in the startup
-   window. — **accepted**: the fallback session has no leaf id (the phone
+   window. - **accepted**: the fallback session has no leaf id (the phone
    cannot attach to it anyway), and it is re-spawned on the next web connect;
    it exists to keep the page non-empty, not as a real session.
-10. ~~**RFC 6455 implementation is lenient**~~ — **fixed**
+10. ~~**RFC 6455 implementation is lenient**~~ - **fixed**
     Unmasked client data frames are now rejected, as are >125-byte control
     frames. Control frames may still be unmasked (permitted).
-11. ~~**Head comment mentions a `viewers` field**~~ — **fixed**
+11. ~~**Head comment mentions a `viewers` field**~~ - **fixed**
     `web/mod.rs` header now documents `{id,cwd,title,active,live,space}`.
 
 ## PTY session (`session.rs` / `mod.rs`)
 
 ### Medium
 
-12. ~~**Slow subscribers are dropped silently, forever**~~ — **fixed**
+12. ~~**Slow subscribers are dropped silently, forever**~~ - **fixed**
     `web_broadcast` evicts a subscriber whose bounded queue fills, and the
     evicted `handle_ws` sends `{ "type": "error", "message": "output too fast,
     resubscribe" }`; the page reconnects, and the history replay catches the
     viewer up to the current screen. (Related to #1.)
-13. ~~**Windows exit race can lose the tail**~~ — **fixed**
+13. ~~**Windows exit race can lose the tail**~~ - **fixed**
     The waiter now polls the reader with a 2 s deadline (up from 50 ms)
     before taking the pending tail, so a slow reader is far less likely to
-    race the exit callback. — **accepted residual**: polling is still not a
+    race the exit callback. - **accepted residual**: polling is still not a
     true join; under pathological load the tail can still be lost.
 
 ### Low
@@ -102,38 +224,38 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 14. `history` is not a true ring buffer: a chunk larger than the 256 KiB cap
     (chunks can reach the 4 MiB `MAX_PENDING`) makes the history exceed its
     nominal cap, and a single huge history frame is unfriendly to phone
-    memory. Functionally correct today. — **accepted**.
+    memory. Functionally correct today. - **accepted**.
 15. `pty_has_foreground_process` and `pty_has_foreground_job` share the same
     Windows implementation (count all children). "Foreground" is meaningless
     on Windows, so a hidden leaf with any background child is treated as busy
-    and keeps its renderer slot parked. A functional gap, not a crash. —
+    and keeps its renderer slot parked. A functional gap, not a crash. -
     **open**.
 16. Lock order differs between `web_tabs()` (sessions read -> web_tabs lock)
     and `web_leaf_session` (web_tabs lock -> sessions read). Not a deadlock
-    today (read locks share), but fragile if any read becomes a write. —
+    today (read locks share), but fragile if any read becomes a write. -
     **open**.
 17. `pty_write` and the web input path swallow write errors with `let _ =`: on
-    an exited shell, typing on the phone gives no feedback at all. — **open**.
+    an exited shell, typing on the phone gives no feedback at all. - **open**.
 18. `web::start` runs `block_on` on the startup path while spawning the
-    fallback session, briefly blocking the main thread on a shell spawn. —
+    fallback session, briefly blocking the main thread on a shell spawn. -
     **open**.
 
 ## Line-by-line scan (2026-08-16)
 
-23. ~~**Waiter tail never reached Web viewers**~~ — **fixed**
+23. ~~**Waiter tail never reached Web viewers**~~ - **fixed**
     The waiter's final pending-tail flush only fed the desktop channel
     (`cb(tail)`), so the last lines before exit were missing on the phone.
     Now the tail is written to the history ring, broadcast to Web
     subscribers, and only then handed to the desktop callback.
-24. ~~**`/auth` POST body assumed to arrive in one read**~~ — **fixed**
+24. ~~**`/auth` POST body assumed to arrive in one read**~~ - **fixed**
     The password was parsed from whatever bytes followed the header terminator
     in a single recv; TCP fragmentation could split the body and fail login.
     `Content-Length` is now parsed and the remaining body bytes are read
     explicitly (capped at 256).
-25. ~~**Frontend `onerror` could close a fresh connection**~~ — **fixed**
+25. ~~**Frontend `onerror` could close a fresh connection**~~ - **fixed**
     `ws.onerror` closed the current `ws` without checking `mySeq === wsSeq`, so
     a stale connection's error event could kill the newest connection.
-26. ~~**Stale comments**~~ — **fixed**
+26. ~~**Stale comments**~~ - **fixed**
     `web/mod.rs` header and `web/main.ts` protocol comments still described
     `{attach, cols, rows}` and port 17000; `WEB_TOKEN`'s doc claimed the
     plaintext password is "not recoverable" although the token string embeds
@@ -141,18 +263,18 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 27. `web_broadcast_exit` drains the subscriber table; a viewer whose queue is
     full misses the exit notice and instead sees the "output too fast"
     eviction path. Acceptable (it reconnects and learns the session is gone),
-    but the two viewers of the same exit can be told different stories. —
+    but the two viewers of the same exit can be told different stories. -
     **accepted**.
 28. The `b'1'` resize command remains server-side for protocol completeness
     but contradicts "the desktop owns the PTY size": any client that sends it
-    can still disturb the desktop layout. The current page never sends it. —
+    can still disturb the desktop layout. The current page never sends it. -
     **accepted** (documented in `web-terminal-bridge.md`).
 29. `web_leaf_session` returns `None` without emitting `terax:web-activate`
     when the leaf's pty_id is stale (session already gone); the page retries
     and the next `web_tabs` call clears the stale id, so it self-heals with
-    one extra round trip. — **accepted**.
+    one extra round trip. - **accepted**.
 30. ~~`Err(e) if e == "timed out"` matches the read-timeout by string
-    equality~~ — **fixed**: the read-timeout mechanism was removed entirely by
+    equality~~ - **fixed**: the read-timeout mechanism was removed entirely by
     the non-blocking buffer rework in #41; `read_message` now returns
     `Ok(None)` instead of a string-matched error.
 
@@ -163,13 +285,13 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     the accept loop and auth path maintain, and `WebStatusBadge` in the
     status bar renders it (polled every 2 s). The badge also surfaces the
     failed-password counter so a brute-force attempt is visible on the
-    desktop, not just throttled server-side. — **accepted**.
+    desktop, not just throttled server-side. - **accepted**.
 44. The bind ports moved from 17001/17002 to `34269` (dev) / `34268`
     (release) and every doc/script reference was updated in the same pass.
     The `RUNNING` flag is set only after a successful bind, so the status
-    bar's green dot means the accept loop is actually listening. — **fixed**.
+    bar's green dot means the accept loop is actually listening. - **fixed**.
 45. The login page title was changed to "请输入密码" (was "Terax Terminal") so
-    the phone page reads as a password prompt rather than an app name. —
+    the phone page reads as a password prompt rather than an app name. -
     **fixed**.
 46. The web access password was rotated and its handling hardened. The
     plaintext is stored nowhere: only the SHA-1 digest exists (as `ENCODED`
@@ -177,8 +299,8 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     cookie value are XOR-obfuscated in source and decoded at runtime via
     `deobfuscate()` (`web/mod.rs`), so neither shows up in `strings` on the
     binary. The debug script takes the password from `TERAX_WEB_PASSWORD`
-    (or `argv[3]`) instead of hardcoding it. — **fixed**.
-47. ~~**Explorer had a redundant search button**~~ — **fixed**: the search box
+    (or `argv[3]`) instead of hardcoding it. - **fixed**.
+47. ~~**Explorer had a redundant search button**~~ - **fixed**: the search box
     is always visible below the toolbar, so the header's search button was
     removed. In its place a **locate** button (crosshair icon) reveals and
     selects the active file: it expands every ancestor directory from the
@@ -188,57 +310,57 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 
 ## Window / markdown / terminal scan (2026-08-16)
 
-31. ~~**OSC 52 could write the clipboard from command output**~~ — **fixed**
+31. ~~**OSC 52 could write the clipboard from command output**~~ - **fixed**
     The clipboard handler accepted OSC 52 from any output, including a
     running command (SSH, `cat` of an attacker file). It now takes the shared
     `ShellIntegrationState` and refuses while `inCommand`; blocks mode
     mirrors the flag via `applyBlockMode`. (`osc-handlers.ts`, `useTerminalSession.ts`.)
-32. ~~**Rendered markdown relative links navigated the app away**~~ — **fixed**
+32. ~~**Rendered markdown relative links navigated the app away**~~ - **fixed**
     `MarkdownLink` intercepted external URLs but let relative links
     (`./foo.md`, `#section`) perform a default browser navigation, leaving
     the SPA entirely. It now prevents default for everything, opens external
     schemes in the system browser, and resolves relative links against the
     markdown file's directory via a new `onOpenPath` prop chain
     (`App.tsx` → `WorkspaceSurface` → `MarkdownStack` → `MarkdownPreviewPane`).
-33. ~~**Same markdown file could open as two tabs**~~ — **fixed**
+33. ~~**Same markdown file could open as two tabs**~~ - **fixed**
     `planMarkdownTabOpen` only deduped against existing `markdown` tabs, so a
     file already open in the raw editor spawned a second rendered tab. It now
     also finds the raw `editor` tab and flips it to rendered (unless it has
     unsaved changes, which stay in the editor).
-34. ~~**Settings window tab value unvalidated in the URL**~~ — **fixed**
+34. ~~**Settings window tab value unvalidated in the URL**~~ - **fixed**
     `open_settings_window` whitelists the six known settings tabs before
     putting the value in `settings.html?tab=…`; unknown values fall back to
     the plain settings page.
 35. `tauri.conf.json` `assetProtocol.scope: ["**"]` allows `asset://localhost`
     to read any file the process can. Verify no code path relies on arbitrary
-    asset access; if none, tighten the scope. — **open**.
+    asset access; if none, tighten the scope. - **open**.
 36. `settings` window: `get_webview_window("settings")` returns a handle even
     after the window was closed; `show()` on a closed native window does not
     recreate it, so opening settings a second time after closing may do
-    nothing until the app restarts. Verify and destroy/rebuild on close. —
+    nothing until the app restarts. Verify and destroy/rebuild on close. -
     **open**.
 37. `useWindowTitle` recomputes a fresh string every render (no memoization);
     `setTitle` IPC fires on every App render rather than only when the title
-    changes. Harmless but wasteful. — **accepted**.
+    changes. Harmless but wasteful. - **accepted**.
 38. `respawnSession` calls `s.pty?.close()` without awaiting; a slow IPC close
     can let the old pty's `onExit` land after the new session is up. The
     channel handlers are released in `close()`, so the window is small and
-    the damage is a spurious "shell exited" notice. — **accepted**.
+    the damage is a spurious "shell exited" notice. - **accepted**.
 39. `WindowControls` effect may leak one `onResized` listener if the async
-    registration resolves after unmount (no disposed flag). — **accepted**.
+    registration resolves after unmount (no disposed flag). - **accepted**.
 40. `MarkdownPreviewPane` reads the file without a size cap (the editor caps
-    at 50 MB); a huge markdown file loads fully into the preview DOM. —
+    at 50 MB); a huge markdown file loads fully into the preview DOM. -
     **open**.
 
 ## Web reconnect loop (2026-08-16)
 
-41. ~~**Phone page reconnects forever (connect/disconnect loop)**~~ — **fixed**
+41. ~~**Phone page reconnects forever (connect/disconnect loop)**~~ - **fixed**
     Root cause was the 200 ms read timeout on a blocking `read_exact`:
     - `std::io::Read::read_exact` drops the bytes already read when it hits
       WouldBlock mid-frame, so a fragmented frame was permanently lost and
       the parser went out of sync.
     - Worse, `read_message` wrapped the timeout as `"read ws frame head:
-      timed out"` while `handle_ws` matched the bare string `"timed out"` —
+      timed out"` while `handle_ws` matched the bare string `"timed out"` -
       the match never fired, so every quiet period (200 ms without client
       input) fell through to `break` and dropped the connection. The phone
       reconnected, idled 200 ms, got dropped again: an infinite loop.
@@ -251,7 +373,7 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     (`web/mod.rs` WsConn + handle_ws.)
 
 42. ~~**Phone rendering of TUI apps (opencode) wraps wrong / misplaces fixed
-    lines**~~ — **fixed**
+    lines**~~ - **fixed**
     The phone `fit` its xterm to the phone width (~40 cols) while the shared
     PTY lays output out at the desktop grid (120 cols): long lines wrapped at
     the wrong column and alt-screen TUIs drew at misaligned cursor positions.
@@ -264,18 +386,18 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     renders at a small font on narrow phones. (`web/main.ts`; `web/mod.rs`;
     `pty/mod.rs`.)
     Residual: when the phone screen is *shorter* than the PTY, the bottom of
-    the TUI is off-screen (no scrollback in alt-screen). — **accepted**.
+    the TUI is off-screen (no scrollback in alt-screen). - **accepted**.
 
-43. ~~**Phone fit mode broke either TUI layout or plain-output wrapping**~~ —
+43. ~~**Phone fit mode broke either TUI layout or plain-output wrapping**~~ -
     **fixed**
     Locking the terminal to the PTY grid (needed for TUI cursor
     positioning) clipped long plain-shell lines at the phone width; free
     fitting wrapped them but broke opencode's layout. The page then switched
     fit mode by xterm's active buffer: the **normal buffer** free-fitted
     (long lines wrap), the **alternate buffer** locked cols to the PTY grid.
-    That was wrong for the normal buffer too — see #48.
+    That was wrong for the normal buffer too - see #48.
     (`src/web/main.ts`.)
-48. ~~**Phone still garbled after the buffer-based fit rework**~~ — **fixed**
+48. ~~**Phone still garbled after the buffer-based fit rework**~~ - **fixed**
     Root cause: the byte stream is laid out against the desktop's grid, and
     free-fitting the normal buffer to the phone width re-wrapped lines that
     the app had already wrapped at the desktop width. `\r` in-place redraws
@@ -290,27 +412,27 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
     and `fitToPty` keeps at least the PTY's own rows. Wide grids overflow the
     container horizontally (scroll); tall grids overflow vertically. (`web/
     main.ts`; `web/mod.rs` attach path.)
-49. ~~**Explorer locate button ignored git tabs**~~ — **fixed**:
+49. ~~**Explorer locate button ignored git tabs**~~ - **fixed**:
     `explorerActiveFilePath` only resolved `editor`/`markdown` tabs, so files
     opened from the git change panel (git-diff / git-commit-file tabs) never
     highlighted or revealed in the tree. It now resolves those kinds the same
     way the status bar does (join `repoRoot` + repo-relative path), and
     `explorerOpenFilePaths` includes them so the tree marks them open.
     (`app/App.tsx`.)
-50. ~~**Git change panel: discard targeted the active repo**~~ — **fixed**:
+50. ~~**Git change panel: discard targeted the active repo**~~ - **fixed**:
     `confirmPendingDiscard` ran `git restore`/`git clean` against
     `repo.repoRoot` (the active repo) even when the file belonged to a
-    different repo in multi-repo workspaces — the pathspec did not match and
+    different repo in multi-repo workspaces - the pathspec did not match and
     the discard silently did nothing. `pendingDiscard` now carries the file's
     own `repoRoot` and `runMutation` receives it as `targetRepoRoot`.
     (`source-control/useSourceControlPanel.ts`.)
-51. ~~**Git tabs invisible in the "窗口" (open files) panel**~~ — **fixed**:
+51. ~~**Git tabs invisible in the "窗口" (open files) panel**~~ - **fixed**:
     `OpenFilesPanel` filtered `ownerTabId === currentOwnerTabId`, and git
     tabs (diff / history / commit file) carry no owner, so they vanished as
     soon as a terminal was active. Git tabs now always show (repo-level, not
     command-line-scoped); `git-history` / `git-commit-file` were added to the
     filter and got icons. (`sidebar/OpenFilesPanel.tsx`.)
-52. ~~**Commit / Commit&Push button lagged before showing busy**~~ — **fixed**:
+52. ~~**Commit / Commit&Push button lagged before showing busy**~~ - **fixed**:
     `setLocalActionBusy` ran *after* the async pre-commit checks, so the
     button stayed idle for the check round-trip (slow with hooks installed).
     The busy state now goes up on the very click; it is released if the
@@ -319,10 +441,10 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 
 ## Phone grid UI (2026-08-16)
 
-43. ~~**Window-switcher sheet: groups required nested switching**~~ — **fixed**
+43. ~~**Window-switcher sheet: groups required nested switching**~~ - **fixed**
     The switcher sheet is now one flat, scrollable list (~5 entries tall,
     no scroll limit): each group (space) label renders as an inline header
-    row with its terminals directly underneath — no nested level to switch
+    row with its terminals directly underneath - no nested level to switch
     through. Tapping an entry attaches to that terminal as before.
     (`src/web/main.ts` + `style.css`.)
 
@@ -331,63 +453,63 @@ Status: **fixed** (resolved), **accepted** (deliberate, tracked), **open**
 The phone page stopped being a terminal. Background and design:
 [Mobile conversation view](architecture/mobile-conversation-view.md).
 
-44. ~~**Phone rendered the desktop grid, so text was unreadable**~~ — **fixed**
+44. ~~**Phone rendered the desktop grid, so text was unreadable**~~ - **fixed**
     Measured at 192×28 PTY / 335×590 viewport: the grid was scaled 0.238 to
     fit, giving a **3.3 px** font and leaving **74 %** of the screen blank.
     Scaling to fit, panning, and re-wrapping are mutually exclusive in a
     terminal view; the page now renders no grid at all. (`src/web/`.)
-45. ~~**`inAltScreen` was a dead variable**~~ — **fixed by removal**
+45. ~~**`inAltScreen` was a dead variable**~~ - **fixed by removal**
     `applyFitMode()` never branched on it, so the documented "normal output
     wraps to phone width, TUI locks to PTY grid" behaviour was never
     implemented. Both the variable and the two contradicting comment blocks
     are gone with the rewrite.
-46. ~~**`applyGridScale` counted padding as usable space**~~ — **fixed by
+46. ~~**`applyGridScale` counted padding as usable space**~~ - **fixed by
     removal**: it read `termWrap.clientWidth`, which includes the wrapper's
     12 px padding, so the scaled grid still overflowed slightly.
-47. ~~**`scrollCursorIntoView` was dead code**~~ — **fixed by removal**: the
+47. ~~**`scrollCursorIntoView` was dead code**~~ - **fixed by removal**: the
     element was always scaled to fit, so `scrollWidth <= clientWidth` held
     and the function early-returned every time.
-48. ~~**Alt-screen scroll detection never fired**~~ — **fixed**
+48. ~~**Alt-screen scroll detection never fired**~~ - **fixed**
     `translateToString(true)` leaves trailing whitespace on cells carrying
     attributes, and a TUI pads to full width with styled blanks, so the same
     row compared unequal between frames. Measured 158 frames / 0 scrolls;
     history was being silently lost. Rows are now right-trimmed at capture.
     `conv.stats` exists to catch a recurrence. (`conversation.ts` flushAlt.)
-49. ~~**Footer stripping swallowed the whole screen**~~ — **fixed**
+49. ~~**Footer stripping swallowed the whole screen**~~ - **fixed**
     `dropFooter` used `raw !== text` to mean "this row had frame characters",
     but `stripChrome` also trims indentation, so every indented row counted as
     furniture and `toBlocks` returned zero blocks. Now judged on frame-character
     share, a leading rule, or key hints.
-50. ~~**Splash detection flapped**~~ — **fixed**: `isBanner` used a
+50. ~~**Splash detection flapped**~~ - **fixed**: `isBanner` used a
     drawing-to-text ratio, which crosses its threshold as soon as one long
     divider rule is drawn, so the same screen appeared and disappeared. Now
     keyed on absolute text volume (< 120 letters).
-51. ~~**Single-character messages were dropped**~~ — **fixed**: the `pending`
-    filter carried a `length >= 2` guard, so `1` / `2` / `3` — the exact test
-    case — never rendered. Short sends now require an exact match instead.
-52. ~~**History ring trimmed mid-escape-sequence**~~ — **fixed**
+51. ~~**Single-character messages were dropped**~~ - **fixed**: the `pending`
+    filter carried a `length >= 2` guard, so `1` / `2` / `3` - the exact test
+    case - never rendered. Short sends now require an exact match instead.
+52. ~~**History ring trimmed mid-escape-sequence**~~ - **fixed**
     `history.drain(..cut)` cut on a raw byte count, so a reconnecting phone
     replayed from inside a CSI sequence and rendered the remainder as text
     (`48;2;10;10;10m`). `trim_history` now resyncs to the next ESC, falling
     back to the next newline. (`session.rs`.)
-53. ~~**Backlog was applied in one write**~~ — **fixed**: every frame a
+53. ~~**Backlog was applied in one write**~~ - **fixed**: every frame a
     full-screen program had ever painted was applied to the buffer in sequence
     and only the last was read, collapsing the conversation into the current
     screen. `writeBacklog` feeds 2 KiB slices with a read between each.
-54. ~~**Rendering stalled in a background tab**~~ — **fixed**:
+54. ~~**Rendering stalled in a background tab**~~ - **fixed**:
     `requestAnimationFrame` never fires while `document.hidden`, which is the
     normal state on a phone whose screen has locked. Falls back to a timer.
-55. **Backlog restored on attach is not split into bubbles** — the page has no
+55. **Backlog restored on attach is not split into bubbles** - the page has no
     record of what was sent before it connected, so `markEchoes` has nothing to
-    match and the replay arrives as one output block. — **accepted**.
-56. **Bubble classification is heuristic** — how a program repaints is not
+    match and the replay arrives as one output block. - **accepted**.
+56. **Bubble classification is heuristic** - how a program repaints is not
     something it declares. An unrecognised status widget becomes a small stray
     bubble; an unusual repaint pattern loses history rather than corrupting it.
     `WIDGET` and `detectProgram` in `conversation.ts` are the only
-    tool-specific knowledge, deliberately kept to one place. — **accepted**.
-57. **Claude Code `1`/`2`/`3` exchange not verified end to end** — startup
+    tool-specific knowledge, deliberately kept to one place. - **accepted**.
+57. **Claude Code `1`/`2`/`3` exchange not verified end to end** - startup
     detection and screen parsing were confirmed; the full exchange was not.
-    Backlog reconstruction was verified for a shell session only. — **partly
+    Backlog reconstruction was verified for a shell session only. - **partly
     fixed**: the alternate-screen part is now verified and fixed. Replaying a
     real 81 KiB OpenCode backlog through `Conversation` showed `detectScroll`
     never fired (38 frames, 0 scrolls) because `BACKLOG_SLICE` = 2048 bytes was
@@ -400,7 +522,7 @@ The phone page stopped being a terminal. Background and design:
     single frame marker (`┃`, `▣`) as a rule, so the footer walk ate every
     opencode user message rendered under its gutter. Rules are now runs of
     frame characters, and the input box (a bare path) and status readouts
-    (already `WIDGET` lines) are explicit furniture. — **resolved** (2026-08-19):
+    (already `WIDGET` lines) are explicit furniture. - **resolved** (2026-08-19):
     the full `1`/`2`/`3` exchange was exercised against real opencode and
     Claude Code sessions driven through the phone bridge (see
     `docs/architecture/mobile-conversation-view.md` § Test tooling). Claude's
@@ -429,15 +551,15 @@ The phone page stopped being a terminal. Background and design:
     makes it ask): the `1. Yes / 2. Yes, and don't ask again / 3. No` menu
     renders as visible blocks and `1` approves.
   - **Claude's status / agent-mode UI leaked into the conversation, and the
-    agent tab was not its own thing** — fixed (2026-08-19): the footer was
+    agent tab was not its own thing** - fixed (2026-08-19): the footer was
     split by "does this line look like furniture", which broke on Claude's
-    subagent tab (`  ◯ Explore Search repo for README content  0s` — a chrome
+    subagent tab (`  ◯ Explore Search repo for README content  0s` - a chrome
     glyph plus text reads as content), leaking the whole status area into the
     output. The footer is now split by **position**: anchored on the last
     status rule in the bottom `FOOTER_WINDOW` rows (a higher rule is a dialog
     border or divider, not a status rule), and the footer's bottom row is
-    extracted by position as `Conversation.agents` — Claude Code's running
-    subagent strip — rendered as an independent chip strip above the composer
+    extracted by position as `Conversation.agents` - Claude Code's running
+    subagent strip - rendered as an independent chip strip above the composer
     (`#agents`, `style.css` `.agent-chip`). No agent name or task text is ever
     matched, so a renamed agent keeps working. The `Auto-update failed`
     npm-prefix warning is now a `WIDGET` and is dropped. The status label also
@@ -451,19 +573,19 @@ The phone page stopped being a terminal. Background and design:
 
 ### Medium
 
-19. ~~**"opening" retry only re-lists once**~~ — **fixed**
+19. ~~**"opening" retry only re-lists once**~~ - **fixed**
     `scheduleOpeningRetry` retries up to 3 times (1.5 s apart) before showing
     "无法连接该终端"; combined with `pendingAttachId`, the tapped session is
     always the retry target. See #4.
 
 ### Low
 
-20. ~~**Resize path uses `ws!.send` without a readyState check**~~ — **fixed
-    by design**: the phone no longer sends resize frames at all — since the
+20. ~~**Resize path uses `ws!.send` without a readyState check**~~ - **fixed
+    by design**: the phone no longer sends resize frames at all - since the
     conversation rewrite it renders no grid, so it has no width to impose.
 21. `lastAttachedId`-based reconnect and the single-attach semantics are
     correct today; just note that switching sessions mid-stream is
-    last-attach-wins with no queued history between. — **accepted**.
+    last-attach-wins with no queued history between. - **accepted**.
 
 ## 移动端桥接加固（2026-08-19）
 
@@ -482,7 +604,7 @@ hot-deploy 稳定性、grid 所有权、解析器、agent 模式抽取，并建�
 
 ### Hot-deploy 稳定性（热部署.ps1）
 - 新脚本启动前**等 terax-prod.exe 解锁**（`FileShare.Delete` 探测，最多 10 s）
-  并**等开发端口真正释放**（轮询，最多 10 s）——否则孤儿实例锁住 exe，
+  并**等开发端口真正释放**（轮询，最多 10 s）：否则孤儿实例锁住 exe，
   cargo 覆盖失败（`拒绝访问 (os error 5)`）会连带把整个 `tauri dev` 和
   vite 一起带走。
 - 顺带清掉了占用 34269 的孤儿旧二进制实例。
@@ -498,22 +620,22 @@ hot-deploy 稳定性、grid 所有权、解析器、agent 模式抽取，并建�
 
 ### 解析器（conversation.ts）
 - **alt 退出折叠**：退出时最后一屏改为走与其它帧相同的解析（剥家具、标记
-  回显），不再原样追加——之前输入框、状态行、回显会变成匿名 AI 输出。
+  回显），不再原样追加：之前输入框、状态行、回显会变成匿名 AI 输出。
 - **`isBanner` 仅限首帧**：opencode 退出/保存提示（"Session 项目介绍 /
   Continue opencode -s …"）不再被当成启动页吞掉。
 - **`sameMessage` 分层匹配**：≥10 字宽松、4–9 字必须基本等于整行、更短精确
-  ——修掉发的 `claude` 把 Claude 自己的 UI（"Run claude doctor"、cwd 路径
+  ：修掉发的 `claude` 把 Claude 自己的 UI（"Run claude doctor"、cwd 路径
   `…\opencode\claude-fresh`、`Opus 5 claude-fresh`）误标为用户消息的问题。
 - **`detectProgram` 边界匹配 + Claude 优先**：cwd 路径含 `opencode` 不再把
   Claude Code 误判为 OpenCode。
 - **WIDGET 扩充**：`Opus <n> …` 模型行、`Auto-update failed`（npm-prefix
-  警告，用户要求屏蔽）——不再出现在气泡里。
+  警告，用户要求屏蔽）：不再出现在气泡里。
 - **位置法 footer + agent 抽取（按用户要求"按位置不按文字"）**：
   - footer 以底部规则线为锚（`FOOTER_WINDOW = 12` 行内最靠下的一条规则；
     更高的是对话框边框/正文分隔线）。之前按"像不像家具"自底向上走，会被
     Claude 的子代理标签（`◯ Explore Search repo …`）卡住，把整块状态区漏进
     正文。
-  - footer **最底行按位置抽成 `Conversation.agents`**——Claude Code 运行中
+  - footer **最底行按位置抽成 `Conversation.agents`**：Claude Code 运行中
     的子代理标签条，独立渲染成输入框上方的 chip 条（`#agents` +
     `.agent-chip`，带脉冲圆点），不进气泡、不做状态文本。不匹配任何 agent
     名字/任务文字，改名也不会失效。唯一例外是输入框（裸路径或按键提示）。
@@ -524,8 +646,8 @@ hot-deploy 稳定性、grid 所有权、解析器、agent 模式抽取，并建�
   opening 重试）；`web-replay.mjs`：把捕获按页面同款逻辑回放进
   `Conversation`（`--trace` 看逐帧 live blocks，`--screen-at` dump 原始屏）。
 - `web-synthetic-test.mjs`：合成屏幕回归（1/2/3 菜单、权限框、启动页、退出
-  提示、agent 位置抽取、输入框排除）——14 项全过。
-- `e2e-phone.mjs`：Playwright 真实页面（cookie 免密码）——登录/列表
+  提示、agent 位置抽取、输入框排除）：14 项全过。
+- `e2e-phone.mjs`：Playwright 真实页面（cookie 免密码）：登录/列表
   （`data-leaf`）/attach/发送/气泡。
 
 ### 验证结果（真实 opencode / claude 会话）
@@ -764,34 +886,34 @@ each before removing; some may be used in Rust or in a build step).
 
 ## Repository hygiene
 
-- ~~`terax-awei.exe` committed to repo root~~ — removed
-- ~~`bash.exe.stackdump` crash dump~~ — removed
-- ~~`flake.nix`, `nix/`, Linux/macOS CI jobs~~ — removed; workflows are
+- ~~`terax-awei.exe` committed to repo root~~ - removed
+- ~~`bash.exe.stackdump` crash dump~~ - removed
+- ~~`flake.nix`, `nix/`, Linux/macOS CI jobs~~ - removed; workflows are
   Windows-only now.
 - `docs/porting-issues.md` and `docs/移植进度.md` reference deleted code
   (`src/modules/ai/`, `vitest.config.ts`, `rebased/`). They are historical
-  migration records; keep them as history or delete them. — **accepted**.
+  migration records; keep them as history or delete them. - **accepted**.
 - `热部署.ps1` launches `pnpm tauri dev` as a background process (hidden
   window, logs to `dev.log`, PID in `.terax-dev.pid`, gitignored), so the
   script returns immediately. Re-running it kills the recorded process tree
   first (taskkill /T), `-Stop` only stops. The exe-path and port-based
-  cleanup stays as a fallback for orphaned instances. — **fixed**.
+  cleanup stays as a fallback for orphaned instances. - **fixed**.
 - `热部署.ps1` could still fail to rebuild: an orphaned dev instance
   (`src-tauri/target/debug/terax-prod.exe`) whose exe-path kill missed it kept
   the binary locked, and `cargo run` died with `failed to remove ... 拒绝访问
   (os error 5)`, taking the whole `tauri dev` (and vite) down. The restart now
   waits for the debug exe to be unlocked (`FileShare.Delete` probe, up to 10 s)
   and for the dev ports to actually free up (poll, up to 10 s) before launching,
-  so a stale holder cannot break the next build. — **fixed** (2026-08-19).
+  so a stale holder cannot break the next build. - **fixed** (2026-08-19).
 - Grid ping-pong: the phone's first keystroke claims the session and resizes
   the PTY to its grid; ~5 s later the desktop always wrote the terminal's
   palette (an OSC 4 answer to the TUI's palette query, plus `ESC[I` focus
   reports, forwarded by xterm's `onData`), and every such write went through
-  `pty_write`, which claimed the session back at the desktop grid — so a
+  `pty_write`, which claimed the session back at the desktop grid - so a
   watched session flip-flopped between the two sizes after every claim.
   `pty_write` now skips the claim for xterm's protocol answers
   (`looks_like_protocol_response`: focus reports and OSC replies), which still
-  reach the PTY but no longer move the grid. — **fixed** (2026-08-19).
+  reach the PTY but no longer move the grid. - **fixed** (2026-08-19).
 
 ## Documentation drift
 
@@ -799,11 +921,11 @@ each before removing; some may be used in Rust or in a build step).
   `docs/architecture/two-process-model.md` carry stale line numbers and a few
   removed command names (`fs_list_files`, `fs_grep`, `fs_glob`; the actual
   commands are `fs_search`, `fs_grep_interactive`). Functions exist; line
-  numbers drift. — **open**.
+  numbers drift. - **open**.
 - ~~`docs/architecture/pty-shell-integration.md` calls the ConPTY mutex
-  `SPAWN_LOCK`~~ — corrected to `CONPTY_LIFECYCLE_LOCK` (`session.rs:87`).
+  `SPAWN_LOCK`~~ - corrected to `CONPTY_LIFECYCLE_LOCK` (`session.rs:87`).
 - ~~`docs/architecture/web-terminal-bridge.md` promises `{type:"exit"}` and a
-  binary title frame the server never sends~~ — the server now sends
+  binary title frame the server never sends~~ - the server now sends
   `{type:"exit"}` (see #5); the title frame remains unimplemented and the doc
   is being updated.
 - `.github/workflows/` is Windows-only after the cut; re-verify before

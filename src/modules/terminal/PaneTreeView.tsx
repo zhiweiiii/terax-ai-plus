@@ -5,6 +5,7 @@ import {
 } from "@/components/ui/resizable";
 import { Fragment } from "react";
 import { useTerminalDropStore } from "./lib/dropStore";
+import { focusSlot } from "./lib/rendererPool";
 import { firstLeafSlotId, type PaneNode } from "./lib/panes";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane";
 
@@ -33,6 +34,12 @@ export function PaneTreeView(props: Props) {
       <div
         onMouseDownCapture={() => {
           if (!focused) onFocusLeaf(node.id);
+          // Take DOM focus every time, not only when the ACTIVE leaf changes.
+          // `onFocusLeaf` moves React state and nothing else, so clicking the
+          // terminal that was already active did nothing at all - and after a
+          // menu, a tab or a dialog had taken focus away, that is exactly the
+          // click that was supposed to bring it back. It took two.
+          focusSlot(node.id);
         }}
         // Catches focus from Tab, programmatic focus, or any path that
         // skips mousedown — keeps activeLeafId in sync with DOM focus.

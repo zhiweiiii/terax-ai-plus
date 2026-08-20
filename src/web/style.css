@@ -366,9 +366,7 @@ body {
    label here rather than a bubble, and it does not move with the thread. */
 .progstatus {
   flex-shrink: 0;
-  padding: 5px 12px;
-  background: rgba(88, 166, 255, 0.06);
-  border-bottom: 1px solid var(--border);
+  padding: 4px 2px 7px;
   color: var(--muted);
   font-size: 10px;
   font-family: var(--mono);
@@ -604,4 +602,28 @@ body {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 10px;
+}
+
+/* An option's own description. Wraps, unlike the label, because it is the
+   half that decides and truncating it would defeat the point. */
+.choice-btn {
+  align-items: flex-start;
+}
+
+.choice-key {
+  margin-top: 1px;
+}
+
+.choice-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: normal;
+  overflow: visible;
+}
+
+.choice-detail {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
 }

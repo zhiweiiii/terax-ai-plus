@@ -226,6 +226,29 @@ function createSlot(): Slot {
   getRecycler().appendChild(host);
   term.open(host);
 
+  // Right-click does the terminal thing and never opens a menu. The menu that
+  // used to appear was the webview's own default: nothing here listened for
+  // `contextmenu` at all. Scoped to this host on purpose - the explorer, the
+  // tabs and the editor all have real context menus, and a document-level
+  // handler would take those away too.
+  host.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (term.hasSelection()) {
+      const selection = term.getSelection();
+      if (selection) {
+        void navigator.clipboard.writeText(selection).catch(() => {});
+        term.clearSelection();
+      }
+      return;
+    }
+    void navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) pasteIntoTerminal(term, text);
+      })
+      .catch(() => {});
+  });
+
   const slot: Slot = {
     id: slots.length,
     term,

@@ -283,6 +283,69 @@ function check(name, cond, detail) {
   check("the prompt context stops at the dialog", !prompt.includes("Welcome back"), prompt);
 }
 
+// ---- claude's AskUserQuestion widget: options with descriptions ----
+{
+  // The real screen, captured from a live Claude Code session answering "give
+  // me 3 options". Three traps in one: every option carries a description
+  // line, the widget draws a rule THROUGH its own list, and the selection
+  // marker is on the FIRST option - so a scan that stops at the first
+  // description keeps only the tail and sees nothing selected.
+  const rows = blank();
+  rows[1] = "\u256d\u2500\u2500\u2500 Claude Code v2.1.235 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e";
+  rows[2] = "\u2502                                                    \u2502 Tips for getting started                                                          \u2502";
+  rows[3] = "\u2502                Welcome back zhiwei!                \u2502 Run /init to create a CLAUDE.md file with instructions for Claude                 \u2502";
+  rows[4] = "\u2502                                                    \u2502 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 \u2502";
+  rows[5] = "\u2502                       \u2590\u259b\u2588\u2588\u2588\u259c\u258c                      \u2502 What's new                                                                        \u2502";
+  rows[6] = "\u2502                      \u259d\u259c\u2588\u2588\u2588\u2588\u2588\u259b\u2598                     \u2502 Added an optional `spellcheck` setting that underlines misspelled words in the p\u2026 \u2502";
+  rows[7] = "\u2502                        \u2598\u2598 \u259d\u259d                       \u2502 Fixed whole-prompt-cache invalidation when a language server disconnected or rec\u2026 \u2502";
+  rows[8] = "\u2502       Opus 5 with high effort \u00b7 Claude Pro \u00b7       \u2502 Fixed nested markdown list items misaligning at depth 3+ and added a hanging ind\u2026 \u2502";
+  rows[9] = "\u2502       q1178679449@gmail.com's Organization         \u2502 /release-notes for more                                                           \u2502";
+  rows[10] = "\u2502               D:\\tmp-terax-ask-143310              \u2502                                                                                   \u2502";
+  rows[11] = "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f";
+  rows[14] = "\u276f \u6211\u8981\u6d4b\u8bd5\u4e00\u4e2a\u529f\u80fd\uff0c\u6211\u8981\u4f60\u7ed9\u62113\u9009\u9879\u53ef\u4ee5\u9009\u62e9";
+  rows[15] = "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+  rows[16] = " \u2610 \u6d4b\u8bd5\u9009\u9879";
+  rows[18] = "\u8fd9\u662f\u4e00\u4e2a\u9009\u9879\u6d4b\u8bd5\uff0c\u8bf7\u4ece\u4e0b\u9762 3 \u4e2a\u9009\u9879\u4e2d\u9009\u4e00\u4e2a\uff1a";
+  rows[20] = "\u276f 1. \u9009\u9879 A";
+  rows[21] = "     \u7b2c\u4e00\u4e2a\u9009\u9879 \u2014 \u9009\u5b83\u6211\u4f1a\u56de\u590d\u300c\u4f60\u9009\u4e86 A\u300d\u3002";
+  rows[22] = "  2. \u9009\u9879 B";
+  rows[23] = "     \u7b2c\u4e8c\u4e2a\u9009\u9879 \u2014 \u9009\u5b83\u6211\u4f1a\u56de\u590d\u300c\u4f60\u9009\u4e86 B\u300d\u3002";
+  rows[24] = "  3. \u9009\u9879 C";
+  rows[25] = "     \u7b2c\u4e09\u4e2a\u9009\u9879 \u2014 \u9009\u5b83\u6211\u4f1a\u56de\u590d\u300c\u4f60\u9009\u4e86 C\u300d\u3002";
+  rows[26] = "  4. Type something.";
+  rows[27] = "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
+  rows[28] = "  5. Chat about this";
+  rows[30] = "Enter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel";
+  const conv = await parseScreen(rows);
+  const keys = conv.choices.map((c) => c.key).join(",");
+  check("question widget offers every option", keys === "1,2,3,4,5", keys);
+  check(
+    "the marker on the FIRST option is seen",
+    conv.choices[0]?.selected === true,
+    JSON.stringify(conv.choices.map((c) => c.selected)),
+  );
+  check(
+    "a description line does not end the list",
+    conv.choices[2]?.label === "选项 C",
+    JSON.stringify(conv.choices),
+  );
+  check(
+    "a rule drawn through the list does not end it",
+    conv.choices[4]?.label === "Chat about this",
+    JSON.stringify(conv.choices),
+  );
+  check(
+    "each option carries its description",
+    (conv.choices[0]?.detail ?? "").includes("第一个选项"),
+    JSON.stringify(conv.choices[0]),
+  );
+  const prompt = conv.promptBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check("the question is kept", prompt.includes("3 个选项"), prompt);
+  check("the welcome banner is not dragged in", !prompt.includes("Welcome back"), prompt);
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check("the options are not bubbles too", !all.includes("Chat about this"), all);
+}
+
 // ---- a menu must NOT be mistaken for a startup splash ----
 {
   // Sparse screen (few letters + a box) drawn LATER (second frame): this is
