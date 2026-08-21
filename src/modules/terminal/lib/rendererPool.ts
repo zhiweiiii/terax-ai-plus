@@ -203,6 +203,11 @@ export function applyBackgroundActive(active: boolean): void {
   }
 }
 
+/** One right-click is one paste. Anything arriving inside this window is the
+ *  same gesture reaching us twice, not the user asking again. */
+const RIGHT_CLICK_PASTE_GAP_MS = 250;
+let lastRightClickPasteAt = 0;
+
 function createSlot(): Slot {
   let focusTerminal = () => {};
   const term = new Terminal({
@@ -231,23 +236,41 @@ function createSlot(): Slot {
   // `contextmenu` at all. Scoped to this host on purpose - the explorer, the
   // tabs and the editor all have real context menus, and a document-level
   // handler would take those away too.
-  host.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    if (term.hasSelection()) {
-      const selection = term.getSelection();
-      if (selection) {
-        void navigator.clipboard.writeText(selection).catch(() => {});
-        term.clearSelection();
+  //
+  // Guarded twice, because one right-click was pasting twice and the second
+  // write was not coming from a second call in this function:
+  //
+  //   - the host is marked, so a module re-execution (vite HMR leaves the old
+  //     host in the DOM with its old listener) cannot bind a second one;
+  //   - the paste itself is rate-limited, so whatever else manages to deliver
+  //     a second contextmenu for the same click lands inside the window and is
+  //     dropped.
+  //
+  // Both are cheap, and between them the clipboard can only be applied once
+  // per gesture however the duplicate arrives.
+  if (!host.dataset.teraxContextMenu) {
+    host.dataset.teraxContextMenu = "1";
+    host.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (term.hasSelection()) {
+        const selection = term.getSelection();
+        if (selection) {
+          void navigator.clipboard.writeText(selection).catch(() => {});
+          term.clearSelection();
+        }
+        return;
       }
-      return;
-    }
-    void navigator.clipboard
-      .readText()
-      .then((text) => {
-        if (text) pasteIntoTerminal(term, text);
-      })
-      .catch(() => {});
-  });
+      const now = Date.now();
+      if (now - lastRightClickPasteAt < RIGHT_CLICK_PASTE_GAP_MS) return;
+      lastRightClickPasteAt = now;
+      void navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) pasteIntoTerminal(term, text);
+        })
+        .catch(() => {});
+    });
+  }
 
   const slot: Slot = {
     id: slots.length,

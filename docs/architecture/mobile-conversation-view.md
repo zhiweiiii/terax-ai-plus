@@ -1,439 +1,182 @@
-# Mobile conversation view
+# 手机端对话视图
 
-The phone does not render a terminal. It renders a **conversation**: what you
-sent, and what came back, as bubbles that wrap at the phone's width.
+手机不渲染终端。它渲染的是**对话**：你说的话、返回的内容，作为按手机宽度折行的气泡。
 
-Source of truth: `src/web/conversation.ts` (the parse), `src/web/main.ts`
-(shell, WebSocket, rendering), `src/web/style.css`. The transport underneath is
-unchanged — see [Web terminal bridge](web-terminal-bridge.md).
+源码：`src/web/conversation.ts`（屏幕解析）、`src/web/markdown.ts`（气泡里的 Markdown）、`src/web/main.ts`（外壳、WebSocket、渲染）、`src/web/style.css`。底层传输见 [Web 终端桥接](web-terminal-bridge.md)。
 
-## Why not a terminal
+## 为什么不是终端
 
-The page used to be an xterm.js terminal rendering at exactly the PTY grid.
-That grid is the desktop's, commonly 138–192 columns, and a phone viewport is
-around 335 CSS px. Measured on a real session (192×28 PTY, 335×590 viewport):
+页面曾经是一个按 PTY 网格精确渲染的 xterm.js 终端。那个网格是桌面的，通常 138 到 192 列，而手机视口大约 335 CSS 像素。在真实会话上量过（192×28 的 PTY，335×590 的视口）：
 
-| | value |
+| | 数值 |
 |---|---|
-| rendered grid | 1408 × 653 px |
-| scale to fit width | 0.238 |
-| effective font size | 14 × 0.238 ≈ **3.3 px** |
-| screen height used | 155 / 590 ≈ **26 %** |
+| 渲染出的网格 | 1408 × 653 px |
+| 缩放到视口宽度 | 0.238 |
+| 实际字号 | 14 × 0.238 ≈ **3.3 px** |
+| 占用的屏幕高度 | 155 / 590 ≈ **26 %** |
 
-Three properties were wanted at once: a readable font, no horizontal panning,
-and a byte stream that still parses correctly. A terminal view can have any two.
-Scaling to fit gives an unreadable font; not scaling forces panning; re-wrapping
-to the phone width breaks `\r` redraws and absolute cursor moves.
+想同时要三件事：可读的字号、不用左右拖动、字节流仍能正确解析。终端视图任选其二。缩放到适宽字号不可读，不缩放就得拖动，按手机宽度重排则会破坏 `\r` 原地重绘和绝对光标定位。
 
-A conversation view escapes the trilemma because it never displays a grid. The
-grid becomes an internal parsing detail, and the text that comes out of it
-carries no column count, so it can be re-wrapped at any width at a normal size.
+对话视图跳出这个三难，因为它**从不显示网格**。网格变成内部的解析细节，解析出来的文本不带列数，于是可以在任意宽度下以正常字号重新折行。
 
-## The parser is a headless xterm
+## 对话从哪里来
 
-`Conversation` owns a `Terminal` that is **never `open()`ed**. Without a DOM
-element xterm skips its renderer entirely and only maintains the buffer — which
-is exactly what is read back out.
+**agent 对话不是从屏幕上读的**，而是读 agent 自己保存的记录：
 
-It is sized to the PTY's real grid (`setGrid`, driven by the server's `attached`
-and `resized` messages), because that is the only width at which the stream's
-wrapping and cursor moves come out right. That size never reaches the screen.
-
-Using xterm rather than a hand-rolled ANSI parser is deliberate: it is the only
-thing in the codebase that already gets wrapping, `\r` in-place redraws,
-absolute cursor addressing and the alternate screen right.
-
-## Two sources, one thread
-
-### Normal buffer — a shell
-
-Lines scroll past the cursor. Everything above the cursor row is settled and is
-collected; the cursor's own row is left alone because it may be a half-written
-prompt or progress line. A row xterm marks `isWrapped` is a continuation broken
-at the PTY's column count, not by the program, so it is joined back onto the row
-above — that is what makes re-wrapping at phone width correct rather than
-double-wrapped.
-
-### Alternate screen — a full-screen program
-
-`claude`, `opencode`, `vim`, `htop`. Nothing scrolls past a cursor: one screen
-is repainted in place. So successive frames are compared to work out **how far
-the screen scrolled** (`detectScroll`), and the rows that fell off the top are
-collected the same way as shell output. Rows still on screen are parsed into
-blocks and rendered below the history, so between them they cover the
-conversation exactly once, with no line shown twice.
-
-`detectScroll` takes the smallest shift `k` at which ≥ 70 % of the old frame
-lines up with the new one, requiring at least 3 matching non-blank rows so that
-mostly-blank screens do not match at every shift. A program with a pinned footer
-still matches, because the scrolling region is the bulk of the screen and a few
-unmatched footer rows cannot outvote it.
-
-This is deliberately generic: it knows nothing about any particular program's
-layout, so it does not break when one changes its box drawing.
-
-## Where the conversation comes from
-
-An agent conversation is **not** read off the screen. It is read from the
-record the agent itself keeps:
-
-| Agent | Source |
+| Agent | 数据源 |
 |---|---|
-| Claude Code | `~/.claude/projects/<escaped cwd>/<session>.jsonl` |
-| opencode | `~/.local/share/opencode/opencode.db` (SQLite) |
+| Claude Code | `~/.claude/projects/<转义cwd>/<session>.jsonl` |
+| opencode | `~/.local/share/opencode/opencode.db`（SQLite） |
 
-The Rust `transcript` module normalises both into one shape (user/assistant
-turns, the agent's reasoning, the tools it ran, the mode, the model, and
-whether a turn is still running) and the bridge pushes it to the phone as a
-`transcript` message. See
-[Web terminal bridge](web-terminal-bridge.md) § Agent transcript.
+Rust 的 `transcript` 模块把两者归一成同一结构（用户/助手轮次、agent 的思考、调用的工具、模式、模型、当前轮是否在进行），桥接以 `transcript` 消息推给手机。见 [Web 终端桥接](web-terminal-bridge.md) 的 Agent transcript 一节。
 
-### Why not the screen
+### 为什么不用屏幕
 
-The screen parse worked, but it is a parse of a picture, and a picture has no
-idea what is content. Measured against a real opencode session, every one of
-these was a bug that had to be found and fixed individually:
+屏幕解析是能跑通的，但它解析的是一张画，而画本身不知道哪部分是内容。对着真实的 opencode 会话量过，下面每一条都是必须单独发现、单独修掉的 bug：
 
-- opencode draws a **right-hand panel** (session name, token count, cost, LSP
-  state, cwd, branch) on the same rows as the conversation. Read as text it
-  interleaved: `1% used` glued to the front of a sentence, a bare cwd path as
-  its own bubble, a timestamp landing inside the echo of what was typed.
-- a spinner line reads as a sentence unless it is recognised as a spinner, and
-  Claude cycles through dozens of verbs.
-- the mode sits on a status bar whose position moves between versions.
-- an agent's own reasoning is not distinguishable from its answer.
+- opencode 会画一个**右侧信息栏**（会话名、token 数、花费、LSP 状态、cwd、分支），和对话在同一批行上。当成文本读就会互相穿插：`1% used` 粘在句子前面、裸 cwd 路径变成独立气泡、时间戳混进你输入的回显里。
+- 转圈行不认出来就是句子，而 Claude 会轮换几十个动词。
+- 模式写在状态栏上，位置随版本变。
+- agent 的思考和它的回答无法区分。
 
-None of that is inherent to the task. Both tools already write the
-conversation down in a structured form, with roles, timestamps and reasoning
-stated rather than inferred. Reading that is less code and cannot be wrong
-about who said what.
+这些都不是任务本身固有的困难。两个工具本来就把对话结构化地写了下来，**角色、时间戳、思考内容都是被声明的，不是推断的**。读那个更少代码，而且不可能弄错谁说了什么。
 
-### What the screen is still for
+### 屏幕还负责什么
 
-Exactly one thing the transcript cannot know: **what the program is asking you
-to pick right now**. A permission prompt or a menu is live UI state, not
-conversation, and neither tool persists it while it is pending. So the screen
-parse keeps running and keeps producing `choices`, plus `promptBlocks` - the
-rows the menu is attached to, which is the question and whatever justifies it
-(the command it wants to run, the diff it wants to write). Approving "create
-hello.txt" without seeing what goes in it is a guess, not a decision.
+只剩一件 transcript 不可能知道的事：**程序此刻在等你选什么**。权限提示或选项菜单是实时 UI 状态，两个工具在它待处理期间都不持久化。所以屏幕解析继续跑，继续产出 `choices`，外加 `promptBlocks`：菜单所依附的那几行，也就是问题本身和支撑它的东西（要执行的命令、要写入的 diff）。**看不到要写什么就批准"创建 hello.txt"，那是猜，不是决定。**
 
-Because the menu is the one thing here that must never be lost, `findChoices`
-runs over the **whole screen before the footer is split off**, and the footer
-is then only allowed to begin below the menu. Making it depend on the footer
-split meant it could vanish: Claude draws its diff between two dashed rules,
-the footer anchored on the lower one, and the entire prompt counted as status.
+因为菜单是这里唯一绝不能丢的东西，`findChoices` 在**整屏上扫描、且在切分 footer 之前**，footer 之后只允许从菜单下方开始。让它依赖 footer 切分的后果是它真的会消失：Claude 把要写的 diff 画在两条虚线之间，footer 锚定了下面那条，整个提示就被算成了状态区。
 
-A plain shell has no transcript at all. The page then falls back to the screen
-for everything, which is what the rest of this document describes.
+普通 shell 根本没有 transcript，这时整页退回屏幕路径，也就是本文其余部分描述的东西。
 
-## Four things, not one stream
+## 屏幕解析：一个无头 xterm
 
-A screen is not one kind of information, and flattening it into bubbles buries
-the parts a reader needs continuously. `setLive` takes the screen apart in a
-fixed order, each piece rendered in its own place. Under an agent transcript
-most of these are superseded by the transcript's own stated values; they remain
-the source for a plain shell, and for a full-screen program that keeps no
-record of itself:
+`Conversation` 持有一个**从不 `open()`** 的 `Terminal`。没有 DOM 元素时 xterm 完全跳过渲染器，只维护缓冲区，而缓冲区正是我们要读回来的东西。
 
-| Piece | Screen field | Transcript field | Where it renders |
+它按 PTY 真实的网格调整尺寸（`setGrid`，由服务端的 `attached` 和 `resized` 驱动），因为只有在那个宽度下，流里的折行和光标移动才解得对。这个尺寸永远不会到达屏幕。
+
+用 xterm 而不是手写 ANSI 解析器是刻意的：它是代码库里唯一已经把折行、`\r` 原地重绘、绝对光标定位和 alt 屏都做对了的东西。
+
+### 两个来源，一条线索
+
+**普通缓冲区（shell）**：行从光标上方滚过去就算定稿，被收集起来；光标所在那行不动，因为它可能是写了一半的提示符或进度行。xterm 标为 `isWrapped` 的行是在 PTY 列宽处被折断的续行、不是程序自己断的，所以会被接回上一行，这正是"按手机宽度重排"能正确而不是二次折行的原因。
+
+**alt 屏（全屏程序）**：没有东西从光标上方滚过，整屏在原地重绘。所以比较相邻两帧算出**屏幕滚动了多远**（`detectScroll`），滚出顶部的行按和普通缓冲区一样的方式收集。仍在屏上的行解析成块渲染在历史下方，两者合起来恰好覆盖对话一次，不重复。
+
+`detectScroll` 取满足"旧帧有 ≥70% 与新帧对齐"的最小位移 `k`，且要求至少 3 行非空内容匹配，免得大片空白屏在每个位移上都能匹配。这是刻意做成通用的：它不知道任何具体程序的布局，所以某个程序改了框线画法也不会坏。
+
+### 一屏拆成几部分
+
+一屏不是一种信息，压平成气泡会把读者需要持续看到的部分埋掉。`setLive` 按固定顺序拆开它，各自渲染到各自的位置。在 agent transcript 之下，其中多数会被 transcript 声明的值取代；它们仍是普通 shell、以及不留记录的全屏程序的来源：
+
+| 部分 | 屏幕字段 | transcript 字段 | 渲染位置 |
 |---|---|---|---|
-| Body | `turns`, `liveBlocks` | `messages` | the thread |
-| Working state | `thinking` | `working.since` | above the composer |
-| Mode | `mode` | `mode` | pinned above the key row |
-| Model | - | `model` | next to the mode |
-| Reasoning | - | `messages[].reasoning` | collapsed under the turn |
-| Tools | - | `messages[].tools` | chips under the turn |
-| Choices | `choices` | (not recorded) | tappable buttons |
-| Running agents | `agents` | - | a chip strip |
+| 正文 | `turns`、`liveBlocks` | `messages` | 会话流 |
+| 进行状态 | `thinking` | `working.since` | 输入区上方 |
+| 模式 | `mode` | `mode` | 按键行上方的标签 |
+| 模型 | - | `model` | 模式旁边 |
+| 思考内容 | - | `messages[].reasoning` | 折叠在该轮下方 |
+| 工具 | - | `messages[].tools` | 该轮下方的 chip |
+| 选项 | `choices` | （不被记录） | 可点击的按钮 |
+| 子代理 | `agents` | - | chip 条 |
 
-Order matters: the working line is taken out **first**, because it is drawn
-right above the input box and can land on the footer's bottom row, which is
-otherwise the agent tab strip. A program that is merely thinking was being
-reported as running a subagent.
+**顺序很关键**：进行状态必须**最先**取出，因为它画在输入框正上方，可能落在 footer 最底行，而那一行是子代理 chip 条的位置。一个只是在思考的程序曾因此被报成"正在跑子代理"。
 
-### Working state (`splitWorking`)
+**进行状态（`splitWorking`）**：动词从不匹配列表，因为 Claude 会轮换几十个（Musing、Pondering、Herding），加一个新词不能让它失效。匹配的是所有工具共有的形状：输入框附近一条短行、以省略号收尾、常带耗时（`1m 5s` 或 `12s`）。前导的转圈字符会剥掉但不是必需。它刻意不进气泡：「思考了 12 秒」是一个"在它不成立之前一直成立"的状态，把每次重绘都塞进会话流会把对话埋在自己的进度条底下。
 
-What it is doing, and for how long. The verb is never matched against a list:
-Claude cycles through dozens of them ("Musing", "Pondering", "Herding") and
-adding a new one must not break this. What is matched is the shape every tool
-draws: a short line, near the input box, that trails off in an ellipsis, often
-with an elapsed time (`1m 5s` or `12s`) somewhere on it. A leading spinner
-glyph is stripped but not required.
+**模式（`detectMode`）**：状态栏上所有东西里，模式是唯一会改变"发一条消息会做什么"的，所以单独取出单独显示，而不是折进那条压缩标签。Claude 写成 `<某某> mode on` / `auto-accept edits on`；opencode 把它放在模型行开头（`Build · <model>`）。两者都在 `condenseStatus` **之前**读取，因为那一步会把这些行当作 readout 丢掉。
 
-It is deliberately not a bubble. "Thinking for 12s" is a state that is true
-until it is not, and pushing each repaint of it into the thread would bury the
-conversation in its own progress bar.
+**选项（`splitChoices`）**：等着你按一个键的编号菜单会变成按钮，手机上点一下比调出键盘敲一个数字好。选项本身不再同时渲染成气泡，但它们上面的问题仍然是。
 
-### Mode (`detectMode`)
+光靠编号识别不了菜单：agent 在正文里写"1. 这样 / 2. 那样"很常见，那必须留作正文。靠两条判据区分：**这些工具画的菜单一定用 `❯` 或 `>` 标出当前行**；**菜单的编号向上递增**，一段编号不递增的连续行是两个碰巧挨着的列表。
 
-Of everything a tool pins to its status bar, the mode is the one piece that
-changes what sending a message DOES, so it is pulled out and shown on its own
-rather than folded into the condensed label. Claude phrases it as
-`<something> mode on` / `auto-accept edits on`; opencode puts it first on its
-model line (`Build · <model>`). Both are read **before** `condenseStatus`,
-which drops those lines as readouts.
+扫描分两趟：先找出窗口内所有编号行，再取行距足够近、编号递增的那一段。相邻性不能是逐行的：Claude 的提问组件给每个选项都配一行说明，而且会在**自己的列表中间**画一条横线。逐行扫描会停在第一行说明上，只留下列表尾部、且完全扫不到选中标记，于是一个真菜单被判成"不是菜单"。
 
-### Choices (`splitChoices`)
+## 把一屏读成气泡
 
-A numbered menu the program is waiting on becomes buttons: it answers to a
-single digit, and on a phone tapping it beats opening the keyboard to type one.
-The options are then not also rendered as bubbles; the question above them
-still is.
+`toBlocks` 把屏幕行变成块。它只依赖所有全屏 TUI 都成立的事实：框线是画出来的、不是内容；空行分隔两样东西；`>` / `❯` 引出用户说的话。
 
-Numbering alone cannot identify a menu - an agent writing "1. do this /
-2. do that" in prose is common and must stay prose. Two things separate them:
+- **剥框（`stripChrome`）** 去掉框线、方块元素、几何图形和盲文。`⏺` / `●` 刻意**不在**这个集合里：它们有含义，作为项目符号保留。
+- **footer（`splitFooter`）** 从底部往上走，只要还像装饰就继续：空行、按键提示、以横线开头、或框线字符占比 ≥30%：在第一行读起来像内容的地方停下。它丢掉的部分变成状态标签，永远不会变成气泡。**横线指的是一"串"框线字符**（`╹▀▀▀▀…`），单个栏位标记（`┃`、`▣`）是可能承载内容的那行上的装饰，不算横线。没有这条规则，opencode 把每条用户消息都画在 `┃` 栏位下面，footer 会把它们全吃掉。
+- **用户标记**：`>` / `❯`，但指向编号选项的除外（`❯ 1. 上班`），那是程序在给选择，不是用户在说话。
 
-- every menu these tools draw marks the current row with `❯` or `>`;
-- a menu numbers upward, so a run whose keys do not increase is two adjacent
-  lists, not one menu.
+### 回显匹配才是可靠的那一半
 
-The scan runs upward from the input box, so the menu picked is the one the
-program is actually waiting on, and a key hint or blank below it is not
-mistaken for the end of the run.
+标记类的启发式很弱：opencode 根本不给用户消息加前缀。但页面**确切知道自己发了什么**，所以 `markEchoes` 会把匹配到近期发送内容的行重新标成用户的，不管程序在它周围画了什么。
 
-## Reading a screen as bubbles
+中间地带是陷阱。一条 4 到 9 个字符的发送（`claude`、`cd x`）可能出现在工具自己的界面里：cwd 路径 `…\opencode\claude-fresh`、`Run claude doctor`、模型行 `Opus 5 claude-fresh …`。宽松的 `includes` 会把这些全标成用户消息。所以规则按长度分层：**≥10 字符可作子串匹配；4 到 9 个字符必须基本就是整行**（`painted.length ≤ sent.length + 12`）；更短的必须完全相等。这就是为什么 `claude` 的真实回显是气泡，而 Claude Code 自己的界面文字仍然是输出。
 
-`toBlocks` turns screen rows into blocks. It relies only on things true of every
-full-screen TUI: the frame is drawn with box characters and is not content,
-blank rows separate one thing from the next, and `>` / `❯` introduce something
-the user said.
+这些工具还会在它总结的消息正上方打印一行自动生成的标题（`Minimal message '1'`）。它按**位置**丢弃：紧邻用户回显之前、同一块内的单行非用户内容，而不是按措辞，因为每个工具的措辞都不一样、而且会变。
 
-- **Frame stripping** (`stripChrome`) removes box drawing, block elements,
-  geometric shapes and braille. `⏺` / `●` are deliberately *not* in that set:
-  they carry meaning and are kept as bullets.
-- **Footer** (`splitFooter`) walks up from the last row while rows still look
-  like furniture — blank, key hints (`esc`, `ctrl+…`), opening with a rule, or
-  ≥ 30 % frame characters — and stops at the first row that reads as content.
-  What it drops becomes the status label, never a bubble. A rule is a *run* of
-  frame characters (`╹▀▀▀▀…`); a single gutter marker (`┃`, `▣`) is decoration
-  on a line that may be content, so it is not a rule. Status readouts — the
-  model line (`Build · <model>`, already in `WIDGET`), a bare filesystem path
-  (an input box's working directory) — are furniture, so the input box stays a
-  status label instead of gluing its prompt onto the message above it. Without
-  the run rule, opencode renders every user message under a `┃` gutter and the
-  footer walk ate them all, hiding what the user last said as status.
-- **User markers**: `>` / `❯`, except when they point at a numbered choice
-  (`❯ 1. 上班`), which is the program offering options, not the user speaking.
+## 工具相关的那一层
 
-### Echo matching is the reliable part
+只有一份列表，`conversation.ts` 里的 `WIDGET`，加上 `detectProgram`。其余全部通用。
 
-Marker heuristics are weak — opencode does not prefix user messages at all. But
-the page knows exactly what it sent, so `markEchoes` re-labels any row matching
-a recent send as the user's, whatever the program drew around it. A short
-message must match exactly (looking for `1` as a substring would hit a token
-count or a timing); anything ≥ 10 characters may match loosely, since these
-tools wrap and decorate what you typed.
+- footer 按**位置**切分，不按文字（`splitFooter`）：两个工具都会在状态区上方画一条横线，那就是锚点。只靠"这行看起来像不像装饰"往上走会在 Claude 的子代理页签（`◯ Explore Search repo for README content 0s`，框线字符加文字，读起来像内容）上崩掉，把整个状态区当成输出漏出来。
+- footer 的**最底行是页签条**（Claude Code 正在运行的子代理）。它按位置取出，暴露为 `Conversation.agents`，渲染成输入区上方一条独立的 chip 而不是气泡。**从不匹配任何代理名字或任务文字**，所以 Claude 改了代理名照样能用。
+- `WIDGET` 丢掉这些工具散落在屏幕各处、而不是钉在底部的读数，这样 footer 那趟走不到它们：`+ Thought: …`、`Context`、`15,981 tokens`、`$0.00 spent`、`LSPs are disabled`、`Title generation request`、opencode 的 `Build · <model>` 行、Claude Code 的 `Opus <n>` 模型行，以及 `Auto-update failed` 的 npm 前缀告警。没匹配上的 readout 会退化成一个零散的小气泡，不会把解析搞坏。
 
-The middle band is the trap. A 4–9 character send (`claude`, `cd x`) can appear
-inside the tool's own UI — a cwd path `…\opencode\claude-fresh`, `Run claude
-doctor`, the model line `Opus 5 claude-fresh …`. A loose `includes` then marks
-all of those as the user's messages. The rule is therefore length-tiered:
-≥ 10 characters match as a substring; 4–9 must be essentially the whole row
-(`painted.length ≤ sent.length + 12`); shorter matches are exact. That is what
-keeps a real echo of `claude` a bubble while Claude Code's own chrome stays
-output.
+## 顺序
 
-This is what makes the `1` / `2` / `3` test case come out as bubbles on the
-right instead of being mistaken for output.
+在 alt 屏下，你刚发出的消息**不能**直接压进历史：屏幕上最新的东西是程序自己的重绘，把气泡压进历史会让它落在比它更旧的内容上方。它先在 `pending` 里等着，渲染在实时屏之后，等程序自己把提示符画出来就丢弃。离开 alt 屏时，还没画出来的内容按顺序折回历史。
 
-These tools also print a generated one-line title directly above the message it
-summarises (`Minimal message '1'`). It is dropped on **position** — a one-row
-non-user run immediately preceding a user echo inside the same block — rather
-than on wording, which every tool phrases differently and changes over time.
+**在 transcript 之下，这个丢弃时机太早了**：agent 会在把这一轮写进记录之前一拍就把你的消息回显到屏幕上，于是气泡会闪一下消失再回来。所以 transcript 模式下由页面自己扣住（`main.ts` 的 `awaitingTranscript`），直到 transcript 真的收录了它。
 
-## The tool-specific layer
+## 连接时的首屏
 
-One list, `WIDGET` in `conversation.ts`, and `detectProgram`. Everything else is
-generic.
+刚连上的手机会收到**桌面终端自己的缓冲区**（序列化后的），作为 `attached` 之后的一帧。这里不需要重建任何东西：缓冲区本身就已经是"程序画过的每一帧"的结果，这正是我们去问桌面要它、而不是把字节日志回放一遍的原因。取回方式见 [Web 终端桥接](web-terminal-bridge.md)。
 
-- The footer is split out by **position, not by text** (`splitFooter`): the
-  status rule both tools draw above their status area is the anchor — the
-  footer is everything from the last rule in the bottom `FOOTER_WINDOW` rows
-  down. Walking up by "does this line look like furniture" alone breaks when
-  Claude's subagent tab (`  ◯ Explore Search repo for README content  0s`)
-  does not read as furniture, which leaks the whole status area into the
-  conversation as output. A rule higher than the window is a dialog border or
-  a divider, not a status rule.
-- The footer's **bottom row is the tab strip** (Claude Code's running
-  subagents). It is pulled out by position and exposed as `Conversation.agents`
-  — rendered as an independent chip strip above the composer, never as a
-  bubble. Only the draft input box (a bare path, or key hints) is excluded.
-  No agent name or task text is ever matched; the same code works however
-  Claude renames its agents.
-- `WIDGET` drops readouts these tools scatter *around* the screen rather than
-  pinning to the bottom, so the footer walk never reaches them: `+ Thought: …`,
-  `Context`, `15,981 tokens`, `$0.00 spent`, `LSPs are disabled`,
-  `Title generation request`, opencode's `Build · <model>` line, Claude Code's
-  `Opus <n> …` model line, and the `Auto-update failed` npm-prefix warning. An
-  unmatched widget degrades into a small stray bubble; it does not break the
-  parse.
-- `detectProgram` recognises OpenCode and Claude Code to label the moment one
-  starts (`OpenCode 已启动` / `Claude Code 已启动`). Attaching mid-session means
-  the splash is long gone, so the note starts generic and its name is filled in
-  from a later frame. `opencode` is also a folder name in a cwd path (and
-  Claude's footer shows the working directory), so the OpenCode test requires a
-  bare word — the logo, the save screen, the `OpenCode Go` footer — not a bare
-  substring. Claude Code is matched first (`claude code`, `welcome back`,
-  `Opus <n>`), so a session running in `…\opencode\…` still names itself.
-- A splash screen is suppressed rather than bubbled (`isBanner`): judged on how
-  much text is on screen (< 120 letters), not on the ratio of drawing to text —
-  a ratio flips either side of its threshold as soon as one long divider rule is
-  drawn, which made the same screen appear and disappear. Suppression applies
-  only to the program's **first frame**: an exit / save prompt drawn later under
-  the same ASCII banner ("Session 项目介绍 / Continue opencode -s …") is an
-  interaction the reader must see, not a logo to hide.
+`writeSeed` 原样写入，只切一刀：alt 屏进入点。一个正在跑全屏程序的序列化终端是"滚动缓冲，然后 `?1049h`，然后程序的屏幕"，而 `flush` 只读当前活动的那个 buffer，直接写过头会让滚动缓冲没被读出来，手机打开时只有 TUI 那一屏。所以先写到切换点、读成历史，再写剩下的。首屏之后的第一帧 alt 屏永远不当作启动画面：连进来时是会话中途，屏上的东西是交互而不是 logo。
 
-## Ordering
+`flushNormal` 刻意停在光标行上方（那行可能是写了一半的提示符），但**首屏时不能这样**：一个停在提示符的 shell 全部内容就是那一行，跳过它等于打开一个白页。所以首屏会把光标行发一次，并把读游标推过去，实时流不会重复。
 
-Three containers, rendered in this order, all styled identically so the reader
-sees one column:
+`writeBacklog` 是更早的路径，生产环境已经不用了。它把原始字节流切片、片间读取，让全屏程序的帧被 `detectScroll` 重建；回放测试工具仍然用它驱动录制的会话。
 
-1. `#turns` — settled history, appended once and left alone.
-2. `#live-blocks` — the part of the conversation still on a full-screen
-   program's screen, rebuilt whenever it repaints.
-3. `#pending` — sent, not yet painted by the program. Dimmed until confirmed.
+## 输入
 
-`#pending` exists for ordering, not decoration. Under a shell, a sent message
-goes straight into history and the output that follows lands after it. Under a
-full-screen program the newest thing on screen is the program's own repaint, so
-a bubble pushed into history would render **above** content older than it. It
-waits in `pending` instead and is dropped as soon as the program paints the
-prompt itself. Leaving the alternate screen folds anything still pending back
-into history, in order.
+输入区把文本加 `\r` 发给连接着的 PTY，另一端是什么都一样。按键行补上软键盘没有的 Ctrl+C / Ctrl+D / Esc / Tab / **Shift+Tab** / 上下 / 回车。Shift+Tab 发 `CSI Z`，两个 agent 都用它切换模式，手机上没有别的途径能发出去。**空输入的回车也会发出去**，并且不记录任何消息：空回车不是空消息，它用来接受默认值、确认提示、翻页。
 
-## Seed on attach
+手机不渲染网格，所以也不强加宽度：PTY 保持桌面的尺寸，从手机打字不会让桌面的屏幕在一个为它排版的程序下重排。解析器通过 `resized` 跟随持有者的网格。
 
-A freshly connected phone is handed **the desktop terminal's own buffer**,
-serialized, as one frame right after `attached`. Nothing is reconstructed: the
-buffer already IS the result of every frame the program ever painted, which is
-why the desktop is asked for it rather than a byte log being replayed through
-the parser. See [Web terminal bridge](web-terminal-bridge.md) for how it is
-fetched.
+离开 alt 屏时，程序最后那一屏会经过和其他帧同样的解析折进历史：剥掉装饰、标记回显，而不是原样追加，后者曾把输入框、状态行和回显的消息当成匿名输出漏进正文。
 
-`writeSeed` writes it as-is, with one split: the alternate-screen enter. A
-serialized terminal running a full-screen program is "scrollback, then
-`?1049h`, then the program's screen", and `flush` only ever reads whichever
-buffer is active. Writing straight past the switch would leave the scrollback
-unread and the phone would open on the TUI's screen alone. So the seed is
-written up to the switch, read out as history, then written the rest of the
-way. The first alt frame after a seed is never treated as a splash: attaching
-mid-session means whatever is on screen is an interaction, not a logo.
+## Markdown
 
-`writeBacklog` is the older path and no longer runs in production. It slices a
-raw byte stream and reads between slices so a full-screen program's frames are
-reconstructed by `detectScroll`; the replay harness still drives captures
-through it.
+transcript 的正文是 agent 写的原始 Markdown，所以按 Markdown 渲染（`markdown.ts`）：围栏代码块、行内代码、加粗、标题、有序/无序列表。不认识的语法原样当文字显示。
 
-## Input
+**自己建 DOM 节点，绝不用 `innerHTML`。** 这不是风格偏好：手机页面持有认证 cookie 并直连一个活的 PTY，把 agent 输出变成 HTML 会让一行 `<img onerror=...>` 在那个上下文里执行。文本一律经 `textContent` 进入。也没有引入第三方 Markdown 库：桌面端用的 `streamdown` 是 React 组件，而这个页面是纯 TS；换别的库则是给一个要内联进二进制的页面平白加重量。
 
-The composer sends text plus `\r` to the attached PTY, whatever is on the other
-end — a shell, an agent, a REPL. The key row supplies Ctrl+C / Ctrl+D / Esc /
-Tab / arrows / Enter, which soft keyboards do not have.
+只有 transcript 那一路用它。屏幕那一路显示的是 TUI **已经渲染过**的东西（它自己把 Markdown 画成了 ANSI 和框线），再解析一遍等于把同一个源读了两次。
 
-The phone renders no grid, so it has no width of its own to impose, but it does
-not sit passively at the desktop's size: a session has one grid and whoever is
-typing owns it (see the shared-PTY note in `TERAX.md`). Attaching states the
-phone's preferred grid; watching never moves the PTY, but the **first keystroke
-claims the session** and the server applies that grid, then repaints the TUI.
-The parser follows whatever grid the owner is using, via the `resized` message.
+## 滚动
 
-Leaving the alternate screen folds the program's final screen into the history
-through the same parse as any frame — furniture stripped, echoes marked — rather
-than appending it raw, which used to leak the input box, the status line and
-echoed messages into the output as anonymous AI.
+渲染时是否把视图拉到底部，**由读者决定，而且只在手势中改变**：往上滑就脱离，滑回底部就重新吸附。
 
-### Permission dialogs and numbered choices
+这件事不能靠渲染时测量滚动位置来推断。会话流在输出到达时被重建，容器内容被替换的一瞬间高度塌陷、浏览器把 `scrollTop` 钳小；下一次测量就会读成"贴着底部"，无论读者往上翻了多远，视图都会被拽回去。布局抖动动不了显式状态，因为抖动不是手势。
 
-A bottom-docked permission / option dialog (Claude's "Do you want to proceed? /
-`1. Yes` / `2. Yes, and don't ask again for …` / `3. No`) renders as ordinary
-output blocks — the numbered menu is visible and the `1`/`2`/`3` keys work.
-The footer split never touches it: a dialog box border is a rule above the
-`FOOTER_WINDOW`, so it is content, not a status rule. Verified live against a
-real Claude Code Bash-permission prompt for a subagent.
+脱离底部时会出现「回到最新」按钮，否则翻上去就没有回来的路。有三处滚动是**故意**的、无条件吸底：发送消息之后、回答菜单之后、软键盘改变视口之后。
 
-## Test tooling
+## 测试工具
 
-Three scripts exercise the parser and the real page against a live dev
-instance (no password needed — the auth cookie is decoded from the same
-XOR-obfuscated constant the Rust side embeds):
+对着运行中的开发实例驱动解析器和真实页面（不需要密码，认证 cookie 由 Rust 侧嵌入的同一个混淆常量解出）：
 
-- `scripts/web-capture.mjs` — drive the WebSocket: `list`, or `drive <leaf>
-  <scenario.json> <out.jsonl> <timeout>` that attaches (with `opening` retry
-  for cold leaves), types scenario steps, and records every text message and
-  output frame (with timestamps and the user's sends) to a JSONL.
-- `scripts/web-replay.mjs` — replay a capture through the exact `Conversation`
-  the page uses (bundled by `scripts/convo-test.config.mjs`), driving
-  setGrid + writeSeed/writeBacklog like `main.ts` (a capture taken since the
-  seed rework carries `seed: true` on `attached`; older ones replay the raw
-  ring). `--trace` prints live blocks as they change, along with the working
-  state, mode and choices; useful for watching a transient permission menu.
-- `scripts/web-synthetic-test.mjs` — feed constructed alt-screen frames (claude
-  permission dialogs, `1/2/3` option lists, an exit prompt, a startup splash)
-  through the parser and assert they render the way they should. This is the
-  regression net for the menu/banner/echo rules.
-- `scripts/e2e-phone.mjs` — Playwright against the real page: cookie auth,
-  session list (items carry `data-leaf`), attach, and either TUI bubbles or a
-  sent-message round trip.
+- `scripts/web-capture.mjs` - 驱动 WebSocket：`list`，或 `drive <leaf> <scenario.json> <out.jsonl> <timeout>`，连接（对冷标签页会走 `opening` 重试）、按脚本输入、把每条文本消息和输出帧连同时间戳录成 JSONL。
+- `scripts/web-replay.mjs` - 把录制回放进页面用的同一个 `Conversation`（由 `scripts/convo-test.config.mjs` 打包）。`--trace` 会在实时块变化时打印，连同进行状态、模式和选项，适合观察一闪而过的权限菜单。
+- `scripts/web-synthetic-test.mjs` - 用构造的 alt 屏帧喂解析器并断言渲染结果。这是菜单、启动画面、回显规则的回归网，也是唯一不需要跑起应用就能跑的测试。
+- `scripts/e2e-phone.mjs` - 用 Playwright 驱动真实页面：cookie 认证、会话列表、连接，以及 TUI 气泡或一次发送往返。
 
-The real sessions were captured by driving the actual `opencode` and `claude`
-CLIs through the bridge, then replayed to check every case the parser must
-survive: continuous multi-turn conversation, tool calls, the exit / session-
-save prompt, Claude Code's trust dialog, permission approval by number, long
-backlogs, and shared desktop+phone use at the same time.
+## 边界
 
-## Bounds
+- 解析器滚动缓冲 5000 行；滚出 4000 行之后回收解析器（`term.clear()`）。超过这个点 xterm 会开始裁剪，每个缓冲区下标都会平移，会悄悄让读游标失效。已经发出的行都在 `turns` 里，所以回收不花什么代价。
+- 保留的会话上限 4000 行（`MAX_LINES`），超出丢最老的轮次。
+- 输出以 60 毫秒合并；安静 700 毫秒后当前块关闭，下一件事另起一块。
+- 渲染排在 `requestAnimationFrame` 上，`document.hidden` 时退回定时器：后台标签页里 rAF 根本不触发，而手机一锁屏就把标签页放到后台。
 
-- Parser scrollback 5000 rows; the parser is recycled (`term.clear()`) once
-  4000 rows have scrolled off. Past that point xterm starts trimming and every
-  buffer index shifts, which would silently strand the read cursor. Rows already
-  emitted live in `turns`, so recycling costs nothing.
-- Retained transcript capped at 4000 rows (`MAX_LINES`), oldest turns dropped.
-- Output is coalesced on a 60 ms timer; a block closes after 700 ms of quiet so
-  the next thing sent starts its own.
-- Rendering is queued on `requestAnimationFrame`, falling back to a timer when
-  `document.hidden` — rAF never fires in a background tab, and phones background
-  one the moment the screen locks.
+## 诊断
 
-## Diagnostics
+`window.conv` 就是活的 `Conversation`。`conv.stats` 统计 alt 屏帧数和其中被识别为滚动的次数；帧数在涨而 `scrolls` 停在 0，说明屏幕的重绘方式是 `detectScroll` 不认识的，历史正在丢失。当初抓到"尾部空白"那个 bug 的就是这个计数器（158 帧 / 0 次滚动）。
 
-`window.conv` is the live `Conversation`. `conv.stats` counts alternate-screen
-frames and how many were recognised as scrolls; frames climbing while `scrolls`
-stays at 0 means the screen is being repainted in a way `detectScroll` does not
-recognise, and history is being lost. That counter is what caught the
-trailing-whitespace bug (158 frames, 0 scrolls).
+## 另见
 
-## Verified and not
-
-Verified against real sessions: opencode continuous conversation (user bubbles,
-tool calls, replies, exit / save prompt that survives the splash filter);
-Claude Code startup detection, welcome screen, trust dialog (`❯ 1. Yes, I
-trust this folder / 2. No, exit`), permission approval by number, and
-continuous multi-turn conversation; shell send/receive with echo stripping;
-startup notes for both tools; backlog reconstruction across a page reload
-(shell session); backlog reconstruction for an alternate-screen session — a
-synthetic session that scrolls 120 lines now recovers the full transcript as
-history, and a real 81 KiB OpenCode backlog replayed through `Conversation`
-reconstructs the shell portion that preceded the agent and keeps the user's
-last message as a bubble instead of folding it into the status label; the
-grid-ownership handshake (the first keystroke moves the grid, and xterm's
-protocol answers — focus reports, OSC 4 palette replies — no longer steal it
-back); and a desktop user typing in the same session while the phone watched,
-with both ends staying coherent. End-to-end Playwright passes against the real
-page for both a shell session and a live opencode TUI.
-
-Not verified: a real Claude Code *permission dialog* rendering live on the
-phone — this machine's Claude is configured `permissions.defaultMode: "auto"`,
-so it never asks. The approval flow works, and the rendering path for a
-bottom-docked numbered menu is covered by the synthetic tests instead.
-— **updated (2026-08-19)**: running Claude with a workspace `defaultMode:
-"default"` settings file does make it ask, and the real Bash-permission prompt
-for a subagent (with the `1. Yes / 2. Yes, and don't ask again / 3. No` menu)
-was captured end to end on the phone page — the menu renders as visible blocks
-and `1` approves. Also verified live: Claude Code's running subagent tab
-(`Explore 查找 README 相关内容  0s`) is extracted by position into the
-independent `#agents` chip strip above the composer.
-
-Known gap: backlog restored on attach arrives as one output block and is **not**
-split into user/assistant bubbles. The page has no record of what was sent
-before it connected, so `markEchoes` has nothing to match against.
+- [Web 终端桥接](web-terminal-bridge.md) - 传输、认证与 transcript 的取回
+- [已知问题](../issues.md) - 这个子系统的 bug 记录与取舍

@@ -52,15 +52,26 @@ export function useSpacesBoot({
 
     void (async () => {
       try {
+        // Hydrate preferences on EVERY boot, not only on a first run.
+        //
+        // This used to sit inside the `spaces.length === 0` branch below, so
+        // any installation that had ever saved a workspace never initialised
+        // the store: it stayed on DEFAULT_PREFERENCES for the life of the
+        // window, and - because `init` is also what registers the change
+        // listener - no setting written anywhere ever reached it. Around three
+        // dozen places in the main window read this store, and every one of
+        // them was pinned to a default. It went unnoticed because the two most
+        // visible consumers do not use the store: the settings window calls
+        // `init` itself, and ThemeProvider reads `loadPreferences()` directly.
+        await usePreferencesStore
+          .getState()
+          .init()
+          .catch(() => {});
+
         const { spaces, activeId, states } = await loadAll();
 
         if (spaces.length === 0) {
           const root = launchCwd ?? home ?? null;
-          // Hydrate prefs before reading the saved workspace env.
-          await usePreferencesStore
-            .getState()
-            .init()
-            .catch(() => {});
           const meta: SpaceMeta = {
             id: DEFAULT_SPACE_ID,
             name: "Default",

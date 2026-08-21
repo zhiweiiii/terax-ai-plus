@@ -1,4 +1,5 @@
 import { type Block, Conversation, type Turn } from "./conversation";
+import { renderMarkdown } from "./markdown";
 import "./style.css";
 
 // ── WebSocket wire protocol (see src-tauri/src/modules/web/mod.rs) ──────
@@ -141,6 +142,7 @@ app.innerHTML = `
     </div>
   </div>
   <div class="composer">
+    <button id="to-bottom" class="to-bottom" hidden>回到最新 ↓</button>
     <div id="thinking" class="thinking" hidden></div>
     <div id="choices" class="choices" hidden></div>
     <div id="progstatus" class="progstatus" hidden></div>
@@ -183,6 +185,7 @@ const pendingEl = $("#pending") as HTMLDivElement;
 const progStatusEl = $("#progstatus") as HTMLDivElement;
 const agentsEl = $("#agents") as HTMLDivElement;
 const thinkingEl = $("#thinking") as HTMLDivElement;
+const toBottomEl = $("#to-bottom") as HTMLButtonElement;
 const choicesEl = $("#choices") as HTMLDivElement;
 
 // ── Rendering ────────────────────────────────────────────────────────────
@@ -212,7 +215,7 @@ const conv = new Conversation(() => {
 const nodes = new Map<number, HTMLElement>();
 
 function render() {
-  const stick = isNearBottom();
+  const stick = pinnedToBottom;
   if (transcript) {
     renderTranscript(transcript);
   } else {
@@ -263,7 +266,10 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
   if (m.text) {
     const body = document.createElement("div");
     body.className = "turn-text";
-    body.textContent = m.text;
+    // Transcript text is the agent's raw Markdown, so render it as such. The
+    // screen path is left alone: what it carries is Markdown the TUI already
+    // drew.
+    renderMarkdown(body, m.text);
     node.appendChild(body);
   }
   // What the agent worked through before answering. Set apart rather than
@@ -275,7 +281,7 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
     const summary = document.createElement("summary");
     summary.textContent = "思考过程";
     const text = document.createElement("div");
-    text.textContent = m.reasoning;
+    renderMarkdown(text, m.reasoning);
     think.append(summary, text);
     node.appendChild(think);
   }
@@ -537,7 +543,7 @@ function paintChoices() {
         // keypress and do not wait for Enter.
         if (!writePty(c.key)) return;
         conv.noteSent(c.key);
-        scrollToBottom();
+        followToBottom();
       });
       return btn;
     }),
@@ -639,6 +645,51 @@ function scrollToBottom() {
   threadEl.scrollTop = threadEl.scrollHeight;
 }
 
+/** Whether new output should pull the view down with it.
+ *
+ *  Deciding this by measuring the scroll position at render time does not
+ *  work: the thread is rebuilt as output arrives, and while a container's
+ *  children are being replaced its height collapses and the browser clamps
+ *  `scrollTop`. The next measurement then reads as "at the bottom" however far
+ *  up the reader had scrolled, and the view yanks itself back down.
+ *
+ *  So it is decided by the reader instead, and only ever changed inside a
+ *  gesture: scroll away and it unpins, scroll back to the bottom and it pins
+ *  again. Layout churn cannot move it because churn is not a gesture. */
+let pinnedToBottom = true;
+/** Open while a gesture is in flight, so only measurements taken during one
+ *  count. */
+let gestureUntil = 0;
+const GESTURE_WINDOW_MS = 500;
+
+function noteScrollGesture() {
+  gestureUntil = Date.now() + GESTURE_WINDOW_MS;
+}
+
+threadEl.addEventListener("wheel", noteScrollGesture, { passive: true });
+threadEl.addEventListener("touchmove", noteScrollGesture, { passive: true });
+threadEl.addEventListener(
+  "scroll",
+  () => {
+    if (Date.now() > gestureUntil) return;
+    setPinned(isNearBottom());
+  },
+  { passive: true },
+);
+
+function setPinned(next: boolean) {
+  if (pinnedToBottom === next) return;
+  pinnedToBottom = next;
+  toBottomEl.hidden = next;
+}
+
+/** Pin and jump, for the moments that are always meant to land at the bottom:
+ *  sending a message, answering a menu, the keyboard changing the viewport. */
+function followToBottom() {
+  setPinned(true);
+  scrollToBottom();
+}
+
 // ── Soft keyboard ────────────────────────────────────────────────────────
 // iOS keeps the layout viewport at full height and shrinks only the visual
 // viewport, so the composer ends up behind the keyboard. Pin the app to the
@@ -652,7 +703,7 @@ if (viewport) {
     if (Math.abs(height - lastHeight) < 2) return;
     lastHeight = height;
     app.style.height = `${height}px`;
-    if (isNearBottom()) scrollToBottom();
+    if (pinnedToBottom) scrollToBottom();
   };
   viewport.addEventListener("resize", applyViewport);
   applyViewport();
@@ -969,7 +1020,7 @@ function submit() {
   // nothing - there is nothing anyone said.
   if (text.trim() === "") {
     writePty("\r");
-    scrollToBottom();
+    followToBottom();
     return;
   }
   // Whatever is on the other end — a shell, an agent, a REPL — the phone
@@ -981,7 +1032,7 @@ function submit() {
   if (transcript) awaitingTranscript.push(text);
   inputEl.value = "";
   autoGrow();
-  scrollToBottom();
+  followToBottom();
 }
 
 /** Grow the composer with its content, up to a few lines. */
@@ -1000,6 +1051,7 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
+toBottomEl.addEventListener("click", followToBottom);
 $("#btn-send").addEventListener("click", submit);
 $("#btn-list").addEventListener("click", openSheet);
 $("#btn-close-sheet").addEventListener("click", closeSheet);

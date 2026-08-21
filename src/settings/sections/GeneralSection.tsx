@@ -5,6 +5,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -21,7 +24,6 @@ import {
   setDefaultWorkspaceEnv,
   setExplorerGitDecorations,
   setRestoreWindowState,
-  setShowHidden,
   setTerminalCursorBlink,
   setTerminalCursorStyle,
   setTerminalFontFamily,
@@ -82,7 +84,6 @@ export function GeneralSection() {
 
   const autostart = usePreferencesStore((s) => s.autostart);
   const restoreWindowState = usePreferencesStore((s) => s.restoreWindowState);
-  const showHidden = usePreferencesStore((s) => s.showHidden);
   const explorerGitDecorations = usePreferencesStore(
     (s) => s.explorerGitDecorations,
   );
@@ -192,15 +193,6 @@ export function GeneralSection() {
       <div className="flex flex-col gap-2">
         <Label>文件浏览器</Label>
         <SettingRow
-          title="显示隐藏文件"
-          description="在文件浏览器和搜索中包含以点开头的文件与文件夹 (.env、.gitignore、.config)。"
-        >
-          <Switch
-            checked={showHidden}
-            onCheckedChange={(v) => void setShowHidden(v)}
-          />
-        </SettingRow>
-        <SettingRow
           title="Git 状态标记"
           description="在文件浏览器中为已改动的文件着色，并淡化被 gitignore 忽略的条目。"
         >
@@ -210,6 +202,8 @@ export function GeneralSection() {
           />
         </SettingRow>
       </div>
+
+      <WebPassword />
 
       <div className="flex flex-col gap-2">
         <Label>终端</Label>
@@ -487,6 +481,77 @@ function Label({ children }: { children: React.ReactNode }) {
     <span className="text-[11px] font-medium tracking-tight text-muted-foreground">
       {children}
     </span>
+  );
+}
+
+/** Set the password the phone bridge asks for.
+ *
+ *  The old password is not required to change it: whoever is at this machine
+ *  already has the terminals themselves, so asking would protect nothing. What
+ *  it does do is sign every phone out, because the session token is regenerated
+ *  with the password. */
+function WebPassword() {
+  const [value, setValue] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [custom, setCustom] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void invoke<boolean>("web_has_custom_password")
+      .then(setCustom)
+      .catch(() => setCustom(null));
+  }, []);
+
+  const mismatch = confirm !== "" && confirm !== value;
+  const canSave = value.length >= 6 && confirm === value && !busy;
+
+  const save = () => {
+    setBusy(true);
+    invoke("web_set_password", { password: value })
+      .then(() => {
+        setValue("");
+        setConfirm("");
+        setCustom(true);
+        toast.success("密码已更新，已登录的手机需要重新输入");
+      })
+      .catch((e) => toast.error(typeof e === "string" ? e : String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <Label>手机访问</Label>
+      <SettingRow
+        title="访问密码"
+        description={
+          custom === false
+            ? "当前使用内置的默认密码。设置一个自己的密码，并让已登录的手机重新登录。"
+            : "修改后，所有已登录的手机都需要重新输入密码。"
+        }
+      >
+        <div className="flex flex-col items-end gap-1.5">
+          <Input
+            type="password"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="新密码（至少 6 位）"
+            className="h-8 w-56"
+            autoComplete="new-password"
+          />
+          <Input
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            placeholder="再输入一次"
+            className={cn("h-8 w-56", mismatch && "border-destructive")}
+            autoComplete="new-password"
+          />
+          <Button size="sm" disabled={!canSave} onClick={save}>
+            {busy ? "保存中…" : "保存密码"}
+          </Button>
+        </div>
+      </SettingRow>
+    </div>
   );
 }
 

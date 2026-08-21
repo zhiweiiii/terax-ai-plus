@@ -1,36 +1,36 @@
-# Terax contributor documentation
+# 贡献者文档
 
-This directory holds long-form contributor and maintainer guides. `TERAX.md` at the repo root is the living architecture doc and the source of truth; these guides elaborate on specific areas without duplicating it.
+这个目录放长篇的贡献者与维护者指南。仓库根目录的 `TERAX.md` 是活的架构文档、也是事实来源；这些指南在不重复它的前提下展开具体领域。
 
-If a guide conflicts with `TERAX.md`, `TERAX.md` wins.
+指南与 `TERAX.md` 冲突时，以 `TERAX.md` 为准。
 
-## Documentation policy
+## 文档规定
 
-**Every change must be recorded in the docs before it is considered done.** All of the following go into the appropriate guide (and `TERAX.md` when it changes the architecture):
+**任何改动，写进文档之后才算完成。** 下面这些都要落进对应的指南（改动了架构的还要落进 `TERAX.md`）：
 
-- New features and behavior changes
-- Bug fixes and the reasoning behind them
-- Known anomalies, accepted trade-offs, and architectural debt
-- Security notes, ports, auth, and other operational details
+- 新功能与行为变化
+- Bug 修复，以及为什么这么修
+- 已知异常、明确接受的取舍、架构债
+- 安全相关、端口、认证等运维细节
 
-`docs/issues.md` is the audit log for bugs/risks/debt (numbered scan entries + the "Documentation drift" section); architecture guides capture how things are supposed to work. When you fix or add something, update both so a later maintainer can reconstruct what changed and why. If it's not in the docs, it didn't happen.
+`docs/issues.md` 是 bug / 风险 / 债务的审计记录，架构指南写"本来应该怎么运作"。修好或加上一样东西时两边都更新，让后来的维护者能重建出改了什么、为什么改。**没写进文档的，就当没发生过。**
 
-## Getting started
+## 从这里开始
 
-- [TERAX.md](../TERAX.md) - the architecture source of truth; read this first
-- [CONTRIBUTING.md](../CONTRIBUTING.md) - how to contribute, quality bar, project layout
+- [TERAX.md](../TERAX.md) - 架构事实来源，先读这个
+- [CONTRIBUTING.md](../CONTRIBUTING.md) - 如何贡献、质量标准、项目布局
 
-## Architecture guides
+## 架构指南
 
-- [Two-process model and IPC command reference](architecture/two-process-model.md) - Rust owns all OS access; the webview talks through `invoke()`. Command catalog and how to add a new command.
-- [PTY shell integration](architecture/pty-shell-integration.md) - PTY sessions, shell init scripts, OSC 7 / 133, ConPTY, CONPTY_LIFECYCLE_LOCK, Job Object, WSL.
-- [Web terminal bridge](architecture/web-terminal-bridge.md) - embedded HTTP + WebSocket server that shares desktop PTY sessions with a phone browser; auth, protocol, build pipeline.
-- [Mobile conversation view](architecture/mobile-conversation-view.md) - the phone renders a conversation, not a terminal: headless-xterm parsing, alt-screen scroll detection, bubble classification, backlog replay.
-- [Security model](architecture/security-model.md) - workspace authorization, IPC allowlist, OSC trust, and the web terminal auth boundary.
-- [Terminal renderer pool](architecture/terminal-renderer-pool.md) - slot pooling, the DormantRing, and the never-serialize-mid-command invariant.
-- [CLI control plane](architecture/cli-control.md) - bundled CLI, authenticated local protocol, caller targeting, packaging, and current platform limits.
-- [Known issues and architectural debt](issues.md) - documented bugs, risks, dead code, and docs drift.
+- [双进程模型与 IPC 命令参考](architecture/two-process-model.md) - Rust 掌管所有系统访问，webview 通过 `invoke()` 沟通。命令目录，以及如何新增一个命令。
+- [PTY shell 集成](architecture/pty-shell-integration.md) - PTY 会话、shell 初始化脚本、OSC 7 / 133、ConPTY、`CONPTY_LIFECYCLE_LOCK`、Job Object、WSL。
+- [Web 终端桥接](architecture/web-terminal-bridge.md) - 内嵌的 HTTP + WebSocket 服务，把桌面 PTY 会话共享给手机浏览器；认证、协议、构建流程，以及 agent transcript。
+- [手机端对话视图](architecture/mobile-conversation-view.md) - 手机渲染的是对话而不是终端：对话来自 agent 自己的记录，屏幕只负责它不可能知道的部分（正在等你选什么）。
+- [安全模型](architecture/security-model.md) - 工作区授权、IPC 白名单、OSC 信任边界，以及 Web 终端的认证边界。
+- [终端渲染器池](architecture/terminal-renderer-pool.md) - 槽位复用、DormantRing，以及"命令执行中绝不序列化"这条不变量。
+- [CLI 控制面](architecture/cli-control.md) - 随包分发的 CLI、带认证的本地协议、调用方定位、打包，以及当前的平台限制。
+- [已知问题与架构债](issues.md) - 记录在案的 bug、风险、死代码与文档漂移。
 
-## Porting history (archived)
+## 移植历史（归档）
 
-- [history/](history/README.md) - archived migration records (`porting-issues.md`, `移植进度.md`) from the Git/IDEA VCS porting batch. Historical only; they reference removed code and are kept for context.
+- [Git 版本管理移植档案](history/git-移植档案.md) - 版本管理功能来自 IDEA 的那批移植：留下的设计决策、有意接受的取舍、踩过的坑，以及还没做的备选清单。

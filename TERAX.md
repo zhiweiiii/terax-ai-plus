@@ -1,168 +1,164 @@
 # TERAX.md
 
-Terax loads `TERAX.md` from the workspace root as agent memory (similar to AGENTS.md / CLAUDE.md). This file is also the project's living architecture doc - read it before making changes.
+Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类似 AGENTS.md / CLAUDE.md）。这份文件同时是项目的活架构文档，动手之前先读它。
 
-## Project
+## 项目
 
-**Terax**: lightweight terminal-first development workspace. Tauri 2 + Rust (`portable-pty`) backend, React 19 + TypeScript + xterm.js (WebGL) client. A native PTY terminal with code editor, file explorer, source control with a git graph, web preview, and an embedded web terminal bridge that shares the same PTY sessions with a phone browser.
+**Terax**：轻量、终端优先的开发工作区。后端 Tauri 2 + Rust（`portable-pty`），客户端 React 19 + TypeScript + xterm.js（WebGL）。一个原生 PTY 终端，外加代码编辑器、文件资源管理器、带提交图的版本管理、网页预览，以及一个把同一批 PTY 会话共享给手机浏览器的内嵌 web 桥接。
 
-- Bundle id: `app.crynta.terax`
-- Package manager: **pnpm**
-- Platforms: **Windows only** (macOS / Linux support was removed)
-- Main binary: `terax-prod` (dev and release share the name; the hot-deploy and packaging scripts reference it)
-- Frontend checks: `pnpm lint`, `pnpm check-types`
-- Rust checks: `cd src-tauri && cargo clippy --all-targets --locked -- -D warnings` (tests were removed)
+- Bundle id：`app.crynta.terax`
+- 包管理器：**pnpm**
+- 平台：**仅 Windows**（macOS / Linux 支持已移除）
+- 主二进制：`terax-prod`（dev 与 release 同名，热部署和打包脚本都引用它）
+- 前端检查：`pnpm lint`、`pnpm check-types`
+- Rust 检查：`cd src-tauri && cargo clippy --all-targets --locked -- -D warnings`（测试已移除）
 
-## Quality bar
+## 质量线
 
-Production-grade or it does not ship. Every change is judged against all of these, not just "it works":
+达不到生产级就不发。每一处改动都用下面全部条目衡量，而不只是"能跑"：
 
-- **Correctness**: edge cases, failure modes, concurrent access. No "works for now".
-- **Performance**: ultra-lightweight is the product. ~7-8 MB bundle, high-performance terminal. For every change ask: how much RAM it costs, whether it adds IPC round-trips or redundant requests, whether it triggers extra re-renders or wasted work, whether it pulls a heavy dependency. Unused features consume zero resources.
-- **Security**: no critical security holes. Validate at every boundary (IPC, fs, network, the web terminal surface). The web terminal bridge is a remote shell: password-gated and never wide open.
-- **UI/UX**: polished, professional, premium. Every state and detail considered.
-- **Architecture**: new or changed logic lives in pure, dependency-light functions (functional core); tauri commands and React components stay thin (imperative shell).
+- **正确性**：边界情况、失败路径、并发访问。不接受"暂时能用"。
+- **性能**：极致轻量就是产品本身。约 7-8 MB 的包，高性能终端。每一处改动都要问：多花多少内存、有没有增加 IPC 往返或重复请求、会不会触发额外重渲染或无用功、是否拉进一个重依赖。没用到的功能必须零开销。
+- **安全**：不留严重漏洞。每个边界都校验输入（IPC、文件系统、网络、web 终端面）。web 终端桥接本质是远程 shell，必须有密码把关，绝不敞开。
+- **UI/UX**：精致、专业、有质感。每个状态和细节都要想过。
+- **架构**：新增或改动的逻辑放在纯函数、少依赖的地方（函数式内核）；Tauri 命令和 React 组件保持薄（命令式外壳）。
 
-Verify before claiming done:
+声称做完之前先验证：前端跑 `pnpm lint` + `pnpm check-types`，Rust 跑 `cargo clippy --all-targets --locked -- -D warnings`。
 
-- Frontend: `pnpm lint`, `pnpm check-types`
-- Rust: `cd src-tauri && cargo clippy --all-targets --locked -- -D warnings`
+## 约定
 
-## Conventions
+- **注释**：默认不写，代码要能自己说清楚。确实需要时写 1-2 行解释**为什么**，绝不写**是什么**。不要 AI 味的填充话。代码与注释一律英文。
+- **任何地方都不用 em-dash**：代码、注释、提交信息、文档。
+- **任何地方都不用 emoji。**
+- **导入**：前端一律 `@/...`，跨模块绝不用相对路径。
+- **只用 pnpm**，绝不 npm / npx / yarn。
 
-- **Comments**: default to none, the code should explain itself. If genuinely needed, 1-2 lines on *why*, never *what*. No AI-generic filler.
-- **No em-dash** anywhere: code, comments, commits, docs.
-- **No emojis** anywhere.
-- **Imports**: always `@/...` on the frontend, never relative across modules.
-- **pnpm only**, never npm/npx/yarn.
+## 架构
 
-## Architecture
+### 双进程模型
 
-### Two-process model
+**Rust（`src-tauri/`）掌管全部系统访问。** webview 从不直接碰文件系统、进程或 shell，一切都通过 `invoke()` 调用注册在 `src-tauri/src/lib.rs` 的命令：
 
-**Rust (`src-tauri/`)** owns all OS access. The webview never touches the FS, processes, or shells directly - everything goes through `invoke()` calls to commands registered in `src-tauri/src/lib.rs`:
+- `pty::pty_*` - 长生命周期的交互式 PTY 会话（xterm + portable-pty），由 `PtyState`（`RwLock<HashMap<id, Session>>`）管理。输出通过回调流向前端接好的 Tauri `Channel`；web 桥接订阅同一批会话。
+- `fs::tree::*`（`fs_read_dir`、`list_subdirs`）、`fs::file::*`（`fs_read_file`、`fs_write_file`、`fs_stat`、`fs_canonicalize`）、`fs::mutate::*`（`fs_create_file`、`fs_create_dir`、`fs_rename`、`fs_delete`）：资源管理器与编辑器的 IO。
+- `fs::search::*`（`fs_search`）、`fs::grep::*`（`fs_grep_interactive`）：模糊文件查找与内容搜索（基于 `ignore` + `grep-*` crate）。
+- `git::commands::*`：完整的版本管理面（status / diff / stage / commit / fetch / pull / push / log / show 等），全部经工作区授权表把关。
+- `transcript::*`：编码 agent 究竟说了什么，读自 agent 自己的记录而不是从屏幕上解析。Claude Code 读 `~/.claude/projects/<转义cwd>/<session>.jsonl`，opencode 读 `~/.local/share/opencode/opencode.db`（SQLite，只读）。归一成同一结构后经 web 桥接推给手机。`rusqlite`（bundled）只为这一件事存在。详见 `docs/architecture/web-terminal-bridge.md`。
+- `shell::shell_run_command`：一次性子 shell 执行（worktree 功能用），与 PTY 会话无关，不是用户的交互终端。Windows 上走 PowerShell（`-NoProfile -Command`）。
+- `workspace::*`：`workspace_authorize` / `workspace_current_dir`（启动与 git 的 cwd 授权表），外加 WSL 桥（`wsl_list_distros`、`wsl_default_distro`、`wsl_home`）。
+- `lsp::*`：语言服务器进程宿主。一根笨的 JSON-RPC 管道：Content-Length 分帧与进程生命周期在 Rust（`lsp/framing.rs`），协议智能在前端。启动 cwd 经授权表把关；服务器跑在自己的进程组里并整组杀掉，Windows 子进程带 `proc::job::ProcessJob`。`RunEvent::Exit` 时全部杀掉。
+- `secret::secret_protect` / `secret_unprotect`：Windows DPAPI 加解密，IPC 上走 base64。agent 环境变量里的 token 靠它落盘，明文不进设置文件。
+- `web::*`（`web::start`、`web::stop`、`web::web_status`、`web_set_password`、`web_has_custom_password`、`web_snapshot_reply`）：内嵌 HTTP + WebSocket 服务，见下。
+- `open_settings_window`：设置的独立 webview 窗口（可选 `tab` 参数深链到某一节）。
 
-- `pty::pty_*` - long-lived interactive PTY sessions (xterm + portable-pty), managed by `PtyState` (`RwLock<HashMap<id, Session>>`). Output streams via callbacks wired to a Tauri `Channel` by the frontend; the web terminal bridge subscribes to the same sessions.
-- `fs::tree::*` (`fs_read_dir`, `list_subdirs`), `fs::file::*` (`fs_read_file`, `fs_write_file`, `fs_stat`, `fs_canonicalize`), `fs::mutate::*` (`fs_create_file`, `fs_create_dir`, `fs_rename`, `fs_delete`): file explorer + editor IO.
-- `fs::search::*` (`fs_search`), `fs::grep::*` (`fs_grep_interactive`): fuzzy file finder + content search (powered by `ignore` + `grep-*` crates).
-- `git::commands::*`: full source-control surface (`git_status`, `git_diff`, `git_diff_content`, `git_stage`, `git_unstage`, `git_discard`, `git_commit`, `git_fetch`, `git_pull_ff_only`, `git_push`, `git_log`, `git_show_commit`, `git_commit_files`, `git_commit_file_diff`, `git_panel_snapshot`, `git_resolve_repo`, `git_remote_url`). All gated through the workspace authorization registry.
-- `transcript::*`: what a coding agent actually said, read from the agent's own record rather than parsed off its screen. Claude Code from `~/.claude/projects/<escaped cwd>/<session>.jsonl`, opencode from `~/.local/share/opencode/opencode.db` (SQLite, read-only - its TUI opens no port and `opencode export` costs a process per read). Normalised into one shape (turns, reasoning, tools, mode, model, whether a turn is running) and pushed to the phone over the web bridge. `rusqlite` (bundled) is here for this and nothing else. See `docs/architecture/web-terminal-bridge.md` § Agent transcript.
-- `shell::shell_run_command`: one-shot subshell exec (used by the VCS worktree feature). Distinct from PTY sessions; not the user's interactive terminal. On Windows via PowerShell (`-NoProfile -Command`).
-- `workspace::*`: `workspace_authorize` / `workspace_current_dir` (the spawn/git cwd authorization registry) plus the WSL bridge (`wsl_list_distros`, `wsl_default_distro`, `wsl_home`).
-- `lsp::*` (`lsp_detect`, `lsp_host_pid`, `lsp_resolve_root`, `lsp_spawn`, `lsp_send`, `lsp_kill`): language server process host. Dumb JSON-RPC pipe: Content-Length framing + process lifecycle in Rust (`lsp/framing.rs`), protocol intelligence on the frontend. Spawn cwd gated through the workspace registry. Servers run in their own process group and are group-killed; Windows children get a `proc::job::ProcessJob` (kill-on-close, shared with pty). All sessions killed on `RunEvent::Exit`.
-- `open_settings_window`: separate webview window for Settings (optional `tab` arg deep-links a section).
-- `web::*` (`web::start`, `web::stop`, `web::web_status`): embedded HTTP + WebSocket server (see "Web terminal bridge" below). Serves the mobile terminal page, accepts WebSocket sessions, syncs desktop terminal tabs to the phone, and reports connection count / running state / failed logins for the status bar.
+### Web 终端桥接（`src-tauri/src/modules/web/`）
 
-### Web terminal bridge (`src-tauri/src/modules/web/`)
+内嵌在桌面应用里的 HTTP + WebSocket 服务，把同一批 PTY 会话暴露给手机。完整说明见 `docs/architecture/web-terminal-bridge.md` 与 `docs/architecture/mobile-conversation-view.md`。要点：
 
-A self-contained HTTP + WebSocket server embedded in the desktop app exposes the same PTY sessions to a phone / another machine. It is a plain-browser experience, not a Tauri webview.
+- **端口**：dev 绑 `34269`，release 绑 `34268`（`cfg!(debug_assertions)`），两者可并存。
+- **页面**：`GET /` 返回构建期内嵌的单文件手机页。它是**对话视图，不是终端**：桌面 138-192 列的网格塞进约 335px 视口，要么 3px 字号要么左右拖动，所以干脆不渲染网格。一个无头 xterm（从不 `open()`，不加载渲染器）按 PTY 网格解析字节流，逻辑行读回来后按手机宽度重新折行成气泡。`scripts/build-web.mjs` 跑独立的 vite 构建并把结果内联进 `src-tauri/web.html`，由 Rust `include_str!` 嵌入；桌面构建脚本会自动先跑它。
+- **认证**：没有 `terax_web` cookie 时 `GET /` 返回密码登录页；`POST /auth`（密码在请求体，绝不放查询串）用 **Argon2id** 校验，限速（连续 5 次失败锁定 5 秒），成功后下发 `Max-Age=604800` 的 cookie。WebSocket 升级同样校验，未认证返回 403。凭据存在 `%LOCALAPPDATA%/terax/web-auth.json`，**改密码会轮换会话令牌**，否则旧 cookie 照样能进。页面 bundle 里没有任何凭据。
+- **状态指示**：状态栏右下角通过 `web_status` 显示监听状态、实时连接数、连续登录失败数（每 2 秒轮询同一批原子量）。
+- **共享 PTY**：web 观看者订阅与桌面相同的 `Arc<Session>`，两端输入输出一致。**Rust 侧不存储任何会话输出**：手机连上时看到的首屏是**桌面终端自己的缓冲区**，经 `terax:web-snapshot` / `web_snapshot_reply` 现向窗口索取。以前那个 256 KiB 历史环已删除，第二份副本必然和桌面显示的内容分叉。
+- **一个会话一个网格，谁在打字谁拥有它**（`SizeOwner` / `claim` / `request_grid`）。手机不声明网格所以永不 claim，从手机打字不会让桌面屏幕重排。桌面只在真实按键时收回所有权，xterm 的协议应答（焦点上报、OSC 4 回复）刻意不 claim。
+- **Agent transcript**：附着的会话里跑着编码 agent 时，服务端推 `{type:"transcript"}`，内容读自 agent 自己的记录。手机据此渲染对话，屏幕解析只保留一件 transcript 不可能知道的事：**程序此刻在等你选什么**。三道闸门让空闲会话零开销：必须真有 agent 在跑（`Session::web_agent`，由 OSC 检测喂）、文件指纹必须变过、revision 必须变过。700ms 轮询而不是监听，因为 opencode 的提交落在 WAL 里，没有文件系统事件能描述它。
+- **标签同步**：`App.tsx` 的 `useWebTerminalSync` 把每个桌面终端标签同步给 Rust（`web_sync_tabs`），所以手机能列出全部命令行而不只是有活 PTY 的。手机连一个还没起 pty 的标签时，服务端发 `terax:web-activate`，前端激活该标签，手机收到 `opening` 后重试。
 
-- **Ports**: dev builds listen on `34269`, packaged (release) builds on `34268` (`cfg!(debug_assertions)`).
-- **Page**: `GET /` serves a single-file mobile page embedded at build time. It is a **conversation view, not a terminal** — the desktop's 138–192 column grid inside a ~335 px viewport forces either a 3 px font or horizontal panning, so no grid is rendered at all. A headless xterm (never `open()`ed, no renderer loaded) parses the stream at the PTY grid; logical lines are read back out and re-wrapped at the phone's width as bubbles. Alternate-screen programs (claude, opencode) are handled by diffing successive frames to detect scrolling and collecting what falls off the top. See `docs/architecture/mobile-conversation-view.md`. `scripts/build-web.mjs` runs a dedicated vite build (`vite.web.config.ts`) and inlines the result into `src-tauri/web.html`, which is `include_str!`'d by the Rust server. The desktop build (hot-deploy and packaging scripts) runs it automatically before compiling.
-- **Auth**: `GET /` returns a password login page (title "请输入密码") when the visitor has no `terax_web` cookie; `POST /auth` (password in the body, never a query string) validates against a server-side SHA-1 digest with constant-time compare, is rate-limited (5 consecutive failures → 5 s lockout), and sets the cookie with `Max-Age=604800`. The WebSocket upgrade rejects unauthenticated clients with 403. The password digest lives only in Rust, never in the page bundle.
-- **Status indicator**: the desktop status bar's bottom-right corner shows the service health via the `web_status` command (`src/modules/statusbar/WebStatusBadge.tsx`, polled every 2 s): green dot when listening, router icon + live connection count, amber key icon + consecutive failed logins. The command reads the same atomics the server maintains (`RUNNING`, `CONNECTIONS`, `FAILED_LOGINS`).
-- **WebSocket protocol** (`/ws`): client sends `{"attach":<leafId>}` (no grid: the phone renders none, so it never claims the shared PTY's size) or `{"list":true}` as the first text frame; input is binary `'0'+bytes` (the first keystroke claims the session and applies the phone's preferred grid), resize is binary `'1'+JSON{cols,rows}`. Server pushes binary `'0'+bytes` (terminal output, the seed frame first; non-blocking reads poll for complete frames on a 10 ms cadence so watch-only phones keep receiving and are never dropped for idling), `'1'+bytes` (title), and text `{type:"sessions"|"attached"|"opening"|"resized"|"exit"|"error"}` - `attached` carries the actual `cols/rows`, the `alt` flag and `seed` (whether a seed frame follows), `resized` is broadcast whenever the shared grid changes. Framing is a minimal RFC 6455 implementation (handshake + frame codec) because the crate has no HTTP/WS framework; messages are capped at 1 MiB, concurrent connections at 8, the server PINGs every 30 s, and a peer silent for 90 s is dropped.
-- **Agent transcript**: while a coding agent runs in the attached session, the server pushes `{type:"transcript"}` with the conversation read from the agent's own record (`transcript` module) - turns, the agent's reasoning, the tools it ran, the mode and the model. The phone renders that as the conversation and stops reading the screen for it; the screen parse stays only for the one thing no transcript records, the menu the program is waiting on. Gated three ways so an idle session costs nothing: an agent must actually be running (`Session::web_agent`, fed by the OSC detection), a filesystem mark must have moved, and the revision must have changed. Polled at 700 ms because opencode's commits land in a WAL that no fs event describes.
-- **Seeding a viewer**: what a phone shows on attach is **the desktop terminal's own buffer**, fetched from the window on demand - the server subscribes first, emits `terax:web-snapshot`, and the desktop answers via `web_snapshot_reply` with `snapshotLeaf(leafId)` (a live slot is serialized through `SerializeAddon`; a parked leaf answers from its stored snapshot plus `DormantRing.peek`). Nothing on the Rust side stores session output: the 256 KiB history ring is gone. A second copy inevitably drifted from what the desktop showed (it outlived a `clear`, and it was bounded in bytes where a terminal is bounded in lines), so the phone opened on records the desktop no longer had. See `docs/architecture/web-terminal-bridge.md` § Seeding a viewer.
-- **Shared PTY**: Web viewers subscribe to the same `Arc<Session>` as the desktop (`Session::web_subscribe`), so input and output are identical on both ends. The flusher thread broadcasts every chunk to attached Web clients and keeps no copy of it. **One session has one grid, and whoever is typing owns it** (see `SizeOwner` / `claim` / `request_grid` in the pty module). The phone states no grid and so never claims one: the PTY stays exactly as the desktop has it, and typing from the phone does not reflow the desktop's screen under a program laid out for it. The desktop reclaims only on real keystrokes - xterm's protocol answers (focus reports `ESC[I/O`, OSC 4 palette replies to the TUI's query) are forwarded to the PTY but deliberately do not claim, or a watched session ping-pongs between the two ends' sizes after every claim (`looks_like_protocol_response`). A 3 s `OWNER_COOLDOWN` damps handover races. The byte stream is laid out against the owner's grid (app wrapping, `\r` redraws, absolute cursor moves), so the phone *parses* at exactly that grid - `attached` carries it **before** the seed so the parser is sized first - but *renders* no grid at all; it extracts logical lines and re-wraps them. Each connection subscribes with its own `SyncSender` and disconnect removes exactly that subscription; a viewer that falls behind is evicted and told to resubscribe.
-- **Tab sync**: the frontend (`useWebTerminalSync` in `App.tsx`) syncs every desktop terminal tab (`web_sync_tabs`) so the phone lists all command lines, not just ones with a live PTY. When the phone attaches to a tab with no pty yet, the server emits `terax:web-activate`; the frontend activates that tab (spawning the pty) and the phone retries via the `opening` message. `pty_open` records the leaf to pty mapping (`web_sync_leaf_pty`).
+### PTY shell 集成
 
-### PTY shell integration
+PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pty-shell-integration.md`。
 
-PTY shells are bootstrapped via an injected init script:
+- **Windows**（`profile.ps1`）：以 `pwsh -NoLogo -NoExit -ExecutionPolicy Bypass -File <path>` 传入。它在用户的 `$PROFILE` 跑完之后包住其 `prompt` 函数，让它发出 OSC 7 + OSC 133 A/B/D。shell 优先级 `pwsh.exe`（PS 7+）-> `powershell.exe`（PS 5.1）-> `cmd.exe`（无集成）。
+- **PATH 命中项必须是非零长度的文件**（`is_real_executable`）。微软商店的应用执行别名是 0 字节重解析点，Explorer 会替你解析而 `CreateProcessW` 不会，而它在从 Explorer 继承的 PATH 里排在真正的 PowerShell 7 前面。打包版因此启动了它，每个终端打开即死。
+- cwd 传给 ConPTY 之前必须规范成反斜杠（`CreateProcessW` 遇正斜杠会出问题）。
+- ConPTY 要求 `session.rs` 里的 `CONPTY_LIFECYCLE_LOCK` 包住 `openpty + spawn_command`。并发启动会让其中一个 PTY 的输出管道停摆。**不验证"快速狂开标签页时首个标签是否稳定"就不要移除这把锁。**
+- 每个 ConPTY 子进程都进一个带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object（`modules/proc/job.rs`）。Job 句柄一落地（正常退出、panic、甚至 Terax 被强杀），内核就会杀掉这个 shell 的全部后代。没有它 Windows 会把整棵子进程树变孤儿，因为 `TerminateProcess` 只杀直接子进程。
+- 编码 agent 检测在 Rust 侧（`pty/agent_detect.rs`）跑在 reader 的字节过滤器上，发出 `terax:agent-signal` 状态转换，**只由 OSC 序列驱动**（绝不看原始输出，所以不断重绘的 TUI 不会让状态来回跳），没有 agent 时零开销。前端 store 在 `terminal/lib/agentActivity.ts`，`App.tsx` 的 `findClaudeLeaf` 据此把"发送到 Claude Code"路由到正在跑 agent 的面板。
 
-- **Windows** (`profile.ps1`) - passed via `pwsh -NoLogo -NoExit -ExecutionPolicy Bypass -File <path>`. Wraps the user's existing `prompt` function (after their `$PROFILE` runs) to emit OSC 7 + OSC 133 A/B/D. Shell priority: `pwsh.exe` (PS 7+) -> `powershell.exe` (PS 5.1) -> `cmd.exe` (no integration). A PATH hit only counts when it is a **non-zero-length** file (`is_real_executable`): a Microsoft Store app-execution alias is a 0-byte reparse point that Explorer resolves but `CreateProcessW` does not, and it sits ahead of `C:\Program Files\PowerShell\7` in the PATH inherited from Explorer, so the packaged build spawned it and every terminal opened dead. cwd is normalized to backslashes before being passed to ConPTY (`CreateProcessW` misbehaves with forward-slash cwd).
+### 前端（`src/`）
 
-ConPTY on Windows requires `CONPTY_LIFECYCLE_LOCK` (Mutex) around `openpty + spawn_command` in `session.rs`. Concurrent spawns leave one of the resulting PTYs with a stalled output pipe. Don't remove the lock without verifying first-tab stability under fast tab spam.
+单窗口 React 应用，路径别名 `@/*` -> `src/*`。标签是一个带 tag 的联合类型（`kind`：`terminal` | `editor` | `preview` | `markdown` | `git-diff` | `git-history` | `git-commit-file`），切换时**不卸载**，而是靠 `invisible pointer-events-none` 隐藏，这样 PTY 和开发服务器在后台继续输出。
 
-Each ConPTY child is also assigned to a per-session **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`modules/proc/job.rs`). When the Job HANDLE drops - clean shutdown, panic, or even SIGKILL'd Terax process - the kernel kills every descendant of the shell (e.g. `npm run dev` spawned from inside pwsh). Without this Windows orphans the entire process subtree because `TerminateProcess` only kills the immediate child.
+`App.tsx` 只负责把各模块接起来，保持它是协调者。新功能放进对应的 `modules/<area>/`。
 
-Terminal coding-agent detection lives Rust-side (`pty/agent_detect.rs`) on the PTY reader's byte filter, emitting `terax:agent-signal` transitions (`started`/`working`/`attention`/`finished`/`exited`) driven only by OSC sequences (never raw output, so a repainting TUI never flaps) - zero cost when no agent runs. Frontend store in `terminal/lib/agentActivity.ts`; `App.tsx`'s `findClaudeLeaf` uses it to route "Send to Claude Code" (explorer context menu `onAttachToAgent`, selection shortcut `selection.sendToAgent`) to the pane running the agent.
+### 模块布局（`src/modules/`）
 
-### Frontend (`src/`)
+每个模块自包含，通过 `index.ts` 导出一层薄 barrel，自己的 hook 放在 `lib/` 下。
 
-Single-window React app. Path alias `@/*` -> `src/*`. Tabs are a tagged union (`kind`: `terminal` | `editor` | `preview` | `markdown` | `git-diff` | `git-history` | `git-commit-file`) and **not** unmounted on switch - they're hidden via `invisible pointer-events-none` so PTYs and dev servers keep streaming in the background.
+- **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，上限 5）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
+- **editor/** - CodeMirror 6（`EditorStack` 与 `TerminalStack` 对称）。缓冲区活在 LF 空间，保存时还原原始 EOL（`lib/eol.ts` 多数投票检测）；缩进单位按文件检测（`lib/indent.ts`）。保存时用 `fs_read_file` / `fs_write_file` 返回的磁盘 mtime 做冲突检查（不一致时弹警告并要求显式覆盖，绝不静默 last-writer-wins）。超过 10 MB 的文件提供"仍然打开"（硬上限 50 MB），超过 4 MB 关掉语法高亮与 LSP。保存时格式化的实现在 `lib/externalFormat.ts`。编辑器字号单独存为 `editorFontSize`，不影响 `terminalFontSize`。
+- **explorer/** - 文件树，Material / Catppuccin 图标，键盘导航，行内重命名，右键操作。`basename` 认反斜杠。常驻搜索栏同时匹配**文件名**（模糊，`fs_search`）与**文件内容**（`fs_grep_interactive`）。工具栏的过滤按钮可开关"隐藏文件"与"git 忽略的文件"。定位按钮会展开当前文件的各级父目录并选中它，也能解析 git-diff / git-commit-file 标签（拼 `repoRoot` + 路径）。
+- **preview/** - 自动探测的开发服务器预览标签（状态栏发现 localhost URL 时提示打开）。
+- **tabs/** - `useTabs` 是标签列表与活动 id 的事实来源。`useWorkspaceCwd` 推导资源管理器根目录、新标签继承的 cwd，以及文件/版本/窗口三个侧栏跟随的当前终端标签。**文件标签归属某个命令行**：每个 editor / markdown 标签带 `ownerTabId` 指向它被打开时所在的终端标签，`capEditorTabs` **按归属**限流（每个终端标签 10 个，最老先驱逐，脏的/刚打开的/活动的保留）。归属信息在序列化和标签移动后仍然保留；关掉终端会让它的文件变成"未归属"。
+- **header/** - 顶栏与行内搜索。`WindowControls` 在 `USE_CUSTOM_WINDOW_CONTROLS` 为真时渲染（Windows 上恒真）。
+- **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 环境变量面板（临时写入 `$env:`，token 经 DPAPI 加密后存偏好）。
+- **shortcuts/** - 快捷键注册表（`shortcuts.ts`）+ `useGlobalShortcuts`。处理函数在 `App.tsx` 里按 id 传入。平台修饰键用 `metaKey || ctrlKey`。
+- **settings/** - 设置 store（`store.ts`，基于 `tauri-plugin-store`）、偏好 hook、设置窗口打开器。**`usePreferencesStore.init()` 必须在每次启动时都跑**，不能只在首次创建空间时跑，否则几十项主窗口设置会被钉死在默认值、且没有变更监听。
+- **sidebar/** - 活动栏与可折叠侧面板。打开的文件面板**按归属命令行分组**并跟随当前终端标签。git 标签（diff / history / commit-file）是仓库级的，与当前命令行无关，恒显示。
+- **source-control/** - git 状态 / 暂存 / 提交面板与 diff 流程。丢弃改动跑在文件自己的仓库根上（多仓库安全）；提交忙状态在预检查之前置上，按钮点击即有反应。
+- **git-history/** - 提交图轨道、引用、单提交文件 diff。
+- **lsp/** - 可选的语言服务器支持，不启用时零开销。`sessionManager.ts` 按 (server, workspace root) 索引会话，对打开的文档引用计数，闲置 3 分钟杀掉，崩溃退避。资源不变量：**没有根标记就不起会话**，每个 server 硬上限 4 个会话。客户端是懒加载的 `codemirror-languageserver` 子类。WSL 工作区暂不支持。
+- **markdown/** - Markdown 预览渲染器（支撑 `markdown` 标签）。
+- **workspace/** - 工作区环境切换（Local + WSL 发行版）。
+- **theme/** - 自研主题引擎（不用 `next-themes`）。`ThemeProvider` + `applyTheme` 写 CSS 变量；内置预设在 `themes/`，可各自声明配套的 `editorTheme`。用户主题走 `customThemes.ts` + `validateTheme.ts`，可选背景图走 `bgImageStore.ts` + `SurfaceLayer`。
+- **updater/** - 基于 `tauri-plugin-updater` 的自动更新 UI。
+- **command-palette/** - 命令面板。
+- **spaces/** - 工作区空间/项目（名称、根目录、环境、颜色、按空间持久化标签），走 `useSpaces` 与 `GroupSwitcher`。
 
-`App.tsx` wires modules together - keep it a coordinator. New features go inside the appropriate `modules/<area>/`.
+### UI 约定
 
-### Module layout (`src/modules/`)
+- **shadcn/ui** 已配置（`components.json`，图标库 **hugeicons**）。`src/components/ui/` 里的原语**不要手改**，升级请重跑 `pnpm dlx shadcn add`。
+- **AI Elements**（Vercel）在 `src/components/ai-elements/`，同样是重新生成而不是手工打补丁（目前只剩 `markdown-code` 被 Markdown 预览用）。
+- **Tailwind v4** - 没有 `tailwind.config.*`，配置在 `src/App.css` 的 `@theme` 里。用 `@/lib/utils` 的 `cn()`。
+- 可调整布局用 `react-resizable-panels`。
+- 路径导入一律 `@/...`，跨模块绝不相对路径。
+- 跨平台路径：凡是可能来自 OSC 7、资源管理器或操作系统的路径，用 `.split(/[\\/]/)` 而不是 `.split("/")` 拆分隔符。
+- **前端的规范路径形式是正斜杠。** `homeDir()` 在 Windows 上返回反斜杠，要在边界处转换（`App.tsx` 的 `setHome`）。OSC 7 到达时已经是正斜杠。规范字符串相等能让 `useFileTree` 在 `tab.cwd` 首次到达时不清空树、不闪烁。
 
-Each module is self-contained, exports a thin barrel via `index.ts`, and owns its hooks under `lib/`.
+### 窗口样式
 
-- **terminal/** - `TerminalStack` keeps one mounted xterm per tab via `useTerminalSession` + `pty-bridge`. `osc-handlers.ts` parses OSC 7 (with Windows drive-letter normalization: `/C:/Users/foo` -> `C:/Users/foo`) and OSC 133 markers. The xterm color palette is driven by the central theme engine (`modules/theme`), not a local table. Renderer slots are pooled (`rendererPool.ts`, max 5): a hidden leaf with a foreground job (OSC 133 C..D, agent signal, or `pty_has_foreground_job`) keeps its live grid parked with rendering paused via `display:none`; an idle hidden leaf releases its slot but the buffer is retained and serialized lazily only when another leaf steals it. The `DormantRing` (1 MiB, no terminal reset on overflow) buffers bytes only for leaves whose slot was stolen or never bound. Never serialize a leaf that is mid-command: replaying incremental TUI repaints over a snapshot is what used to wipe Claude Code.
-- **editor/** - CodeMirror 6 stack (`EditorStack` mirrors `TerminalStack`). `extensions.ts` configures language modes; supports vim mode. Buffers live in LF space and the original EOL (`lib/eol.ts`, majority-vote detection) is restored on save; indent unit/tab size are detected per file (`lib/indent.ts`). Saves are conflict-checked against the disk mtime returned by `fs_read_file`/`fs_write_file` (mismatch -> warning toast with explicit Overwrite, never silent last-writer-wins). Files over 10 MB offer "Open anyway" (hard cap 50 MB, `force` arg); above 4 MB syntax highlighting and LSP stay off. Format-on-save formatters live in `lib/externalFormat.ts` (`FORMATTERS` registry: biome, prettier, ruff, rustfmt, gofmt, clang-format, shfmt, zig fmt, plus a custom `{file}` command template); `resolveFormatter` applies per-language overrides (`editorFormatterByLang`) over the global default. Editor font size is stored separately as `editorFontSize` and does not affect `terminalFontSize`.
-- **explorer/** - file tree with Material/Catppuccin icons (`iconResolver.ts`), keyboard nav, inline rename, context actions. Backslash-aware `basename`. The persistent search bar (`ExplorerSearch`) matches **both file names** (fuzzy, via `fs_search`) and **file contents** (via `fs_grep_interactive`, same backend as Ctrl+Shift+P), showing matching lines with line numbers. The toolbar's locate button expands the active file's ancestor directories and selects it in the tree; it also resolves git-diff / git-commit-file tabs (joining `repoRoot` + path) so files opened from the git change panel are locatable.
-- **preview/** - auto-detected dev-server preview tab (status-bar pill suggests opening when a localhost URL is detected).
-- **tabs/** - `useTabs` is the source of truth for tab list + active id. `useWorkspaceCwd` derives the explorer root, inherited cwd for new tabs, and the current terminal tab that the file/version/window side panels follow. `basename` splits on both `/` and `\`.
-  - **File tabs belong to a command line**: each editor/markdown tab carries an `ownerTabId` pointing at the terminal tab it was opened from. `capEditorTabs` caps file tabs **per owner** (`MAX_EDITOR_TABS_PER_SPACE` = 10 per terminal tab, oldest evicted first, dirty / just-opened / active kept). Ownerless tabs fall back to a per-space bucket. The owner survives serialization (stored as a positional reference) and tab moves; closing a terminal detaches its files (they become "Unattached").
-- **header/** - top bar + inline search (`SearchInline` greps the workspace root via `fs_grep_interactive` with a results dropdown; `openContentHit` opens the file at line). `WindowControls` rendered when `USE_CUSTOM_WINDOW_CONTROLS` is true (always on Windows).
-- **statusbar/** - bottom bar, `CwdBreadcrumb` (handles Windows drive letters and home `~` segments via `pathUtils.segmentsFromCwd`).
-- **shortcuts/** - keymap registry (`shortcuts.ts`) + `useGlobalShortcuts`. Handlers live in `App.tsx` and are passed in by id (`tab.new`, `search.focus`, ...). `metaKey || ctrlKey` for the platform modifier (Ctrl on Windows).
-- **settings/** - settings store (`store.ts` via `tauri-plugin-store`), preferences hook, settings window opener.
-- **sidebar/** - activity bar + collapsible side panels (explorer, source control, open files). The open-files panel (`OpenFilesPanel`) groups files **by their owning command line** and follows the current terminal tab, so switching command lines switches the file list. Git tabs (diff / history / commit-file) are repo-level and always show in this panel regardless of the active command line.
-- **source-control/** - git status / stage / commit panel and diff workflow. Discards run against the file's own repo root (multi-repo safe); commit busy state goes up before the pre-commit checks so the button reacts on click.
-- **git-history/** - commit graph rail, refs, per-commit file diffs.
-- **lsp/** - opt-in language server support, zero cost until enabled. Statusbar pill offers Enable (binary found) or Install (with copyable command) per language; activation persists as `lspActivation` in the settings store. `sessionManager.ts` keys sessions by (server, workspace root), refcounts open docs, idle-kills after 3 min, and crash-backoffs. Resource invariants: **no root marker -> no session**, hard cap of 4 sessions per server. Client is `codemirror-languageserver` behind a lazy import, subclassed (`lib/client.ts`) to add didClose/didSave/shutdown, references, and the publishDiagnostics capability. `vscode-languageserver-protocol` is aliased to a small shim in vite.config.ts. WSL workspaces excluded for now.
-- **markdown/** - markdown preview renderer (backs the `markdown` tab kind).
-- **workspace/** - workspace environment switching (Local + WSL distros).
-- **theme/** - custom theme engine (no `next-themes`). `ThemeProvider` + `applyTheme` write CSS variables; built-in presets in `themes/`, each optionally declaring an `editorTheme` pairing. User themes via `customThemes.ts` + `validateTheme.ts`, optional background image via `bgImageStore.ts` + `SurfaceLayer`.
-- **updater/** - auto-updater UI built on `tauri-plugin-updater`.
-- **command-palette/** - modal command palette (`CommandPalette.tsx`, `commands.ts`) for actions and navigation.
-- **spaces/** - workspace spaces/projects (name, root, env, color, per-space tab persistence) via `useSpaces` and `GroupSwitcher`.
-
-### UI conventions
-
-- **shadcn/ui** is configured (`components.json`, icon lib **hugeicons**). Primitives in `src/components/ui/` - don't hand-edit; re-run `pnpm dlx shadcn add` to upgrade.
-- **AI Elements** (Vercel) live in `src/components/ai-elements/` from the `@ai-elements` registry in `components.json` (only `markdown-code` is still used, by the markdown preview). Same rule: regenerate, don't hand-patch.
-- **Tailwind v4** - no `tailwind.config.*`, config is in `src/App.css` via `@theme`. Use `cn()` from `@/lib/utils`.
-- Resizable layout: `react-resizable-panels`.
-- Path imports: always `@/...`, never relative across modules.
-- Cross-platform paths: anywhere a path may originate from OSC 7, the explorer, or the OS, normalize separators with `.split(/[\\/]/)` rather than `.split("/")`.
-- Canonical path form on the frontend is **forward-slash**. `homeDir()` returns backslashes on Windows; convert at the boundary (App.tsx setHome). OSC 7 already arrives as forward-slash. Equal canonical strings keep `useFileTree` from wiping its tree and flashing the explorer when `tab.cwd` first arrives.
-
-### Window styling
-
-- Windows: `decorations: false` + `transparent: true` from `tauri.windows.conf.json`. React renders custom `WindowControls`.
+Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: true`，由 React 渲染自定义 `WindowControls`。
 
 ### Tauri capabilities
 
-`src-tauri/capabilities/default.json` is the allowlist for plugin APIs available to the webview. New plugins (dialog, autostart, updater, window-state, store, opener, os, log are wired in `lib.rs`) typically need:
-1. `Cargo.toml` dependency
-2. `.plugin(...)` call in `lib.rs` `run()`
-3. capability entry in `default.json`
+`src-tauri/capabilities/default.json` 是 webview 可用插件 API 的白名单。新增插件通常要三步：
 
-### Cross-platform conventions
+1. `Cargo.toml` 加依赖
+2. `lib.rs` 的 `run()` 里加 `.plugin(...)`
+3. `default.json` 里加 capability 条目
 
-- HOME / cache dirs: use the `dirs` crate (`dirs::home_dir()`, `dirs::cache_dir()`), never raw `$HOME` / `%USERPROFILE%`.
-- Shell init: Windows arm in `pty::shell_init::windows`.
-- Terminal input: send `\r` (CR) for Enter, not `\n` (LF) - PowerShell on Windows requires CR.
+### 跨平台约定
 
-### Bundle config
+- HOME / 缓存目录用 `dirs` crate（`dirs::home_dir()`、`dirs::cache_dir()`），绝不直接读 `$HOME` / `%USERPROFILE%`。
+- shell 初始化的 Windows 分支在 `pty::shell_init::windows`。
+- 终端输入的回车发 `\r`（CR）不是 `\n`（LF），Windows 上的 PowerShell 要求 CR。
 
-- `bundle.targets: "all"` plus Windows sections in `tauri.conf.json`: NSIS installer in `currentUser` mode (no admin required), WebView2 via `embedBootstrapper` (offline install).
-- Auto-updater configured with a public minisign key; release artifacts at `https://github.com/crynta/terax-ai/releases/latest/download/latest.json`.
+### 打包配置
 
-### Known gotchas
+- `bundle.targets` 是 `["nsis"]`，**只出 exe 安装包**。MSI 会把任务栏图标指向 `C:\Windows\Installer\{ProductCode}\ProductIcon`，而 ProductCode 每次构建都变，覆盖安装后固定在任务栏的图标就没了。
+- NSIS 用 `perMachine` 模式（装到 `Program Files` 需要这个）。**默认目录不硬编码**：NSIS 的 `.onInit` 会调 `RestorePreviousInstallLocation`，安装时也写 `InstallLocation`，所以第一次选好目录以后就记住了。
+- `installer-hooks.nsh` 注册文件夹 / 文件夹背景 / 驱动器的"Open in Terax"右键菜单。
+- 自动更新用公开的 minisign 公钥，产物在 GitHub releases。
 
-- **React 19 strict mode** double-mounts `useEffect` in dev -> terminals spawn twice on first render. The first PTY is cleaned up almost immediately. The `SPAWN_LOCK` mutex serializes this; don't be alarmed by `pty opened id=1` followed by `pty closed id=1` in dev logs.
-- **Windows PowerShell process lifecycle**: `killer.kill()` from `portable-pty` only kills the immediate child. Descendants (e.g. `npm run dev` started inside pwsh) survive unless something else takes them down. The Job Object in `pty/job.rs` handles this for the Terax-process-death case; an explicit `pty_close` from JS also kills only the immediate child + relies on the Job to take the rest. Don't disable the Job without a replacement.
-- **Tab `cwd` storage**: comes from OSC 7 with forward slashes (after `parseOsc7` strips `/C:` -> `C:`). Anything that consumes `tab.cwd` and passes it to a Rust fs command on Windows must normalize separators or accept both forms - `apply_common` in `pty::shell_init` handles this for PTY spawn; other call sites must do their own.
+### 已知坑
 
-## Further reading
+- **React 19 严格模式**在开发环境下双挂载 `useEffect`，首次渲染时终端会启动两次，第一个 PTY 几乎立刻被清理。`SPAWN_LOCK` 串行化了这件事，开发日志里看到 `pty opened id=1` 紧接着 `pty closed id=1` 属正常。
+- **Windows PowerShell 进程生命周期**：`portable-pty` 的 `killer.kill()` 只杀直接子进程。在 pwsh 里起的 `npm run dev` 之类的后代会活下来，靠 Job Object 兜底。**没有替代方案就不要停用 Job。**
+- **标签 `cwd` 的存储形式**来自 OSC 7，是正斜杠（`parseOsc7` 已把 `/C:` 剥成 `C:`）。任何消费 `tab.cwd` 并把它传给 Rust 文件系统命令的地方，在 Windows 上必须规范分隔符或同时接受两种形式。`pty::shell_init` 的 `apply_common` 替 PTY 启动处理了，其他调用点得自己来。
+- **`clear` 之后不要假设任何一侧还留着历史。** 终端按行封顶，字节缓冲按字节封顶，两者必然分叉。
 
-Long-form contributor guides live under `docs/`. These guides elaborate on `TERAX.md`; if anything conflicts, `TERAX.md` wins.
+## 延伸阅读
 
-> **Documentation policy**: every change (new feature, bug fix, anomaly, accepted
-> trade-off, security/operational detail) must be recorded in the docs before it
-> is done - `docs/issues.md` is the audit log, architecture guides capture how
-> things work. See `docs/README.md` for the full policy.
+长文贡献者指南在 `docs/` 下。这些指南是对 `TERAX.md` 的展开，冲突时以 `TERAX.md` 为准。
 
-- `docs/README.md` - index of contributor guides
-- `docs/architecture/two-process-model.md` - IPC boundary and command reference
-- `docs/architecture/pty-shell-integration.md` - PTY, shell init scripts, OSC, ConPTY, Job Object
-- `docs/architecture/web-terminal-bridge.md` - embedded HTTP + WebSocket server sharing PTY sessions with a phone browser
-- `docs/architecture/mobile-conversation-view.md` - the phone renders a conversation, not a terminal: headless-xterm parsing, alt-screen scroll detection, bubble classification, backlog replay
-- `docs/architecture/security-model.md` - consolidated security model and boundaries
-- `docs/architecture/terminal-renderer-pool.md` - renderer pool and DormantRing invariants
-- `docs/architecture/cli-control.md` - bundled CLI and authenticated local control plane
-- `docs/issues.md` - known code issues, architectural debt, and risks
+> **文档政策**：每一次改动（新功能、bug 修复、异常、有意接受的取舍、安全或运维细节）都必须在完成之前记进文档。`docs/issues.md` 是审计日志，架构指南描述东西是怎么运作的。完整政策见 `docs/README.md`。
+
+- `docs/README.md` - 贡献者指南索引
+- `docs/architecture/two-process-model.md` - IPC 边界与命令参考
+- `docs/architecture/pty-shell-integration.md` - PTY、shell 初始化、OSC、ConPTY、Job Object
+- `docs/architecture/web-terminal-bridge.md` - 内嵌 HTTP + WebSocket 服务与 agent transcript
+- `docs/architecture/mobile-conversation-view.md` - 手机渲染的是对话不是终端
+- `docs/architecture/security-model.md` - 安全模型与各道边界
+- `docs/architecture/terminal-renderer-pool.md` - 渲染器池与 DormantRing 不变量
+- `docs/architecture/cli-control.md` - 随包 CLI 与本地控制面
+- `docs/issues.md` - 已知问题、架构债与风险

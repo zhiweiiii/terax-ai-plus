@@ -507,6 +507,12 @@ export default function App() {
       const sel = window.getSelection();
       return sel && !sel.isCollapsed ? sel.toString() : null;
     }
+    // A diff is a CodeMirror too, so a selection in it is worth just as much to
+    // the agent. `sendSelectionToClaude` has always known how to resolve a git
+    // tab's path; this is the half that was missing.
+    if (t.kind === "git-diff" || t.kind === "git-commit-file") {
+      return gitDiffRefs.current.get(activeId)?.getSelection() ?? null;
+    }
     return null;
   }, [tabs, activeId]);
 
@@ -683,6 +689,21 @@ export default function App() {
       if (!term) return;
       term.write(`cd ${quoteShellArg(path)}\r`);
       term.focus();
+    },
+    [activeLeafId],
+  );
+
+  /** Run a command in the terminal the status bar describes. Used by the
+   *  Claude Code parameter panel, whose whole point is to set variables in the
+   *  shell in front of you. */
+  const runInActiveTerminal = useCallback(
+    (command: string): boolean => {
+      if (activeLeafId === null) return false;
+      const term = terminalRefs.current.get(activeLeafId);
+      if (!term) return false;
+      term.write(`${command}${String.fromCharCode(13)}`);
+      term.focus();
+      return true;
     },
     [activeLeafId],
   );
@@ -1647,6 +1668,7 @@ export default function App() {
               onCd={sendCd}
               onWorkspaceChange={handleWorkspaceChange}
               onOpenSettings={() => void openSettingsWindow()}
+              onRunInTerminal={runInActiveTerminal}
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true
               }

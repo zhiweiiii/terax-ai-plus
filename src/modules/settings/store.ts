@@ -113,6 +113,9 @@ export type Preferences = {
   showHidden: boolean;
   /** File tree: leave out anything git ignores. */
   hideGitIgnored: boolean;
+  /** Previously applied Claude Code parameter sets, newest first. The token is
+   *  DPAPI ciphertext, never plaintext (see `modules/secret.rs`). */
+  agentEnvPresets: AgentEnvPreset[];
   explorerGitDecorations: boolean;
   /** Branch names that must not be force-pushed / rebased without warning. */
   protectedBranches: string[];
@@ -183,6 +186,7 @@ const KEY_VIM_MODE = "vimMode";
 const KEY_EDITOR_WORD_WRAP = "editorWordWrap";
 const KEY_SHOW_HIDDEN = "showHidden";
 const KEY_HIDE_GIT_IGNORED = "hideGitIgnored";
+const KEY_AGENT_ENV_PRESETS = "agentEnvPresets";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
 const KEY_PROTECTED_BRANCHES = "protectedBranches";
@@ -246,6 +250,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorWordWrap: false,
   showHidden: false,
   hideGitIgnored: false,
+  agentEnvPresets: [] as AgentEnvPreset[],
   explorerGitDecorations: true,
   protectedBranches: ["main", "master", "develop"],
   terminalWebglEnabled: true,
@@ -329,6 +334,9 @@ export async function loadPreferences(): Promise<Preferences> {
     hideGitIgnored:
       get<boolean>(KEY_HIDE_GIT_IGNORED) ??
       DEFAULT_PREFERENCES.hideGitIgnored,
+    agentEnvPresets:
+      get<AgentEnvPreset[]>(KEY_AGENT_ENV_PRESETS) ??
+      DEFAULT_PREFERENCES.agentEnvPresets,
     explorerGitDecorations:
       get<boolean>(KEY_EXPLORER_GIT_DECORATIONS) ??
       DEFAULT_PREFERENCES.explorerGitDecorations,
@@ -502,6 +510,32 @@ export async function setHideGitIgnored(value: boolean): Promise<void> {
   await writePref(KEY_HIDE_GIT_IGNORED, value);
 }
 
+/** One remembered Claude Code parameter set. */
+export type AgentEnvPreset = {
+  id: string;
+  baseUrl: string;
+  model: string;
+  /** DPAPI ciphertext. Decrypted only at the moment it is applied. */
+  tokenCipher: string;
+  /** Last few characters of the token, for telling presets apart on screen
+   *  without putting a live credential in the UI. */
+  tokenHint: string;
+  usedAt: number;
+};
+
+/** Keep the list short. It is a convenience, not an archive, and every entry
+ *  is a stored credential. */
+const AGENT_ENV_PRESET_LIMIT = 8;
+
+export async function setAgentEnvPresets(
+  value: AgentEnvPreset[],
+): Promise<void> {
+  await writePref(
+    KEY_AGENT_ENV_PRESETS,
+    value.slice(0, AGENT_ENV_PRESET_LIMIT),
+  );
+}
+
 export async function setExplorerGitDecorations(value: boolean): Promise<void> {
   await writePref(KEY_EXPLORER_GIT_DECORATIONS, value);
 }
@@ -664,6 +698,7 @@ export async function onPreferencesChange(
     [KEY_EDITOR_WORD_WRAP]: "editorWordWrap",
     [KEY_SHOW_HIDDEN]: "showHidden",
     [KEY_HIDE_GIT_IGNORED]: "hideGitIgnored",
+    [KEY_AGENT_ENV_PRESETS]: "agentEnvPresets",
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
     [KEY_PROTECTED_BRANCHES]: "protectedBranches",
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",

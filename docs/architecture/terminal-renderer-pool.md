@@ -1,65 +1,67 @@
-# Terminal renderer pool
+# 终端渲染器池
 
-This guide elaborates on `TERAX.md`. If anything here conflicts with `TERAX.md`, `TERAX.md` wins.
+本文是 `TERAX.md` 的展开。与 `TERAX.md` 冲突时以 `TERAX.md` 为准。
 
-## Why a pool exists
+## 为什么要有池
 
-Terminal tabs are kept mounted and hidden on switch so PTYs and dev servers keep streaming in the background. Creating an unbounded number of live xterm + WebGL renderer instances would blow the memory budget, so Terax pools renderer slots.
+终端标签页切走之后仍然保持挂载、只是隐藏，这样 PTY 和开发服务器能在后台继续输出。但如果活的 xterm + WebGL 渲染器实例数量不设上限，内存会兜不住，所以 Terax 复用渲染槽位。
 
-The pool lives in `src/modules/terminal/lib/rendererPool.ts`.
+池在 `src/modules/terminal/lib/rendererPool.ts`。
 
-## Slot lifecycle
+## 槽位生命周期
 
-- `POOL_MAX_SIZE` is 5 (`rendererPool.ts:22`). Each slot owns one xterm `Terminal`, `FitAddon`, `SerializeAddon`, and optionally a `WebglAddon`.
-- A slot is created on demand and assigned to a leaf on bind.
-- `releaseSlot` detaches a slot from a leaf. If the leaf is idle, the slot is parked with `display:none` so xterm stops rendering but keeps parsing PTY bytes.
-- After a grace period, idle slots may be reaped to keep the pool size down.
+- `POOL_MAX_SIZE` 是 5。每个槽位拥有一个 xterm `Terminal`、`FitAddon`、`SerializeAddon`，以及可选的 `WebglAddon`。
+- 槽位按需创建，绑定时分配给某个 leaf。
+- `releaseSlot` 把槽位从 leaf 上解绑。leaf 空闲的话，槽位会被停靠（`display:none`），xterm 停止渲染但继续解析 PTY 字节。
+- 空闲槽位过了宽限期可能被回收，以控制池的大小。
 
-## Parking vs releasing
+## 停靠与释放的区别
 
-When a leaf becomes hidden:
+leaf 被隐藏时：
 
-1. `parkLeafSlot` sets the host to `display:none`. Rendering pauses but the live buffer keeps receiving bytes.
-2. If the leaf is **busy** (foreground command, agent signal, alt-screen TUI, or block-shell running mode), it keeps the slot parked indefinitely.
-3. If the leaf is **idle**, `releaseSlot` is called after `HIDDEN_RELEASE_DELAY_MS`. The slot's `currentLeafId` is cleared and `retainedLeafId` is set so the buffer stays live.
+1. `parkLeafSlot` 把宿主设成 `display:none`。渲染暂停，但活的缓冲区继续收字节。
+2. leaf 如果**忙**（有前台命令、有 agent 信号、在 alt 屏 TUI 里、或块模式 shell 正在运行），槽位无限期保持停靠。
+3. leaf 如果**空闲**，`HIDDEN_RELEASE_DELAY_MS` 之后调 `releaseSlot`：清掉 `currentLeafId`、置上 `retainedLeafId`，缓冲区仍然是活的。
 
-When the leaf becomes visible again, `acquireSlot` looks for:
+leaf 重新可见时，`acquireSlot` 按顺序找：
 
-1. A slot already bound to this leaf.
-2. A retained slot for this leaf (`retainedLeafId === leafId`) - fast path, no snapshot replay.
-3. A clean idle slot.
-4. If the pool is at max size, the lowest-scoring slot is evicted. Eviction serializes the retained buffer to a snapshot via `SerializeAddon` before stealing the slot.
+1. 已经绑在这个 leaf 上的槽位。
+2. 为这个 leaf 保留着的槽位（`retainedLeafId === leafId`）：快速路径，不需要回放快照。
+3. 干净的空闲槽位。
+4. 池已满时，淘汰得分最低的槽位。淘汰前会先用 `SerializeAddon` 把被保留的缓冲区序列化成快照，再抢走槽位。
 
-## The DormantRing
+## DormantRing
 
-`src/modules/terminal/lib/dormantRing.ts` buffers PTY bytes for leaves that have no slot at all (stolen or never bound). It is capped at 1 MiB and drops oldest blocks on overflow. On drain it resumes from the next line boundary rather than resetting the terminal, so a mid-line escape sequence is not replayed from the middle.
+`src/modules/terminal/lib/dormantRing.ts` 为**完全没有槽位**的 leaf（被抢走的，或者从没绑过的）缓冲 PTY 字节。上限 1 MiB，溢出时丢最老的块。排空时从下一个换行边界开始，而不是重置终端，这样一条被截断的转义序列不会从中间被回放出来。
 
-## The never-serialize-mid-command invariant
+`peek()` 是不消耗的读取：Web 桥接给手机做首屏时要读这些字节，而桌面在面板回来时还得再渲染同样的字节。
 
-This is the most important rule in the pool. A leaf that is in the middle of a command must **never** be serialized. Replaying incremental TUI repaints over a stale snapshot is what used to wipe Claude Code.
+## "命令执行中绝不序列化"这条不变量
 
-The code enforces this by checking `isLeafBusy` before eviction and by keeping slots parked (not released) while `commandRunning`, `isAgentActivePty`, or alt-screen is true.
+这是池里最重要的一条规则。**正在执行命令的 leaf 绝不能被序列化。** 把 TUI 的增量重绘回放到一张过期快照上，正是当初把 Claude Code 界面搞乱的原因。
 
-## Fast path and snapshot replay
+代码上靠两件事保证：淘汰前检查 `isLeafBusy`；以及只要 `commandRunning`、`isAgentActivePty` 或 alt 屏为真，槽位就保持停靠而不释放。
 
-If a retained slot exists for a leaf, `bindSlot` skips `term.clear()` / `term.reset()` and simply drains the DormantRing into the live buffer. This avoids re-rendering a large snapshot.
+## 快速路径与快照回放
 
-If only a snapshot exists, `bindSlot` clears the terminal, resizes, writes the snapshot, then drains the ring. For alt-screen TUIs, the snapshot is skipped and a SIGWINCH kick is sent so the TUI repaints from scratch.
+如果这个 leaf 还有保留着的槽位，`bindSlot` 会跳过 `term.clear()` / `term.reset()`，直接把 DormantRing 排进活的缓冲区，省掉重新渲染一大张快照。
 
-## WebGL lifecycle
+如果只剩快照，`bindSlot` 清空终端、调整尺寸、写入快照，再排空 ring。对 alt 屏 TUI 则跳过快照，改为发一个 SIGWINCH，让 TUI 自己从头重绘：它的输出是增量的光标定位指令，叠在旧快照上没有意义。
 
-WebGL addons are created when a slot becomes visible and reaped after a grace period when parked. The addon recovers from context loss on sleep/wake or GPU reset.
+## WebGL 生命周期
 
-## Invariants
+WebGL addon 在槽位可见时创建，停靠一段时间后回收。休眠唤醒或 GPU 重置导致上下文丢失时，addon 能自行恢复。
 
-- Never allow the pool to grow without bound; max is `POOL_MAX_SIZE`.
-- Never serialize or evict a leaf that is mid-command or in alt-screen.
-- A hidden busy leaf keeps its live grid parked with `display:none`.
-- An idle hidden leaf releases its slot but the buffer continues parsing bytes.
-- The DormantRing only buffers bytes for leaves without any slot.
+## 不变量
 
-## See also
+- 池不能无限增长，上限是 `POOL_MAX_SIZE`。
+- 正在执行命令或处于 alt 屏的 leaf，绝不序列化、绝不淘汰。
+- 隐藏但忙碌的 leaf，保留活的网格并停靠（`display:none`）。
+- 隐藏且空闲的 leaf 释放槽位，但缓冲区继续解析字节。
+- DormantRing 只为完全没有槽位的 leaf 缓冲。
 
-- [`TERAX.md`](../../TERAX.md) - the architecture source of truth
-- [`docs/README.md`](../README.md) - index of contributor guides
-- [PTY shell integration](pty-shell-integration.md) - sessions, OSC sequences, and ConPTY
+## 另见
+
+- [`TERAX.md`](../../TERAX.md) - 架构事实来源
+- [`docs/README.md`](../README.md) - 贡献者指南索引
+- [PTY shell 集成](pty-shell-integration.md) - 会话、OSC 序列与 ConPTY

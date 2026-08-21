@@ -1,47 +1,51 @@
-# Roadmap
+# 路线图
 
-Terax direction, what's shipped, what's coming, and what's deliberately out of scope.
+Terax 的方向：已经做完的、接下来要做的、以及明确不做的。
 
-This file is updated as direction evolves. For day-to-day work, see [GitHub Issues](https://github.com/crynta/terax-ai/issues) and the Projects board.
+方向变化时更新本文。日常事项见 [docs/issues.md](docs/issues.md)。
 
-## What Terax is
+## Terax 是什么
 
-Terax is a fast, lightweight, terminal-first development workspace. It pairs a native PTY backend with a modern UI: multi-tab terminals, an integrated code editor, a file explorer, source control with a git graph, web preview, and an embedded web terminal bridge that shares the same PTY sessions with a phone browser. About 7-8 MB on disk. No telemetry.
+一个快、轻、以终端为中心的开发工作区。原生 PTY 后端配现代 UI：多标签终端、内置代码编辑器、文件资源管理器、带提交图的版本管理、网页预览，以及一个把同一批 PTY 会话共享给手机浏览器的内嵌 web 桥接。磁盘占用约 7-8 MB，无遥测。
 
-The product is opinionated: terminal-first, lightweight always, Windows-only (including WSL), security by default.
+产品是有主张的：终端优先、永远轻量、只做 Windows（含 WSL）、默认安全。
 
-## What Terax is not
+## Terax 不是什么
 
-- Not an IDE clone. Terax selectively integrates high-value editor capabilities such as LSP, formatting, source control, and previews without adopting the heavyweight runtime and always-on background services of a traditional IDE.
-- Not a browser. Web preview exists for local dev servers and lightweight doc viewing only.
-- Not a general workspace. Tools and formats that pull the product away from the terminal-first surface are out of scope.
+- **不是 IDE 的克隆。** LSP、格式化、版本管理、预览这类高价值能力会有选择地集成，但不会引入传统 IDE 那套重量级运行时和常驻后台服务。
+- **不是浏览器。** 网页预览只服务本地开发服务器和轻量文档查看。
+- **不是通用工作台。** 会把产品从"终端优先"这个面上拽走的工具和格式，不在范围内。
 
-## Themes
+## 五条主线
 
-The themes below frame every scope decision.
+每一次范围决策都用这五条来衡量。
 
-1. **Lightweight always.** 7-8 MB binary. Every dependency justified. Per-tab memory budget enforced.
-2. **Terminal-first.** xterm.js correctness, PTY fidelity, TUI app compatibility are non-negotiable.
-3. **Windows-first.** Windows + WSL are the only supported targets; macOS/Linux branches were removed.
-4. **Security by default.** Workspace path guards, OSC trust, IPC allowlist, and a password-gated web terminal bridge.
-5. **Phone reachability.** The desktop PTY is reachable from a phone browser through the embedded web bridge (same sessions, content-synced).
+1. **永远轻量。** 7-8 MB 二进制。每个依赖都要能说清为什么。每标签页的内存有预算。
+2. **终端优先。** xterm.js 的正确性、PTY 保真度、TUI 程序兼容性，没有商量余地。
+3. **Windows 优先。** Windows + WSL 是唯二目标，macOS / Linux 分支已删除。
+4. **默认安全。** 工作区路径守卫、OSC 信任边界、IPC 白名单，以及有密码把关的 web 终端桥接。
+5. **手机可达。** 桌面的 PTY 通过内嵌 web 桥接从手机浏览器可达，共享同一批会话。
 
-## Shipped
+## 已交付
 
-- Multi-tab WebGL terminal with background streaming, split panes, blocks mode, inline search, agent detection.
-- Code editor: CodeMirror 6, vim mode, format-on-save, opt-in LSP, rendered markdown preview.
-- Source control: stage/unstage, commit + push, branch operations, remote management, commit graph.
-- File explorer with persistent name + content search.
-- Workspaces (spaces) with per-space tab persistence, Local / WSL environments.
-- Web terminal bridge: phone browser access to every desktop command line, grouped by space, password-gated, with Ctrl+C / Ctrl+D controls.
-- Web terminal bridge hardening: output draining independent of client input, precise subscriber removal, session exit notification, POST-only rate-limited auth, connection cap + heartbeat, stale pty-id cleanup (issues #1-8 in `docs/issues.md`).
+- 多标签 WebGL 终端：后台持续流式输出、分屏、块模式、行内搜索、agent 检测。
+- 代码编辑器：CodeMirror 6、vim 模式、保存时格式化、可选的 LSP、Markdown 预览。
+- 版本管理：暂存/取消暂存、提交与推送、分支操作、远程管理、提交图。
+- 文件资源管理器：常驻搜索，同时匹配文件名与文件内容。
+- 工作区（spaces）：按空间持久化标签页，Local / WSL 环境切换。
+- Web 终端桥接：手机浏览器访问每一个桌面命令行，按空间分组，密码把关。
+- Web 桥接加固：输出排空不依赖客户端输入、精确移除订阅、会话退出通知、仅 POST 且限速的认证、连接数上限与心跳、过期 pty id 清理。
+- 手机端对话视图：不再渲染终端网格，agent 对话读自 agent 自己的记录（Claude Code 的 JSONL、opencode 的 SQLite），屏幕解析只留给待处理的选项菜单。
+- 凭据加固：web 密码改为 Argon2id 加盐哈希，改密码时轮换会话令牌；agent 环境变量里的 token 用 DPAPI 加密后落盘。
 
-## In progress / next
+## 进行中 / 接下来
 
-- Repository hygiene: reconcile remaining stale docs with the code, remove last dead exports (`editor/lib/extensions.ts`, `languageResolver.ts`, `worktreeOps.ts`, local `IS_MAC`).
+- 打包瘦身：目前只出 NSIS exe，默认安装到 `D:\Program Files\Terax`。
+- 死代码清理：`editor/lib/extensions.ts`、`languageResolver.ts`、`worktreeOps.ts` 里残留的未消费导出，以及 `rendererPool.ts` 中恒为 `false` 的 `IS_MAC`。
+- 手机端对话视图的剩余项与已知问题，见 [docs/issues.md](docs/issues.md)。
 
-## Out of scope (removed)
+## 明确不做（已移除）
 
-- AI agent panel: the BYOK/local-model agent system, composer, custom agents, and plan mode were removed from the codebase. Only the terminal-side coding-agent detection (OSC 133/777) remains.
-- macOS and Linux builds: source branches and platform-specific code were removed.
-- Automated test suite: tests, test config, and test dependencies were removed; verification is manual (see `CONTRIBUTING.md`).
+- **AI agent 面板**：BYOK / 本地模型的 agent 系统、composer、自定义 agent、plan 模式，全部从代码库移除。只保留终端侧基于 OSC 133/777 的编码 agent 检测。
+- **macOS 与 Linux 构建**：源码分支与平台相关代码已移除。
+- **自动化测试套件**：测试、测试配置、测试依赖已移除，验证靠手动执行检查命令（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。

@@ -1,46 +1,49 @@
-# Security
+# 安全策略
 
-Terax runs shells, reads/writes files, and talks to AI providers, so security bugs matter. If you find one, please tell us before posting it publicly.
+Terax 会启动 shell、读写文件、并把桌面的终端会话通过内嵌 web 服务暴露到网络上，所以安全问题是要紧的。发现了请先私下告知，不要直接公开。
 
-## Reporting
+## 报告方式
 
-Email **security@terax.app**. Include:
+在本仓库开一个 [security advisory](https://github.com/zhiweiiii/terax-ai/security/advisories/new)（私有），请写清楚：
 
-- What the issue is and what it lets an attacker do
-- Steps to reproduce (a small PoC is great)
-- Version, OS, arch
+- 问题是什么，攻击者能借此做到什么
+- 复现步骤（有个小 PoC 最好）
+- 版本、操作系统、架构
 
-We'll get back to you within a few days. Once it's fixed, we'll credit you in the release notes - unless you'd rather stay anonymous.
+修好之后会在发布说明里致谢，除非你希望匿名。
 
-Please **don't** open a public GitHub issue for security reports.
+**请不要**为安全问题开公开的 GitHub issue。
 
-## Supported versions
+## 支持范围
 
-Until `1.0.0`, only the latest minor gets security fixes. See the current version in `package.json` or on the [Releases page](https://github.com/crynta/terax-ai/releases). 
+`1.0.0` 之前只有最新的次版本会收到安全修复。当前版本见 `package.json`。
 
-## What's in scope
+## 在范围内
 
-- The Rust backend in `src-tauri/` (PTY, FS, IPC, plugins)
-- The frontend in `src/` - anywhere untrusted input lands (terminal output, file content, AI tool results, credentials)
-- Release artifacts on GitHub and `terax.app`
-- The auto-updater
+- `src-tauri/` 里的 Rust 后端（PTY、文件系统、IPC、插件）
+- **内嵌的 web 终端桥接**（`src-tauri/src/modules/web/`）：认证、WebSocket 协议、会话隔离。**它本质上是一个远程 shell，绑定在 `0.0.0.0`**，是这个项目最大的一块攻击面。
+- `src/` 里的前端，任何不可信输入落地的地方（终端输出、文件内容、agent transcript）
+- `src/web/` 里的手机页面：它持有认证 cookie 并直连一个活的 PTY
+- 自动更新器与 GitHub 上的发布产物
 
-## What's not
+## 不在范围内
 
-- Bugs in upstream deps (Tauri, xterm.js, CodeMirror, AI SDKs…) - report those upstream. We'll ship the fix once it's released.
-- Anything that needs an already-compromised machine or a local attacker with shell access
-- Older versions (`< 0.5`)
+- 上游依赖里的 bug（Tauri、xterm.js、CodeMirror 等），请报给上游，发布后我们跟进。
+- 需要机器已经被攻陷、或攻击者已有本地 shell 权限才能成立的问题。
+- 旧版本。
 
-## What we do to keep things safe
+## 我们做了什么
 
-- **API keys** live in the OS keychain via `keyring` - not on disk, not in `localStorage`, not in logs.
-- **No telemetry.** Terax only talks to the network when you ask it to (AI requests, update checks, web preview).
-- **AI tool approval.** File writes and shell commands from the agent need your OK before they run.
-- **No Node in the renderer.** The frontend only reaches the host through the allow-listed Tauri commands.
-- **Signed releases.** Updates are verified before they're applied.
+- **web 桥接的凭据是 Argon2id 加盐哈希**，存成 PHC 字符串（`%LOCALAPPDATA%/terax/web-auth.json`），改密码会轮换会话令牌，旧 cookie 立即失效。登录限速：连续 5 次失败锁定 5 秒，失败次数显示在桌面状态栏。
+- **agent 的 token 用 Windows DPAPI 加密后落盘**（绑定当前用户账户），明文不进设置文件，也不进命令历史。
+- **工作区授权表**把关 PTY 启动和 git 命令能操作的目录。
+- **OSC 序列会被解析但不无条件信任**：OSC 52 剪贴板写入在命令运行期间一律拒绝。
+- **无遥测。** Terax 只在你要求时才联网（更新检查、网页预览）。
+- **renderer 里没有 Node。** 前端只能通过白名单里的 Tauri 命令触达宿主。
+- **发布产物有签名**，更新在应用前会校验。
 
-## What we can't promise
+## 我们不能承诺什么
 
-- Terax runs whatever you (or the agent) tell it to run, with your permissions. That's kind of the point of a terminal.
-- AI providers see whatever you send them. Read their retention policies.
-- Local LLM endpoints (LM Studio, OpenAI-compatible) are trusted at the network level - only point Terax at servers you control.
+- Terax 会以你的权限运行你让它运行的任何东西。终端就是干这个的。
+- **web 桥接绑定 `0.0.0.0`**：网络上能到达这台机器的任何人都会看到登录页。不是可信局域网就要放在防火墙或 VPN 之后。密码是唯一的那道门。
+- 在你设置自己的密码之前，用的仍是编译期常量（源码里做了 XOR 混淆，`strings` 读不出来，**但混淆不是加密**）。设一个自己的密码。

@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import type { GitStatusSnapshot } from "@/lib/native";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setHideGitIgnored, setShowHidden } from "@/modules/settings/store";
@@ -123,6 +124,21 @@ function basename(path: string): string {
 function parentOf(path: string, fallback: string): string {
   const i = path.lastIndexOf("/");
   return i > 0 ? path.slice(0, i) : fallback;
+}
+
+/** Flip a filter preference, and say so when the write fails.
+ *
+ *  These were fire-and-forget (`void setX(...)`), which meant a rejected write
+ *  produced a toggle that did nothing and explained nothing. A setting that
+ *  refuses to change has to say why. */
+function applyFilter(
+  set: (value: boolean) => Promise<void>,
+  value: boolean,
+): void {
+  set(value).catch((e) => {
+    console.error("[terax] filter preference write failed:", e);
+    toast.error(`无法保存过滤设置：${typeof e === "string" ? e : String(e)}`);
+  });
 }
 
 function buildRows(
@@ -635,18 +651,31 @@ export const FileExplorer = memo(
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-44">
+              {/* Both items read as "hide this": checked hides, unchecked
+                  shows. `showHidden` is stored the other way round, so it is
+                  inverted here rather than in the store, where other readers
+                  already depend on its sense. */}
+              <DropdownMenuCheckboxItem
+                checked={!showHidden}
+                onCheckedChange={(v) => applyFilter(setShowHidden, v !== true)}
+              >
+                隐藏 隐藏文件
+              </DropdownMenuCheckboxItem>
+              {/* Without git decorations Rust never fills `gitignored`, so
+                  every entry reads as not-ignored and this filter would
+                  silently do nothing. Say why instead of pretending. */}
               <DropdownMenuCheckboxItem
                 checked={hideGitIgnored}
-                onCheckedChange={(v) => void setHideGitIgnored(v === true)}
+                disabled={!gitDecorations}
+                onCheckedChange={(v) => applyFilter(setHideGitIgnored, v === true)}
               >
-                隐藏 git 忽略的文件
+                隐藏 git 忽略文件
               </DropdownMenuCheckboxItem>
-              <DropdownMenuCheckboxItem
-                checked={showHidden}
-                onCheckedChange={(v) => void setShowHidden(v === true)}
-              >
-                显示隐藏文件
-              </DropdownMenuCheckboxItem>
+              {!gitDecorations ? (
+                <p className="px-3 pb-1.5 text-[10.5px] leading-snug text-muted-foreground">
+                  需先在设置里开启 git 状态标记
+                </p>
+              ) : null}
             </DropdownMenuContent>
           </DropdownMenu>
           <Button

@@ -155,6 +155,9 @@ function loadStateFromCache(source: WorkingSource | CommitSource): LoadState {
 
 export type GitDiffPaneHandle = {
   openSearch: () => void;
+  /** Selected text, so a diff can hand a snippet to the agent the same way an
+   *  editor does. Null when nothing is selected. */
+  getSelection: () => string | null;
 };
 
 export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
@@ -171,7 +174,18 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
       if (view) openSearchPanel(view);
     }, []);
 
-    useImperativeHandle(ref, () => ({ openSearch }), [openSearch]);
+    const getSelection = useCallback(() => {
+      const view = cmRef.current?.view;
+      if (!view) return null;
+      const { from, to } = view.state.selection.main;
+      return from === to ? null : view.state.sliceDoc(from, to);
+    }, []);
+
+    useImperativeHandle(
+      ref,
+      () => ({ openSearch, getSelection }),
+      [openSearch, getSelection],
+    );
 
     const key = cacheKey(source);
 
@@ -389,6 +403,12 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
             </ScrollArea>
           ) : (
             <CodeMirror
+              // Remount when the fold is toggled. `unifiedMergeView` computes
+              // its collapsed ranges when the state field is created, and a
+              // reconfigure does not rebuild them - so swapping the extension
+              // array changed the option and nothing on screen. Remounting is
+              // the only thing that actually re-runs it.
+              key={collapseUnchanged ? "folded" : "full"}
               ref={cmRef}
               value={modifiedContent}
               theme={themeExt}

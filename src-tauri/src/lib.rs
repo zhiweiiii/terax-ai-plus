@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{control, fs, git, history, lsp, pty, shell, web, workspace};
+use modules::{control, fs, git, history, lsp, pty, secret, shell, web, workspace};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -263,6 +263,10 @@ pub fn run() {
             pty::web_activate_leaf,
             web::web_status,
             web::web_snapshot_reply,
+            web::web_set_password,
+            secret::secret_protect,
+            secret::secret_unprotect,
+            web::web_has_custom_password,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

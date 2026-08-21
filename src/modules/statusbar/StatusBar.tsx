@@ -10,6 +10,7 @@ import { IncognitoIcon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { DiagnosticsBadge } from "./DiagnosticsBadge";
+import { AgentEnvButton } from "./AgentEnvButton";
 import { WebStatusBadge } from "./WebStatusBadge";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
 
@@ -21,6 +22,9 @@ type Props = {
   onWorkspaceChange: (env: WorkspaceEnv) => void;
   onOpenSettings: () => void;
   privateActive: boolean;
+  /** Runs a command in the terminal the status bar is describing. Undefined
+   *  when there is none, which disables the parameter panel's actions. */
+  onRunInTerminal?: (command: string) => boolean;
 };
 
 export function StatusBar({
@@ -31,6 +35,7 @@ export function StatusBar({
   onWorkspaceChange,
   onOpenSettings,
   privateActive,
+  onRunInTerminal,
 }: Props) {
   return (
     <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-border/60 bg-card/60 pl-3 pr-4 text-[11px]">
@@ -57,6 +62,7 @@ export function StatusBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        <AgentEnvButton onApply={onRunInTerminal} />
         <WebStatusBadge />
         <Button
           variant="ghost"

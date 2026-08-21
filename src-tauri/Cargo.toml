@@ -63,6 +63,7 @@ tempfile = "3"
 notify = "8.2.0"
 which = "8.0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+argon2 = "0.5.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -71,6 +72,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Security",
+	"Win32_Security_Cryptography",
 	"Win32_System_Console",
 	"Win32_System_DataExchange",
 	"Win32_System_JobObjects",

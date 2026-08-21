@@ -41,6 +41,8 @@ use base64::Engine;
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 
+mod auth;
+
 use crate::modules::pty;
 use crate::modules::pty::{PtyState, Session, SizeOwner, WebMsg};
 use crate::modules::transcript;
@@ -77,11 +79,9 @@ fn deobfuscate(encoded: &[u8]) -> Vec<u8> {
 /// Key used to encode the constants below.
 const OBFUSCATION_KEY: [u8; 5] = [0x53, 0x2a, 0x7c, 0x91, 0x0d];
 
-/// Auth cookie value — a fixed string, XOR-obfuscated so the token (which is
-/// independent of the password) is not readable from the binary. It is only
-/// ever compared in memory, never transmitted to the page bundle; the token
-/// never rotates (weakness tracked in docs/issues.md #3).
-fn web_token() -> String {
+/// The compile-time cookie token, used only until the user sets a password of
+/// their own. `auth::session_token` rotates a stored one on every change.
+pub(crate) fn legacy_token() -> String {
     const ENCODED: [u8; 48] = [
         0x6b, 0x13, 0x4d, 0xa1, 0x69, 0x30, 0x4e, 0x4a, 0xa8, 0x38, 0x64, 0x4c,
         0x19, 0xf3, 0x68, 0x63, 0x1c, 0x1d, 0xa4, 0x35, 0x61, 0x4e, 0x18, 0xf7,
@@ -91,15 +91,36 @@ fn web_token() -> String {
     String::from_utf8(deobfuscate(&ENCODED)).expect("web token is ascii")
 }
 
-/// SHA-1 digest of the access password, XOR-obfuscated. The plaintext password
-/// is never stored anywhere; only this digest exists, decoded at runtime for
-/// the constant-time comparison in `/auth`.
+/// SHA-1 digest of the compile-time access password, XOR-obfuscated. Only
+/// consulted while no password has been set (see `auth`), so an install that
+/// predates stored credentials is not locked out by an update.
 fn expected_digest() -> Vec<u8> {
     const ENCODED: [u8; 20] = [
         0x1c, 0x0a, 0x53, 0x33, 0xdf, 0x92, 0x31, 0x77, 0x18, 0xc1,
         0x32, 0xba, 0xab, 0x4d, 0xfc, 0xca, 0x2e, 0xc0, 0x92, 0xe0,
     ];
     deobfuscate(&ENCODED)
+}
+
+/// Comparison against the compile-time digest. Only reached while no password
+/// has been stored.
+pub(crate) fn legacy_password_matches(password: &str) -> bool {
+    let mut hasher = Sha1::new();
+    hasher.update(password.as_bytes());
+    hasher.finalize()[..] == expected_digest()[..]
+}
+
+/// Set the web bridge password. Rotates the session token, so phones that were
+/// already signed in have to sign in again.
+#[tauri::command]
+pub fn web_set_password(password: String) -> Result<(), String> {
+    auth::set_password(&password)
+}
+
+/// Whether a password has been set, as opposed to the compiled-in default.
+#[tauri::command]
+pub fn web_has_custom_password() -> bool {
+    auth::has_custom_password()
 }
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -554,7 +575,10 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
     }
     let authenticated = cookie
         .as_deref()
-        .map(|c| c.split(';').any(|part| part.trim() == format!("terax_web={}", web_token())))
+        .map(|c| {
+            let want = format!("terax_web={}", auth::session_token());
+            c.split(';').any(|part| part.trim() == want)
+        })
         .unwrap_or(false);
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
@@ -616,13 +640,7 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
             FAILED_LOGINS.store(0, Ordering::Release);
         }
 
-        // Constant-time comparison of the password digest.
-        let digest = {
-            let mut hasher = Sha1::new();
-            hasher.update(pwd.as_bytes());
-            hasher.finalize()
-        };
-        let ok = digest[..] == expected_digest()[..];
+        let ok = auth::verify(&pwd);
         if ok {
             FAILED_LOGINS.store(0, Ordering::Release);
             let body =
@@ -631,7 +649,7 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
                  Set-Cookie: terax_web={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n",
-                web_token(),
+                auth::session_token(),
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());
