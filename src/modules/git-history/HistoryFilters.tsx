@@ -22,7 +22,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useRef, useState } from "react";
-import { toast } from "sonner";
+import { errorToast } from "@/lib/errorToast";
 import {
   DATE_PRESETS,
   EMPTY_HISTORY_FILTERS,
@@ -365,7 +365,7 @@ function BranchFilter({
       setBranches(result.branches.filter((branch) => branch.kind !== "remote"));
     } catch (e) {
       loadedForRef.current = null;
-      toast.error("Could not list branches", { description: String(e) });
+      errorToast("Could not list branches", e);
     } finally {
       setLoading(false);
     }

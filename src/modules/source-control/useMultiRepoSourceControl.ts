@@ -6,6 +6,7 @@ import {
   native,
 } from "@/lib/native";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import {
   isRejectedPushError,
@@ -25,6 +26,17 @@ import {
   type SourceControlSummary,
   useSourceControl,
 } from "./useSourceControl";
+
+/** Every repo that failed, one per line, so the toast copy action yields
+ *  all of them. They used to go to the console, out of the user reach. */
+function failureDetail(failed: { repoRoot: string; error?: unknown }[]): string {
+  return failed
+    .map(
+      (f) =>
+        `${f.repoRoot}: ${typeof f.error === "string" ? f.error : String(f.error)}`,
+    )
+    .join("\n");
+}
 
 // Push-preview bounds: patches for more than this many commits would turn the
 // confirmation dialog into a wall of text, and a single patch beyond this size
@@ -262,24 +274,21 @@ export function useMultiRepoSourceControl(
       if (failed.length === 0) {
         toast.success(`Fetched ${results.length} repos`);
       } else if (failed.length < results.length) {
-        toast.warning(
+        errorToast(
           `Fetched ${results.length - failed.length}/${results.length} repos; ${failed.length} failed`,
+          failureDetail(failed),
         );
-        // Log first few failures to console.
-        for (const f of failed.slice(0, 3)) {
-          console.warn(
-            `[terax] git fetch failed for ${f.repoRoot}: ${f.error}`,
-          );
-        }
       } else {
-        toast.error(`Fetch failed for all ${results.length} repos`);
+        errorToast(
+          `Fetch failed for all ${results.length} repos`,
+          failureDetail(failed),
+        );
       }
       // Refresh status after batch fetch.
       await summary.refresh({ remote: "never" });
       return results;
     } catch (error) {
-      const message = typeof error === "string" ? error : String(error);
-      toast.error(`Batch fetch failed: ${message}`);
+      errorToast("Batch fetch failed", error);
       return [];
     }
   }, [repos, summary]);

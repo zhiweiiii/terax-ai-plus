@@ -32,6 +32,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { BranchActionsMenu } from "./BranchActionsMenu";
 import { BranchConfirmDialog } from "./BranchConfirmDialog";
@@ -136,9 +137,7 @@ export function RepoBranchSelector({
       const result = await native.gitListBranches(repoRoot);
       setBranches((current) => ({ ...current, [repoRoot]: result.branches }));
     } catch (e) {
-      toast.error(`Could not list branches for ${shortName(repoRoot)}`, {
-        description: String(e),
-      });
+      errorToast(`Could not list branches for ${shortName(repoRoot)}`, e);
     } finally {
       inFlight.current.delete(repoRoot);
       setLoading((current) => (current === repoRoot ? null : current));
@@ -174,9 +173,7 @@ export function RepoBranchSelector({
             : `Switched to ${label ?? branchName} in ${shortName(repoRoot)}`,
         );
       } catch (e) {
-        toast.error(`Checkout failed in ${shortName(repoRoot)}`, {
-          description: String(e),
-        });
+        errorToast(`Checkout failed in ${shortName(repoRoot)}`, e);
       } finally {
         setCheckingOut(null);
       }
@@ -212,9 +209,7 @@ export function RepoBranchSelector({
         await native.gitPullFfOnly(repoRoot);
         toast.success(`Pulled latest for ${shortName(repoRoot)}`);
       } catch (e) {
-        toast.error(`Pull failed in ${shortName(repoRoot)}`, {
-          description: String(e),
-        });
+        errorToast(`Pull failed in ${shortName(repoRoot)}`, e);
       } finally {
         setBusyOp(null);
         refreshRepo(repoRoot);
@@ -239,12 +234,10 @@ export function RepoBranchSelector({
         } else if (result.merged) {
           toast.success(`Merged ${target} in ${shortName(repoRoot)}`);
         } else {
-          toast.error(result.message || `Merge of ${target} failed`);
+          errorToast(result.message || `Merge of ${target} failed`);
         }
       } catch (e) {
-        toast.error(`Merge failed in ${shortName(repoRoot)}`, {
-          description: String(e),
-        });
+        errorToast(`Merge failed in ${shortName(repoRoot)}`, e);
       } finally {
         setBusyOp(null);
         refreshRepo(repoRoot);
@@ -267,12 +260,10 @@ export function RepoBranchSelector({
               "Resolve them in the terminal, then continue or abort.",
           });
         } else {
-          toast.error(result.message || `Rebase onto ${target} failed`);
+          errorToast(result.message || `Rebase onto ${target} failed`);
         }
       } catch (e) {
-        toast.error(`Rebase failed in ${shortName(repoRoot)}`, {
-          description: String(e),
-        });
+        errorToast(`Rebase failed in ${shortName(repoRoot)}`, e);
       } finally {
         setBusyOp(null);
         refreshRepo(repoRoot);

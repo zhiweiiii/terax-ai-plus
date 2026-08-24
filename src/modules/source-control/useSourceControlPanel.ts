@@ -973,6 +973,45 @@ export function useSourceControlPanel(
         }
       }
 
+      // Pull before committing, and only commit if every repo came back clean.
+      // Committing first and discovering the remote had moved leaves a local
+      // commit that cannot be pushed, which is the state this button exists to
+      // avoid. Fast-forward only on purpose: it either applies cleanly or it
+      // declines, and a merge started under a dirty tree is not something to
+      // begin on the user's behalf.
+      //
+      // Runs after the pre-commit checks so the warning dialog, which
+      // re-invokes this with skipChecks, does not pull twice.
+      if (andPush) {
+        const pullFailed: string[] = [];
+        for (const target of targets) {
+          try {
+            const before = await native.gitStatus(target.repoRoot);
+            // No upstream means nothing to pull from; the push step reports it.
+            if (!before.upstream) continue;
+            await native.gitFetch(target.repoRoot);
+            const fresh = await native.gitStatus(target.repoRoot);
+            if (fresh.behind === 0) continue;
+            if (fresh.ahead > 0) {
+              pullFailed.push(
+                `${target.name}: 本地领先 ${fresh.ahead}、落后 ${fresh.behind}，已分叉，请先手动合并或变基`,
+              );
+              continue;
+            }
+            await native.gitPullFfOnly(target.repoRoot);
+            invalidateRepoDiffs(target.repoRoot);
+          } catch (error) {
+            pullFailed.push(`${target.name}: ${normalizeError(error)}`);
+          }
+        }
+        if (pullFailed.length > 0) {
+          setActionError(`拉取失败，未提交。${pullFailed.join("; ")}`);
+          await summary.refresh({ remote: "never" });
+          setLocalActionBusy(null);
+          return;
+        }
+      }
+
       setRewordTarget(null);
       const done: string[] = [];
       const failed: { name: string; error: string }[] = [];

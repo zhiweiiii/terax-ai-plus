@@ -46,6 +46,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 
 type ConfirmSpec = {
@@ -106,7 +107,7 @@ export function CommitContextMenu({
         toast.success(success);
         onRefresh();
       } catch (e) {
-        toast.error(String(e));
+        errorToast("Git 操作失败", e);
       } finally {
         setBusy(false);
       }

@@ -11,7 +11,7 @@ import { type GitDiffResult, native } from "@/lib/native";
 import { FileDiffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useState } from "react";
-import { toast } from "sonner";
+import { errorToast } from "@/lib/errorToast";
 
 /** Working-tree diff of the current branch, read-only in a scrollable panel. */
 export function WorkingTreeDiffDialog({
@@ -39,9 +39,7 @@ export function WorkingTreeDiffDialog({
       setDiff(await native.gitDiffWithRef(repoRoot, refName));
     } catch (e) {
       setError(String(e));
-      toast.error(`Could not diff ${refName} against the working tree`, {
-        description: String(e),
-      });
+      errorToast(`Could not diff ${refName} against the working tree`, e);
     } finally {
       setBusy(false);
     }

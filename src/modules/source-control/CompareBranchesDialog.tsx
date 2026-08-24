@@ -15,7 +15,7 @@ import {
 import { GitCompareIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useState } from "react";
-import { toast } from "sonner";
+import { errorToast } from "@/lib/errorToast";
 /** Two-column commit comparison: commits only in each branch of the pair. */
 export function CompareBranchesDialog({
   open,
@@ -44,9 +44,7 @@ export function CompareBranchesDialog({
       setResult(await native.gitCompareBranches(repoRoot, left, right));
     } catch (e) {
       setError(String(e));
-      toast.error(`Could not compare ${left} with ${right}`, {
-        description: String(e),
-      });
+      errorToast(`Could not compare ${left} with ${right}`, e);
     } finally {
       setBusy(false);
     }

@@ -26,7 +26,7 @@ import { native } from "@/lib/native";
 import { ArrowUp01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useState } from "react";
-import { toast } from "sonner";
+import { errorToast } from "@/lib/errorToast";
 import { DialogSyncProgress } from "./DialogSyncProgress";
 import { parseUpstreamRemote } from "./remoteHelpers";
 import type {
@@ -156,7 +156,7 @@ export function PushDialog({
         onOpenChange(false);
       }
     } catch (error) {
-      toast.error(typeof error === "string" ? error : String(error));
+      errorToast("Push 失败", error);
     } finally {
       setRunning(false);
     }
@@ -182,7 +182,7 @@ export function PushDialog({
         onOpenChange(false);
       }
     } catch (error) {
-      toast.error(typeof error === "string" ? error : String(error));
+      errorToast("Push 失败", error);
     } finally {
       setRunning(false);
     }

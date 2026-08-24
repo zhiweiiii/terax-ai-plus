@@ -20,6 +20,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import type { GitRemoteEntry } from "./useMultiRepoSourceControl";
 
@@ -83,7 +84,7 @@ export function RemoteManagerDialog({
       await op();
       await load();
     } catch (e) {
-      toast.error(typeof e === "string" ? e : String(e));
+      errorToast("远程仓库操作失败", e);
     } finally {
       setBusy(null);
     }

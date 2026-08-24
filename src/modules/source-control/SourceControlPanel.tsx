@@ -83,7 +83,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { toast } from "sonner";
+import { errorToast } from "@/lib/errorToast";
 import { PushDialog } from "./PushDialog";
 import {
   defaultLocalNameForRemote,
@@ -394,7 +394,7 @@ function BranchDropdown({
         setOpen(false);
         onRefresh();
       } catch (e) {
-        toast.error(String(e));
+        errorToast("Git 操作失败", e);
       } finally {
         checkoutInFlight.current = false;
         setCheckingOut(false);
@@ -418,7 +418,7 @@ function BranchDropdown({
       setOpen(false);
       onRefresh();
     } catch (e) {
-      toast.error(String(e));
+      errorToast("Git 操作失败", e);
     } finally {
       checkoutInFlight.current = false;
       setCheckingOut(false);
@@ -749,9 +749,11 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   const commitHint = canCommit
     ? `Commit with ${commitShortcut}.`
     : (commitDisabledReason ?? `Commit with ${commitShortcut}.`);
+  const PULL_COMMIT_PUSH_HINT =
+    "Pull first (fast-forward only), then commit and push. Nothing is committed if the pull declines.";
   const commitAndPushHint = canCommit
-    ? "Commit and push to the upstream branch."
-    : (commitDisabledReason ?? "Commit and push to the upstream branch.");
+    ? PULL_COMMIT_PUSH_HINT
+    : (commitDisabledReason ?? PULL_COMMIT_PUSH_HINT);
   const pushHint = scm.pushHint ?? "Push is unavailable right now.";
   const pushDisabledReason = fixedTargetPending
     ? "Wait for the selected repository to finish loading."
@@ -839,10 +841,11 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           }
         }
         if (failures.length > 0) {
-          toast.error(
+          errorToast(
             failures.length === repoList.length
               ? `Pull failed for all ${failures.length} repos`
               : `Pulled ${repoList.length - failures.length}/${repoList.length} repos; ${failures.length} failed`,
+            failures.join("\n"),
           );
         }
         await scm.refresh();
@@ -854,7 +857,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         await scm.refresh();
       }
     } catch (error) {
-      toast.error(typeof error === "string" ? error : String(error));
+      errorToast("Git 操作失败", error);
     } finally {
       setPullBusy(false);
     }
@@ -1398,37 +1401,6 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                       size="xs"
                       variant="secondary"
                       className="h-7 cursor-pointer text-[11.5px] font-medium disabled:cursor-not-allowed"
-                      disabled={!canCommit}
-                      onClick={() => void scm.commitAndPush()}
-                    >
-                      {scm.actionBusy === "commit-and-push" ? (
-                        <>
-                          <Spinner className="size-3.5" />
-                          Committing…
-                        </>
-                      ) : (
-                        "Commit & Push"
-                      )}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent
-                    side="bottom"
-                    className={cn(
-                      SOURCE_CONTROL_TOOLTIP_CLASS,
-                      "text-[10.5px]",
-                    )}
-                  >
-                    {commitAndPushHint}
-                  </TooltipContent>
-                </Tooltip>
-              </div>
-              <div className="grid w-full gap-1.5">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      size="xs"
-                      variant="secondary"
-                      className="h-7 cursor-pointer text-[11.5px] font-medium disabled:cursor-not-allowed"
                       disabled={
                         (!scm.canPush && repoList.length <= 1) ||
                         fixedTargetPending ||
@@ -1466,6 +1438,37 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                     )}
                   >
                     {pushDisabledReason}
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+              <div className="grid w-full gap-1.5">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      className="h-7 cursor-pointer text-[11.5px] font-medium disabled:cursor-not-allowed"
+                      disabled={!canCommit}
+                      onClick={() => void scm.commitAndPush()}
+                    >
+                      {scm.actionBusy === "commit-and-push" ? (
+                        <>
+                          <Spinner className="size-3.5" />
+                          Committing…
+                        </>
+                      ) : (
+                        "Pull & Commit & Push"
+                      )}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="bottom"
+                    className={cn(
+                      SOURCE_CONTROL_TOOLTIP_CLASS,
+                      "text-[10.5px]",
+                    )}
+                  >
+                    {commitAndPushHint}
                   </TooltipContent>
                 </Tooltip>
               </div>

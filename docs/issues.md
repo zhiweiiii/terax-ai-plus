@@ -92,7 +92,7 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 
 **13　文档精简与中文化** - 已完成。`TERAX.md`、`README.md`、`ROADMAP.md`、`docs/README.md`、七份架构文档、本文全部改为中文并按"与架构文档重复"精简。`docs/history/` 下三份移植文档合并成一份 `git-移植档案.md`：留决策和坑，扔掉按 agent 分的状态表和进度清单。**代码注释按用户决定保持英文**，这是明确接受的中英混排。
 
-**14　终端右键粘贴粘两次** - 已修。`rendererPool.ts` 的 contextmenu 处理加了 `host.dataset.teraxContextMenu` 守卫和 `RIGHT_CLICK_PASTE_GAP_MS = 250` 的间隔护栏，同一次右键只允许粘贴一次。终端右键沿用惯例：**有选中就复制，没选中就粘贴**。
+**14　终端右键粘贴粘两次** - **本条记载的修法是错的，已被第 24 条取代。** 当时加的 `RIGHT_CLICK_PASTE_GAP_MS = 250` 间隔护栏基于"同一个动作被触发了两遍"这个错误假设，实际两次粘贴来自两个不同的程序，该护栏从未生效，现已删除。真正的根因和修法见第 24 条。
 
 **16　diff 里「完整文件」按钮点了没反应** - 已修。根因和第 21 条同一个（偏好 store 从不初始化），另外给 `<CodeMirror>` 加了 `key={collapseUnchanged ? "folded" : "full"}`：`unifiedMergeView` 的折叠状态是初始化时算好的 StateField，reconfigure 不会重建它，必须强制重挂。
 
@@ -110,9 +110,92 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 
 **23　手机端密码可以重新设置** - 已实现（`web/auth.rs` + `web_set_password` / `web_has_custom_password`）。凭据从编译期常量搬到 `%LOCALAPPDATA%/terax/web-auth.json`，两件必须一起解决的事都做了：**Argon2id 加盐哈希存成 PHC 字符串**（不是把无盐 SHA-1 原样搬到磁盘上），以及**改密码轮换会话令牌**（否则 cookie 的 `Max-Age=604800` 意味着旧 cookie 还能用一周）。还没设过密码时仍由编译期常量应答，升级不会把已有安装关在门外。
 
+**28　git 失败信息一键复制** - 已实现（`src/lib/errorToast.ts`）。`errorToast(title, detail)` 在提示框上加「复制」按钮，复制的是标题加**完整**正文，停留时间从默认 4 秒延长到 10 秒。
+
+**为什么需要**：git 把真正的失败原因放在 stderr **末尾**，而提示框显示开头并截断。实测遇到过一次 - 推送失败时前面先打了一条 GCM 的 `a host provider override was set but no such provider ...` 警告，真正的原因被 `...` 整个吃掉，无从排查。
+
+`source-control/` 和 `git-history/` 下 27 处 git 失败提示全部改用它。唯一保留 `toast.error` 的是 `RemoteManagerDialog` 里的"远程名不能含空格"，那是输入校验不是 git 失败，没有可复制的详情。
+
+顺带补上三处**详情原本就到不了用户手里**的地方，这是实际的功能增量：`useMultiRepoSourceControl` 批量 fetch 的每仓库失败原因原来只 `console.warn` 前三条；同处"部分成功"分支原本不带任何原因；`SourceControlPanel` 多仓库 pull 的 `failures` 数组只被用来数个数。现在都逐行汇总进提示。
+
+**29　Commit & Push 改为 Pull & Commit & Push** - 已实现。提交前先拉，拉干净了才提交。
+
+加在 `runCommit` 里、**预检查之后**（警告确认对话框会带 skipChecks 重新触发，放在检查前会拉两次），提交循环之前。按 `targets` 逐仓库处理，单仓库多仓库同一条路：无 upstream 跳过、`behind === 0` 跳过、`ahead > 0 且 behind > 0` 记为分叉失败、否则 `gitFetch` + `gitPullFfOnly`。**任何一个仓库失败就整体中止，一个都不提交。**
+
+两个刻意的决定：**只用 fast-forward** - 此刻工作区是脏的（正准备提交），在这种状态下替用户开一个 merge 太冒险，ff-only 要么干净应用要么直接拒绝，不会留下半个合并状态；**分叉时报出具体数字**（领先 N、落后 M）而不是笼统的"pull 失败"，因为这种情况需要用户自己决定 merge 还是 rebase。
+
+按钮位置也按要求对调：原来是 `[Commit][Commit & Push]` 上排、`[Push]` 整行，现在是 `[Commit][Push]` 上排、`[Pull & Commit & Push]` 整行。
+
+**已知情况**：远端更新的文件如果本地也改过，ff-only 会被 git 拒绝（`Your local changes would be overwritten by merge`），此时按规则不提交并报错。行为符合要求，错误来自 git 本身，配合第 28 条可以完整复制出来。
+
 ### 未决
 
 **15　打包体积** - `src-tauri/target` 下的产物仍然很大。未处理。
+
+**24　终端右键粘贴两次（已定位并修复，代价已接受）**
+
+**根因：两次粘贴来自两个不同的程序。** Claude Code 开着鼠标上报，xterm 把右键作为鼠标上报转发给它，而 **Claude Code 自己实现了右键粘贴**。于是我们粘一次、它再粘一次；它读剪贴板有往返，这就是两次之间那个肉眼可见的时间间隔。
+
+排查过程中三次修错方向，都是因为假设"同一个动作被触发了两遍"。推翻它的是 `pty_write` 的临时日志：一次右键只有**一条**写入。真正的判据是使用者给出的对比 - **只有 Claude Code 会双份，普通 shell 和 opencode 都不会**。
+
+被排除的可能，别再查一遍：
+
+- `pendingInput` 排队重放：每条 flush 路径写完都立即清空。
+- `writeToPty` 批处理：它是直写，一次 `onData` 就是一次 `pty_write`。
+- Ctrl+V 路径：它的 keydown 分支末尾 `preventDefault()`，原生 paste 事件根本不产生，所以从来不双份。
+- 日志里成片的 `len=11` / `len=12`：`bracketed=false`，是 TUI 开着 mouse tracking 时的鼠标移动上报，不是粘贴。
+
+**修法**：`term.modes.mouseTrackingMode !== "none"` 时不执行我们自己的粘贴，把按钮让给程序。
+
+**已接受的代价**：opencode 也开鼠标上报，但它**不**实现右键粘贴，所以 opencode 里右键粘贴不可用（Ctrl+V 仍可用）。
+
+**曾经试过统一吞掉右键**（捕获阶段吃掉 button 2 的 mousedown / mouseup / auxclick，不转发给程序），三个环境行为一致且都能粘贴。**使用者明确否决了这个方案**，理由是右键上报应该留给应用。所以看到 opencode 不能右键粘贴时，**不要再改回吞掉右键的做法**。
+
+顺带定下来的：**复制改为选中即复制**（`mouseup` 上读，不用 `onSelectionChange`，后者拖过每个单元格都触发），复制成功在**右上角**提示 `已复制 N 个字符`。右上是因为其它提示都在右下角，会盖住状态栏和刚复制的那行提示符。选区**不清除** - 它是使用者对"拿了什么"的标记，在眼皮底下清掉像是复制失败了。既然复制移到了选中时，**右键只负责粘贴**。
+
+**25　设置窗口去掉置顶，并且要秒开**
+
+两件事，都在 `lib.rs` 的 `open_settings_window` 和 `src/settings/main.tsx` 里。
+
+**置顶**：没有用到 `set_always_on_top`，压在最上面靠的是 `builder.parent(&main)` 建立的父子关系（注释里写的就是"keep it above the main app window"）。去掉这一行就变成普通窗口。**去掉之前先确认连带效果**：父子关系同时负责"设置窗口跟着主窗口最小化/关闭"，拿掉之后设置窗口会变成一个独立窗口，主窗口关了它可能还留着，需要自己接管生命周期，否则会留下一个关不掉的孤儿窗口。
+
+**慢**：不是错觉，是设计导致的。窗口用 `.visible(false)` 创建，然后由设置页自己的 JS 调 `show()`：
+
+```ts
+setTimeout(showWindow, 50);
+setTimeout(showWindow, 500);
+```
+
+也就是说从点击到出现，要等一个新 webview 进程起来 + React bundle 解析 + `ThemeProvider` 初始化，再加至少 50ms 的定时器。第二个 500ms 的定时器是兜底，说明第一次经常不成功。
+
+可选的做法（按代价从低到高）：让窗口直接可见并给一个和主题一致的背景色，避免白闪；或者预建窗口、关闭时只 `hide()` 而不销毁，之后打开就是 `show()`。**选后者的话必须一起处理既有的第 36 条**：`get_webview_window("settings")` 在窗口关闭后仍返回句柄，对已关闭的原生窗口调 `show()` 不会重建它，所以关掉再开可能毫无反应。
+
+**26　关于页面里的链接指向上游**
+
+`src/settings/sections/AboutSection.tsx` 顶部两个常量仍指向上游：
+
+```ts
+const REPO_URL = "https://github.com/crynta/terax-ai";
+const WEBSITE = "https://terax.app";
+```
+
+改成本仓库（`github.com/zhiweiiii/terax-ai`）。`terax.app` 是上游的站点，本分支没有对应的站点，那一行要么去掉要么指向仓库。这和第 22 条（README 里徽章和链接指向上游）是同一类事实错误，那次只处理了 README。
+
+页面里 `Bundle ID` 显示的 `app.crynta.terax` **保持不变**：那是真实的包标识符，改它会换掉安装路径、设置存储位置和快捷方式身份（代价见第 11 条），不在这条待办范围内。
+
+**27　opencode 里不要拦截 Ctrl+T / Ctrl+P 等快捷键**
+
+这些键现在被全局快捷键系统吃掉了，传不到终端里的程序。`useGlobalShortcuts` 在 window 上以 `capture: true` 监听，匹配到就 `preventDefault()` + `stopImmediatePropagation()`，所以 `Ctrl+P`（`commandPalette.open`）、`Ctrl+T`（`tab.new`）、`Ctrl+Shift+P`、`Ctrl+Shift+T` 在 opencode 里全都触发的是 Terax 自己的功能。
+
+**扩展点是现成的，不需要改派发逻辑**：`useGlobalShortcuts` 已经接受 `isDisabled(id, e)`，返回 true 就直接 `return`，不 `preventDefault`，按键自然落到终端。App.tsx 里的 `shortcutsDisabled` 就是它，已经按 `id` 处理了 pane swap、editor.undo/redo、selection.sendToAgent 等情况，加一个分支即可。
+
+判定条件要想清楚，别写成"活动标签是终端就放行"：
+
+- 只在**焦点确实在终端里**时放行（`(e.target as HTMLElement)?.closest?.(".xterm")`，`selection.sendToAgent` 那一支已经是这么做的）。
+- 只在**终端里真的跑着接管键盘的程序**时放行。`pty::agent_detect` 已经把当前 agent 名字记在 `Session::web_agent` 里，前端 store 在 `terminal/lib/agentActivity.ts`。**不要按"是不是 alt 屏"判断** - 普通的分页器（less）也在 alt 屏，但它不需要 Ctrl+T。
+- **哪些键放行需要列出来**。全部放行会让使用者在 agent 里彻底失去新建标签页和命令面板；一个都不放行就是现在这样。建议只放 agent 真正用到的那几个，并在设置里可见，否则"我的 Ctrl+T 为什么有时候不灵"会变成一个无法自查的问题。
+
+注意这和第 24 条是同一类问题的两个面：**一个键到底属于终端还是属于里面跑的程序。** 右键那次的结论是"让给程序"，这里也应该保持一致的判断方式。
 
 ## Web 终端桥接（`src-tauri/src/modules/web/`）
 

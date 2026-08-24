@@ -1,5 +1,6 @@
 import { type GitBranchEntry, native } from "@/lib/native";
 import { useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { BranchConfirmDialog } from "./BranchConfirmDialog";
 
@@ -38,9 +39,7 @@ export function DeleteBranchDialog({
       onOpenChange(false);
       onDeleted();
     } catch (e) {
-      toast.error(`Could not delete ${branch.name}`, {
-        description: String(e),
-      });
+      errorToast(`Could not delete ${branch.name}`, e);
     } finally {
       setBusy(false);
     }

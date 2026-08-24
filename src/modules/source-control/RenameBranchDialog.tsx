@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { native } from "@/lib/native";
 import { useEffect, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 
 /** Rename a local branch. The input is pre-filled with the current name. */
@@ -56,9 +57,7 @@ export function RenameBranchDialog({
       onOpenChange(false);
       onRenamed();
     } catch (e) {
-      toast.error(`Could not rename ${branchName}`, {
-        description: String(e),
-      });
+      errorToast(`Could not rename ${branchName}`, e);
     } finally {
       setBusy(false);
     }

@@ -16,6 +16,7 @@ import { native } from "@/lib/native";
 import { GitBranchPlusIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 
 /**
@@ -69,9 +70,7 @@ export function NewBranchDialog({
       onOpenChange(false);
       onCreated(checkout);
     } catch (e) {
-      toast.error(`Could not create branch in ${repoName}`, {
-        description: String(e),
-      });
+      errorToast(`Could not create branch in ${repoName}`, e);
     } finally {
       setBusy(false);
     }

@@ -20,6 +20,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { BranchConfirmDialog } from "./BranchConfirmDialog";
 import { WorktreeDialog } from "./WorktreeDialog";
@@ -120,9 +121,7 @@ export function WorktreeManagerDialog({
       setRemoving(null);
       await load();
     } catch (e) {
-      toast.error(`Could not remove worktree ${removing.branch}`, {
-        description: String(e),
-      });
+      errorToast(`Could not remove worktree ${removing.branch}`, e);
     } finally {
       setBusy(null);
     }

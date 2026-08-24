@@ -8,6 +8,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { type FontWeight, Terminal } from "@xterm/xterm";
+import { toast } from "sonner";
 import { shouldCursorBlink } from "./cursorBlink";
 import {
   readTerminalClipboard,
@@ -203,11 +204,6 @@ export function applyBackgroundActive(active: boolean): void {
   }
 }
 
-/** One right-click is one paste. Anything arriving inside this window is the
- *  same gesture reaching us twice, not the user asking again. */
-const RIGHT_CLICK_PASTE_GAP_MS = 250;
-let lastRightClickPasteAt = 0;
-
 function createSlot(): Slot {
   let focusTerminal = () => {};
   const term = new Terminal({
@@ -231,44 +227,84 @@ function createSlot(): Slot {
   getRecycler().appendChild(host);
   term.open(host);
 
-  // Right-click does the terminal thing and never opens a menu. The menu that
-  // used to appear was the webview's own default: nothing here listened for
-  // `contextmenu` at all. Scoped to this host on purpose - the explorer, the
-  // tabs and the editor all have real context menus, and a document-level
-  // handler would take those away too.
+  // Right-click never opens a menu: WebView2 enables its own by default
+  // (wry's `default_context_menus` is true and Tauri does not override it),
+  // so suppressing it is this handler's job. Selection copies, no selection
+  // pastes, which is the terminal convention.
   //
-  // Guarded twice, because one right-click was pasting twice and the second
-  // write was not coming from a second call in this function:
-  //
-  //   - the host is marked, so a module re-execution (vite HMR leaves the old
-  //     host in the DOM with its old listener) cannot bind a second one;
-  //   - the paste itself is rate-limited, so whatever else manages to deliver
-  //     a second contextmenu for the same click lands inside the window and is
-  //     dropped.
-  //
-  // Both are cheap, and between them the clipboard can only be applied once
-  // per gesture however the duplicate arrives.
+  // Capture phase, and propagation stops here. xterm has its own right-click
+  // machinery on `.xterm`, a child of this host: it moves its hidden textarea
+  // under the cursor so the native menu's Paste lands there and its own
+  // `paste` listener forwards it. With the menu suppressed that route can
+  // never fire anyway, and capturing keeps it from arming at all.
   if (!host.dataset.teraxContextMenu) {
     host.dataset.teraxContextMenu = "1";
-    host.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      if (term.hasSelection()) {
-        const selection = term.getSelection();
-        if (selection) {
-          void navigator.clipboard.writeText(selection).catch(() => {});
-          term.clearSelection();
-        }
+
+    // The right click still reaches the program as a mouse report: xterm
+    // forwards it whenever the program turned mouse tracking on, and that is
+    // left alone on purpose so a program that wants the button gets it.
+    //
+    // Capture phase, and propagation stops here, so xterm's own contextmenu
+    // handler never runs: it moves the hidden textarea under the cursor so
+    // the native menu's Paste lands there and its `paste` listener forwards
+    // it, which would be a second route to the pty.
+    host.addEventListener(
+      "contextmenu",
+      (e) => {
+        // WebView2 enables its own menu by default (wry's
+        // `default_context_menus` is true and Tauri does not override it), so
+        // suppressing it is this handler's job.
+        e.preventDefault();
+        e.stopPropagation();
+        // Copying happens on selection, so right-click only pastes.
+        //
+        // A program that turned mouse tracking on owns the mouse and may run
+        // its own right-click paste. Claude Code does, and pasting here as
+        // well pasted twice, the second arriving a beat later once it had
+        // read the clipboard. So the button is left to such programs.
+        // Accepted cost: opencode turns tracking on but never pastes, so
+        // right-click paste does nothing there.
+        if (term.modes.mouseTrackingMode !== "none") return;
+        void navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) pasteIntoTerminal(term, text);
+          })
+          .catch(() => {});
+      },
+      true,
+    );
+
+    // Copy on select, the terminal convention. Read on mouseup rather than
+    // from onSelectionChange, which fires on every cell the drag crosses; one
+    // gesture should be one copy. Double and triple click land here too.
+    // The selection is deliberately left standing: it is the user's mark of
+    // what they took, and clearing it under them looks like the copy failed.
+    let lastCopied = "";
+    host.addEventListener("mouseup", (e) => {
+      if (e.button !== 0) return;
+      if (!term.hasSelection()) {
+        lastCopied = "";
         return;
       }
-      const now = Date.now();
-      if (now - lastRightClickPasteAt < RIGHT_CLICK_PASTE_GAP_MS) return;
-      lastRightClickPasteAt = now;
+      const selection = term.getSelection();
+      // Re-selecting the same text is not a new copy; clicking inside an
+      // existing selection would otherwise re-toast on every click.
+      if (!selection || selection === lastCopied) return;
+      lastCopied = selection;
       void navigator.clipboard
-        .readText()
-        .then((text) => {
-          if (text) pasteIntoTerminal(term, text);
+        .writeText(selection)
+        .then(() => {
+          // Top-right on purpose: the app's other toasts sit bottom-right,
+          // over the status bar and the prompt just copied from.
+          toast.success(`已复制 ${selection.length} 个字符`, {
+            position: "top-right",
+            duration: 1500,
+          });
         })
-        .catch(() => {});
+        .catch(() => {
+          toast.error("复制失败", { position: "top-right" });
+        });
     });
   }
 

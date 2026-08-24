@@ -1,5 +1,6 @@
 import { native } from "@/lib/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import {
   clearRepositoryTargetForSpace,
@@ -65,9 +66,7 @@ export function useRepositoryTargeting({
           requestId === requestRef.current &&
           isContextCurrent(spaceId, workspaceKey)
         ) {
-          toast.error("Could not resolve Git repository", {
-            description: String(error),
-          });
+          errorToast("Could not resolve Git repository", error);
         }
         return null;
       }

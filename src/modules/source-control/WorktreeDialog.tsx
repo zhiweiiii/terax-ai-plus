@@ -22,6 +22,7 @@ import type { GitBranchEntry } from "@/lib/native";
 import { FolderOpenIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { defaultWorktreePath, gitWorktreeAdd } from "./worktreeOps";
 
@@ -91,9 +92,7 @@ export function WorktreeDialog({
       onOpenChange(false);
       onCreated();
     } catch (e) {
-      toast.error(`Could not create worktree in ${repoName}`, {
-        description: String(e),
-      });
+      errorToast(`Could not create worktree in ${repoName}`, e);
     } finally {
       setBusy(false);
     }
