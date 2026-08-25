@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { useUpdater } from "@/modules/updater";
-import { GithubIcon, Globe02Icon } from "@hugeicons/core-free-icons";
+import { GithubIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getName, getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -8,8 +8,11 @@ import { arch, platform } from "@tauri-apps/plugin-os";
 import { useEffect, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 
-const REPO_URL = "https://github.com/crynta/terax-ai";
-const WEBSITE = "https://terax.app";
+// This fork. The upstream project keeps its own repo and site; pointing at
+// them here would show someone else's releases and issues as if they were
+// this build's.
+const REPO_URL = "https://github.com/zhiweiiii/terax-ai";
+const UPSTREAM_URL = "https://github.com/crynta/terax-ai";
 
 const PLATFORM_LABEL: Record<string, string> = {
   macos: "macOS",
@@ -100,18 +103,18 @@ export function AboutSection() {
             className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
           >
             <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
-            crynta/terax-ai
+            zhiweiiii/terax-ai
           </button>
         </dd>
-        <dt className="text-muted-foreground">官网</dt>
+        <dt className="text-muted-foreground">上游项目</dt>
         <dd>
           <button
             type="button"
-            onClick={() => void openUrl(WEBSITE)}
+            onClick={() => void openUrl(UPSTREAM_URL)}
             className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
           >
-            <HugeiconsIcon icon={Globe02Icon} size={12} strokeWidth={1.75} />
-            terax.app
+            <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
+            crynta/terax-ai
           </button>
         </dd>
       </dl>

@@ -363,7 +363,7 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                 variant="ghost"
                 size="sm"
                 className="h-6 gap-1 px-1.5 text-[10.5px]"
-                title="添加到 Claude Code"
+                title="发送到 agent"
                 onClick={() =>
                   onAttachToAgent(
                     joinPath(
@@ -378,7 +378,7 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                   size={13}
                   strokeWidth={1.75}
                 />
-                添加到 Claude Code
+                发送到 agent
               </Button>
             ) : null}
           </div>

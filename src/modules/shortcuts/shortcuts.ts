@@ -261,7 +261,7 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "selection.sendToAgent",
-    label: "把选中内容发给 Claude Code",
+    label: "把选中内容发送到 agent",
     group: "Search",
     // Keep Mod+L available to the shell for clear-screen, including when
     // terminal text is selected and this shortcut is otherwise eligible.

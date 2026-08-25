@@ -18,10 +18,15 @@ ReactDOM.createRoot(
   </ThemeProvider>,
 );
 
-const showWindow = () => {
-  getCurrentWindow()
-    .show()
-    .catch((e) => console.error("settings show failed:", e));
-};
-setTimeout(showWindow, 50);
-setTimeout(showWindow, 500);
+// Show as soon as the first paint is on screen. This used to be a 50 ms timer
+// with a 500 ms one behind it as a backstop, which added a fixed wait to a
+// window that was already slow to build. A double rAF fires after the browser
+// has committed the frame React just produced, so the window appears with
+// content rather than as an empty transparent rectangle.
+requestAnimationFrame(() => {
+  requestAnimationFrame(() => {
+    getCurrentWindow()
+      .show()
+      .catch((e) => console.error("settings show failed:", e));
+  });
+});

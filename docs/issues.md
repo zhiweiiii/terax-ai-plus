@@ -128,74 +128,37 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 
 **已知情况**：远端更新的文件如果本地也改过，ff-only 会被 git 拒绝（`Your local changes would be overwritten by merge`），此时按规则不提交并报错。行为符合要求，错误来自 git 本身，配合第 28 条可以完整复制出来。
 
+**15　编译产物太大** - 已处理，新增 `清理编译产物.ps1`。
+
+先量了一遍：`target` 共 5.99 GB（debug 3.1、release 2.7），其中 `debug/incremental` 0.60 GB、两个 `deps` 合计 4.2 GB。**Cargo profile 早已调好**（release: `lto = "fat"`、`codegen-units = 1`、`opt-level = "s"`、`panic = "abort"`、`strip`；dev: `debug = "line-tables-only"`、依赖不带 debuginfo），正是这些把 target 从曾经的 37 GB 压到现在这个量级。所以剩下的不是配置问题，**target 是缓存不是产物**，问题只在于什么时候清、清掉的代价多大。
+
+脚本按代价从低到高分三档：默认只删增量缓存（纯重建状态，下次构建慢一次）；`-Deep` 连 debug profile 一起删（release 保留，打包不受影响）；`-All` 走 `cargo clean`。带一个护栏：检测到 `terax-prod` 在运行就拒绝执行并说明原因 - 运行中的实例锁着 exe，删到一半会留下一个 cargo 还得自己收拾的 target。
+
+**没有动 release 的体积。** 打包出的 exe 是 10.3 MB，profile 在尺寸方向已经拉满，再往下只能把 `opt-level` 从 `"s"` 换成 `"z"`，那是拿运行速度换体积 - 和"高性能终端"这个产品定位冲突，不该由我替用户决定。
+
+**25　设置窗口去掉置顶，并且要秒开** - 已实现。
+
+**置顶**：删掉 `builder.parent(&main)`。压在最上面的从来不是 `always_on_top`（全仓库没用过那个 API），而是这层父子窗口关系。现在是普通的顶层窗口。
+
+**秒开**：改成**关闭即隐藏**（`CloseRequested` 里 `api.prevent_close()` + `hide()`），于是第二次之后每次打开都走 `get_webview_window` 那条瞬时路径，不再重建 webview、重新解析 bundle、重新启动 React。这同时**修掉了既有的第 36 条**：原来窗口关闭后句柄还在但原生窗口没了，对它 `show()` 毫无作用，settings 会一直打不开直到重启应用。
+
+**父子关系原本还负责"跟主窗口一起关闭"**，去掉之后必须自己接管，否则隐藏着的设置窗口会让进程留在后台没有可见窗口。已在 `RunEvent::WindowEvent` 里监听 main 的 `Destroyed`，销毁设置窗口。
+
+前端那两个 `setTimeout(showWindow, 50)` / `500` 换成双层 `requestAnimationFrame`：等浏览器把 React 产出的那一帧真正提交之后再显示，既去掉了固定等待，也保证窗口出现时是有内容的而不是一个透明矩形。（第二个 500ms 的定时器本身就说明第一次经常不成功。）
+
+**26　关于页面里的链接指向上游** - 已实现。`REPO_URL` 改为 `github.com/zhiweiiii/terax-ai`；原来的 `terax.app` 是上游站点、本分支没有对应站点，那一行换成「上游项目」并链到 `crynta/terax-ai`，既不再谎报又保留了 Apache 2.0 要求的出处。`Bundle ID` 显示的 `app.crynta.terax` 按既定决策不动。
+
+**27　opencode 里不要拦截 Ctrl+T / Ctrl+P 等快捷键** - 已实现。
+
+`useGlobalShortcuts` 现成的 `isDisabled(id, e)` 就是扩展点，返回 true 即不 `preventDefault`，按键自然落到终端，派发逻辑一行没动。
+
+放行条件按待办里写的三条约束收紧：**键必须在显式清单里**（`AGENT_OWNED_SHORTCUTS`：`commandPalette.open`、`commandPalette.content`、`tab.new`、`tab.newBlock`，即 Ctrl+P / Ctrl+Shift+P / Ctrl+T / Ctrl+Shift+T）；**焦点必须在终端内**（`closest(".xterm")`）；**那个 pane 必须此刻真的跑着 agent**（`useAgentActivityStore`，由 OSC 检测驱动，**不是**按"是不是 alt 屏"判断 - `less` 也在 alt 屏但它不需要这些键）。
+
+新增偏好 `agentKeyPassthrough`（默认开）并在设置页「编码 agent」分节暴露，描述里把四个键逐一列出。这一条是待办明确要求的：不可见的话，"我的 Ctrl+T 为什么有时候不灵"会变成一个无法自查的问题。
+
 ### 未决
 
-**15　打包体积** - `src-tauri/target` 下的产物仍然很大。未处理。
-
-**24　终端右键粘贴两次（已定位并修复，代价已接受）**
-
-**根因：两次粘贴来自两个不同的程序。** Claude Code 开着鼠标上报，xterm 把右键作为鼠标上报转发给它，而 **Claude Code 自己实现了右键粘贴**。于是我们粘一次、它再粘一次；它读剪贴板有往返，这就是两次之间那个肉眼可见的时间间隔。
-
-排查过程中三次修错方向，都是因为假设"同一个动作被触发了两遍"。推翻它的是 `pty_write` 的临时日志：一次右键只有**一条**写入。真正的判据是使用者给出的对比 - **只有 Claude Code 会双份，普通 shell 和 opencode 都不会**。
-
-被排除的可能，别再查一遍：
-
-- `pendingInput` 排队重放：每条 flush 路径写完都立即清空。
-- `writeToPty` 批处理：它是直写，一次 `onData` 就是一次 `pty_write`。
-- Ctrl+V 路径：它的 keydown 分支末尾 `preventDefault()`，原生 paste 事件根本不产生，所以从来不双份。
-- 日志里成片的 `len=11` / `len=12`：`bracketed=false`，是 TUI 开着 mouse tracking 时的鼠标移动上报，不是粘贴。
-
-**修法**：`term.modes.mouseTrackingMode !== "none"` 时不执行我们自己的粘贴，把按钮让给程序。
-
-**已接受的代价**：opencode 也开鼠标上报，但它**不**实现右键粘贴，所以 opencode 里右键粘贴不可用（Ctrl+V 仍可用）。
-
-**曾经试过统一吞掉右键**（捕获阶段吃掉 button 2 的 mousedown / mouseup / auxclick，不转发给程序），三个环境行为一致且都能粘贴。**使用者明确否决了这个方案**，理由是右键上报应该留给应用。所以看到 opencode 不能右键粘贴时，**不要再改回吞掉右键的做法**。
-
-顺带定下来的：**复制改为选中即复制**（`mouseup` 上读，不用 `onSelectionChange`，后者拖过每个单元格都触发），复制成功在**右上角**提示 `已复制 N 个字符`。右上是因为其它提示都在右下角，会盖住状态栏和刚复制的那行提示符。选区**不清除** - 它是使用者对"拿了什么"的标记，在眼皮底下清掉像是复制失败了。既然复制移到了选中时，**右键只负责粘贴**。
-
-**25　设置窗口去掉置顶，并且要秒开**
-
-两件事，都在 `lib.rs` 的 `open_settings_window` 和 `src/settings/main.tsx` 里。
-
-**置顶**：没有用到 `set_always_on_top`，压在最上面靠的是 `builder.parent(&main)` 建立的父子关系（注释里写的就是"keep it above the main app window"）。去掉这一行就变成普通窗口。**去掉之前先确认连带效果**：父子关系同时负责"设置窗口跟着主窗口最小化/关闭"，拿掉之后设置窗口会变成一个独立窗口，主窗口关了它可能还留着，需要自己接管生命周期，否则会留下一个关不掉的孤儿窗口。
-
-**慢**：不是错觉，是设计导致的。窗口用 `.visible(false)` 创建，然后由设置页自己的 JS 调 `show()`：
-
-```ts
-setTimeout(showWindow, 50);
-setTimeout(showWindow, 500);
-```
-
-也就是说从点击到出现，要等一个新 webview 进程起来 + React bundle 解析 + `ThemeProvider` 初始化，再加至少 50ms 的定时器。第二个 500ms 的定时器是兜底，说明第一次经常不成功。
-
-可选的做法（按代价从低到高）：让窗口直接可见并给一个和主题一致的背景色，避免白闪；或者预建窗口、关闭时只 `hide()` 而不销毁，之后打开就是 `show()`。**选后者的话必须一起处理既有的第 36 条**：`get_webview_window("settings")` 在窗口关闭后仍返回句柄，对已关闭的原生窗口调 `show()` 不会重建它，所以关掉再开可能毫无反应。
-
-**26　关于页面里的链接指向上游**
-
-`src/settings/sections/AboutSection.tsx` 顶部两个常量仍指向上游：
-
-```ts
-const REPO_URL = "https://github.com/crynta/terax-ai";
-const WEBSITE = "https://terax.app";
-```
-
-改成本仓库（`github.com/zhiweiiii/terax-ai`）。`terax.app` 是上游的站点，本分支没有对应的站点，那一行要么去掉要么指向仓库。这和第 22 条（README 里徽章和链接指向上游）是同一类事实错误，那次只处理了 README。
-
-页面里 `Bundle ID` 显示的 `app.crynta.terax` **保持不变**：那是真实的包标识符，改它会换掉安装路径、设置存储位置和快捷方式身份（代价见第 11 条），不在这条待办范围内。
-
-**27　opencode 里不要拦截 Ctrl+T / Ctrl+P 等快捷键**
-
-这些键现在被全局快捷键系统吃掉了，传不到终端里的程序。`useGlobalShortcuts` 在 window 上以 `capture: true` 监听，匹配到就 `preventDefault()` + `stopImmediatePropagation()`，所以 `Ctrl+P`（`commandPalette.open`）、`Ctrl+T`（`tab.new`）、`Ctrl+Shift+P`、`Ctrl+Shift+T` 在 opencode 里全都触发的是 Terax 自己的功能。
-
-**扩展点是现成的，不需要改派发逻辑**：`useGlobalShortcuts` 已经接受 `isDisabled(id, e)`，返回 true 就直接 `return`，不 `preventDefault`，按键自然落到终端。App.tsx 里的 `shortcutsDisabled` 就是它，已经按 `id` 处理了 pane swap、editor.undo/redo、selection.sendToAgent 等情况，加一个分支即可。
-
-判定条件要想清楚，别写成"活动标签是终端就放行"：
-
-- 只在**焦点确实在终端里**时放行（`(e.target as HTMLElement)?.closest?.(".xterm")`，`selection.sendToAgent` 那一支已经是这么做的）。
-- 只在**终端里真的跑着接管键盘的程序**时放行。`pty::agent_detect` 已经把当前 agent 名字记在 `Session::web_agent` 里，前端 store 在 `terminal/lib/agentActivity.ts`。**不要按"是不是 alt 屏"判断** - 普通的分页器（less）也在 alt 屏，但它不需要 Ctrl+T。
-- **哪些键放行需要列出来**。全部放行会让使用者在 agent 里彻底失去新建标签页和命令面板；一个都不放行就是现在这样。建议只放 agent 真正用到的那几个，并在设置里可见，否则"我的 Ctrl+T 为什么有时候不灵"会变成一个无法自查的问题。
-
-注意这和第 24 条是同一类问题的两个面：**一个键到底属于终端还是属于里面跑的程序。** 右键那次的结论是"让给程序"，这里也应该保持一致的判断方式。
+（暂无。第 15、25、26、27 条已实现，移入上一节待实测。）
 
 ## Web 终端桥接（`src-tauri/src/modules/web/`）
 

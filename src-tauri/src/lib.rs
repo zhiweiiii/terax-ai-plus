@@ -160,37 +160,58 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
         _ => "settings.html".to_string(),
     };
 
+    // Reopening a window that is only hidden is instant. Building one is not:
+    // it spins up a webview, parses the bundle and boots React before anything
+    // appears, which is why opening settings used to lag behind the click.
     if let Some(window) = app.get_webview_window("settings") {
-        // The parent relationship keeps settings above the main window without
-        // covering unrelated apps.
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
         if let Some(t) = safe_tab.as_deref() {
-            // emit() serializes via JSON — no string-escape footgun, unlike
+            // emit() serializes via JSON, no string-escape footgun unlike
             // eval() with format!(). Frontend listens via Tauri event API.
             let _ = window.emit("terax:settings-tab", t);
         }
         return Ok(());
     }
 
-    let mut builder = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App(url_path.into()))
+    // A plain top-level window. It used to be built as a child of the main
+    // window, which pinned it above the app: clicking back into the terminal
+    // left settings floating over the work. Being independent is the point of
+    // a settings window.
+    let window = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App(url_path.into()))
         .title("Settings")
         .inner_size(900.0, 700.0)
         .min_inner_size(820.0, 620.0)
         .resizable(true)
-        .visible(false);
+        .visible(false)
+        .decorations(false)
+        .transparent(true)
+        .build()
+        .map_err(|e| e.to_string())?;
 
-    // Tie lifecycle to the main window so settings minimizes/closes with it,
-    // and keep it above the main app window so it doesn't get hidden when the
-    // user clicks back into the editor or terminal.
-    if let Some(main) = app.get_webview_window("main") {
-        builder = builder.parent(&main).map_err(|e| e.to_string())?;
-    }
-    builder = builder.decorations(false).transparent(true);
-
-    builder.build().map_err(|e| e.to_string())?;
+    // Closing hides instead of destroying, so every later open takes the fast
+    // path above. Without this the handle survives the close but the native
+    // window does not, and `show()` on it does nothing at all: settings would
+    // simply stop opening until the app restarted.
+    let hidden = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = hidden.hide();
+        }
+    });
 
     Ok(())
+}
+
+/// Destroy the settings window for real. A hidden window still counts as an
+/// open window, so leaving it around after the main window goes keeps the
+/// process alive with nothing on screen.
+fn close_settings_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.destroy();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -368,6 +389,16 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             match event {
+                // The settings window only hides on close, so the main window
+                // going away has to take it with it or the process lingers
+                // with no visible window.
+                tauri::RunEvent::WindowEvent {
+                    ref label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } if label == "main" => {
+                    close_settings_window(app);
+                }
                 tauri::RunEvent::Ready => {
                     // Start the web terminal bridge once every managed state is
                     // registered. Runs on its own listener thread; failure only

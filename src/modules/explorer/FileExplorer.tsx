@@ -915,7 +915,7 @@ export const FileExplorer = memo(
                     className={COMPACT_ITEM}
                     onSelect={() => onAttachToAgent?.(menuTarget.path)}
                   >
-                    添加到 Claude Code
+                    发送到 agent
                   </ContextMenuItem>
                   <ContextMenuSeparator />
                   <ContextMenuItem

@@ -43,7 +43,7 @@ export function SelectionAskButton({ x, y, onSend, onDismiss }: Props) {
     >
       <button
         type="button"
-        title="把选中内容发送到命令行"
+        title="把选中内容发送到 agent"
         onClick={(e) => {
           e.stopPropagation();
           onSend();
@@ -51,7 +51,7 @@ export function SelectionAskButton({ x, y, onSend, onDismiss }: Props) {
         className="flex h-7 w-full items-center justify-between gap-1.5 rounded-md border border-border/60 bg-card/95 px-2 text-xs shadow-lg backdrop-blur-md hover:border-border hover:bg-accent"
       >
         <span className="min-w-0 flex-1 truncate whitespace-nowrap text-left">
-          发送到命令行
+          发送到 agent
         </span>
         <HugeiconsIcon
           icon={CommandLineIcon}

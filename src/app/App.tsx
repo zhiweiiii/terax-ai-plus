@@ -11,6 +11,7 @@ import {
   getLaunchDir,
 } from "@/lib/launchDir";
 import { native } from "@/lib/native";
+import { agentFileRef } from "@/lib/agentRef";
 import { quoteShellArg } from "@/lib/shellQuote";
 import { useZoom } from "@/lib/useZoom";
 import { isMarkdownPath } from "@/lib/utils";
@@ -530,18 +531,21 @@ export default function App() {
       const norm = (p: string) =>
         p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 
+      // Only the command line the user is looking at. Searching every tab
+      // meant "send to agent" could land in a pane on the other side of the
+      // app, out of sight, and the old fallback to the active terminal sent
+      // the text to a plain shell that would try to RUN it.
+      const ownerTab = tabsRef.current.find(
+        (t) => t.kind === "terminal" && t.id === currentOwnerTabId,
+      );
       const agentLeaves: number[] = [];
-      for (const tab of tabsRef.current) {
-        if (tab.kind !== "terminal") continue;
-        for (const leafId of leafIds(tab.paneTree)) {
+      if (ownerTab?.kind === "terminal") {
+        for (const leafId of leafIds(ownerTab.paneTree)) {
           if (isAgentLeaf(leafId)) agentLeaves.push(leafId);
         }
       }
 
-      if (agentLeaves.length === 0) {
-        // No agent running — fall back to the active terminal pane.
-        return activeLeafId;
-      }
+      if (agentLeaves.length === 0) return null;
       if (agentLeaves.length === 1) return agentLeaves[0];
 
       // Several agents: match on cwd containing the file.
@@ -566,18 +570,29 @@ export default function App() {
       }
       return agentLeaves[0];
     },
-    [activeLeafId],
+    [activeLeafId, currentOwnerTabId],
   );
 
-  /** Paste a file path into the Claude Code pane that owns that directory. */
+  /**
+   * Hand a whole file to the agent running in this command line, as an `@`
+   * mention: that is the reference syntax both Claude Code and opencode
+   * expand into an actual attachment. A bare path was only text the model had
+   * to notice and then spend a Read call on.
+   *
+   * `@` resolves against the pane's cwd, so the path is made relative to it;
+   * a file outside that root has no `@` form and falls back to the absolute
+   * path, which the agent can still read.
+   */
   const handleAttachFileToAgent = useCallback(
     (path: string) => {
       const leafId = findClaudeLeaf(path);
       if (leafId === null) {
-        toast.error("没有可用的终端");
+        toast.error("请先打开 agent", {
+          description: "在当前命令行里启动 Claude Code 或 opencode 后再发送。",
+        });
         return;
       }
-      if (pasteToLeaf(leafId, `${quoteShellArg(path)} `)) {
+      if (pasteToLeaf(leafId, `${agentFileRef(path, leafCwd(leafId))} `)) {
         const tab = tabsRef.current.find(
           (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
         );
@@ -586,7 +601,7 @@ export default function App() {
           focusPane(tab.id, leafId);
         }
       } else {
-        toast.error("该终端已关闭");
+        toast.error("该 agent 所在的命令行已关闭");
       }
     },
     [findClaudeLeaf, setActiveId, focusPane],
@@ -615,7 +630,9 @@ export default function App() {
       // An explicit multi-agent target wins; otherwise pick the best pane.
       const leafId = targetLeafId ?? findClaudeLeaf(filePath);
       if (leafId === null) {
-        toast.error("No terminal pane to send the selection to");
+        toast.error("请先打开 agent", {
+          description: "在当前命令行里启动 Claude Code 或 opencode 后再发送。",
+        });
         return;
       }
 
@@ -646,9 +663,9 @@ export default function App() {
           setActiveId(tab.id);
           focusPane(tab.id, leafId);
         }
-        toast.success("Selection sent — add your question and press Enter");
+        toast.success("已发送到 agent，补充问题后回车");
       } else {
-        toast.error("That terminal is no longer running");
+        toast.error("该 agent 所在的命令行已关闭");
       }
     },
     [
@@ -942,6 +959,7 @@ export default function App() {
   const explorerGitDecorations = usePreferencesStore(
     (s) => s.explorerGitDecorations,
   );
+  const agentKeyPassthrough = usePreferencesStore((s) => s.agentKeyPassthrough);
   // Switch which repo an open history tab shows without opening a new tab; the
   // pane reloads off the changed repoRoot and the title follows the branch.
   const handleSwitchHistoryRepo = useCallback(
@@ -1107,8 +1125,43 @@ export default function App() {
     ],
   );
 
+  /**
+   * Shortcuts handed to a focused agent instead of being acted on here. Kept
+   * explicit: releasing everything would leave no way to open a new tab or the
+   * command palette while an agent is running, and releasing nothing is the
+   * behaviour being fixed. Ctrl+P and Ctrl+T are the ones opencode and Claude
+   * Code bind; their Shift variants go with them so the pair behaves alike.
+   */
+  const AGENT_OWNED_SHORTCUTS: ReadonlySet<ShortcutId> = useMemo(
+    () =>
+      new Set<ShortcutId>([
+        "commandPalette.open",
+        "commandPalette.content",
+        "tab.new",
+        "tab.newBlock",
+      ]),
+    [],
+  );
+
   const shortcutsDisabled = useCallback(
     (id: ShortcutId, e: KeyboardEvent) => {
+      // A running agent binds these itself, and the global handler captures on
+      // window and calls preventDefault, so they never reached it: pressing
+      // Ctrl+P inside opencode opened Terax's command palette instead. Giving
+      // them up is scoped as tightly as possible - the key must be one the
+      // agents actually use, the focus must be inside a terminal, and that
+      // pane must have an agent running right now (OSC detection, not "is this
+      // an alt screen": a pager is alt-screen too and wants none of these).
+      if (agentKeyPassthrough && AGENT_OWNED_SHORTCUTS.has(id)) {
+        const target =
+          (e.target as HTMLElement | null) ?? document.activeElement;
+        if ((target as HTMLElement | null)?.closest?.(".xterm")) {
+          const leafId = activeTerminalTab?.activeLeafId ?? null;
+          const ptyId = leafId === null ? null : ptyIdForLeaf(leafId);
+          const { agents } = useAgentActivityStore.getState();
+          if (ptyId !== null && agents[ptyId]) return true;
+        }
+      }
       const terminalPaneCount =
         activeTab?.kind === "terminal"
           ? leafIds(activeTab.paneTree).length
@@ -1156,7 +1209,7 @@ export default function App() {
       }
       return false;
     },
-    [activeTab],
+    [agentKeyPassthrough, AGENT_OWNED_SHORTCUTS, activeTerminalTab, activeTab],
   );
 
   useGlobalShortcuts(shortcutHandlers, { isDisabled: shortcutsDisabled });

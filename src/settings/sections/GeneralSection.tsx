@@ -22,6 +22,7 @@ import type { ThemePref } from "@/modules/settings/store";
 import {
   setAutostart,
   setDefaultWorkspaceEnv,
+  setAgentKeyPassthrough,
   setExplorerGitDecorations,
   setRestoreWindowState,
   setTerminalCursorBlink,
@@ -87,6 +88,7 @@ export function GeneralSection() {
   const explorerGitDecorations = usePreferencesStore(
     (s) => s.explorerGitDecorations,
   );
+  const agentKeyPassthrough = usePreferencesStore((s) => s.agentKeyPassthrough);
   const terminalWebglEnabled = usePreferencesStore(
     (s) => s.terminalWebglEnabled,
   );
@@ -188,6 +190,19 @@ export function GeneralSection() {
             onValueChange={(v) => void setZoomLevel(v[0] ?? 1)}
           />
         </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label>编码 agent</Label>
+        <SettingRow
+          title="快捷键交给运行中的 agent"
+          description="Claude Code、opencode 这类程序自己绑定了 Ctrl+P / Ctrl+T。开启后，当焦点在正在运行 agent 的命令行里时，这四个键（Ctrl+P、Ctrl+Shift+P、Ctrl+T、Ctrl+Shift+T）交给 agent，不再触发 Terax 的命令面板和新建标签页。关闭则始终由 Terax 处理。"
+        >
+          <Switch
+            checked={agentKeyPassthrough}
+            onCheckedChange={(v) => void setAgentKeyPassthrough(v)}
+          />
+        </SettingRow>
       </div>
 
       <div className="flex flex-col gap-2">

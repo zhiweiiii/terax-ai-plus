@@ -113,6 +113,8 @@ export type Preferences = {
   showHidden: boolean;
   /** File tree: leave out anything git ignores. */
   hideGitIgnored: boolean;
+  /** Let a running agent have the shortcuts it needs (Ctrl+P, Ctrl+T, …). */
+  agentKeyPassthrough: boolean;
   /** Previously applied Claude Code parameter sets, newest first. The token is
    *  DPAPI ciphertext, never plaintext (see `modules/secret.rs`). */
   agentEnvPresets: AgentEnvPreset[];
@@ -186,6 +188,7 @@ const KEY_VIM_MODE = "vimMode";
 const KEY_EDITOR_WORD_WRAP = "editorWordWrap";
 const KEY_SHOW_HIDDEN = "showHidden";
 const KEY_HIDE_GIT_IGNORED = "hideGitIgnored";
+const KEY_AGENT_KEY_PASSTHROUGH = "agentKeyPassthrough";
 const KEY_AGENT_ENV_PRESETS = "agentEnvPresets";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
@@ -250,6 +253,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorWordWrap: false,
   showHidden: false,
   hideGitIgnored: false,
+  agentKeyPassthrough: true,
   agentEnvPresets: [] as AgentEnvPreset[],
   explorerGitDecorations: true,
   protectedBranches: ["main", "master", "develop"],
@@ -334,6 +338,9 @@ export async function loadPreferences(): Promise<Preferences> {
     hideGitIgnored:
       get<boolean>(KEY_HIDE_GIT_IGNORED) ??
       DEFAULT_PREFERENCES.hideGitIgnored,
+    agentKeyPassthrough:
+      get<boolean>(KEY_AGENT_KEY_PASSTHROUGH) ??
+      DEFAULT_PREFERENCES.agentKeyPassthrough,
     agentEnvPresets:
       get<AgentEnvPreset[]>(KEY_AGENT_ENV_PRESETS) ??
       DEFAULT_PREFERENCES.agentEnvPresets,
@@ -508,6 +515,10 @@ export async function setShowHidden(value: boolean): Promise<void> {
 
 export async function setHideGitIgnored(value: boolean): Promise<void> {
   await writePref(KEY_HIDE_GIT_IGNORED, value);
+}
+
+export async function setAgentKeyPassthrough(value: boolean): Promise<void> {
+  await writePref(KEY_AGENT_KEY_PASSTHROUGH, value);
 }
 
 /** One remembered Claude Code parameter set. */
@@ -698,6 +709,7 @@ export async function onPreferencesChange(
     [KEY_EDITOR_WORD_WRAP]: "editorWordWrap",
     [KEY_SHOW_HIDDEN]: "showHidden",
     [KEY_HIDE_GIT_IGNORED]: "hideGitIgnored",
+    [KEY_AGENT_KEY_PASSTHROUGH]: "agentKeyPassthrough",
     [KEY_AGENT_ENV_PRESETS]: "agentEnvPresets",
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
     [KEY_PROTECTED_BRANCHES]: "protectedBranches",
