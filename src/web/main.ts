@@ -239,15 +239,25 @@ function renderTranscript(t: TranscriptMsg) {
     nodes.clear();
   }
   const live = new Set<string>();
+  // Placed in transcript order, not in the order the ids were first seen.
+  // Appending new nodes only was fine while messages could nothing but arrive
+  // at the end; anything else (a turn dropped and coming back, an id reused,
+  // rows read in a different order) put a message in the wrong place and left
+  // it there for the rest of the session.
+  let prev: HTMLElement | null = null;
   for (const message of t.messages) {
     live.add(message.id);
     let node = transcriptNodes.get(message.id);
     if (!node) {
       node = document.createElement("div");
       transcriptNodes.set(message.id, node);
-      turnsEl.appendChild(node);
     }
     paintTranscriptMessage(node, message);
+    const target: ChildNode | null = prev
+      ? prev.nextSibling
+      : turnsEl.firstChild;
+    if (node !== target) turnsEl.insertBefore(node, target);
+    prev = node;
   }
   for (const [id, node] of transcriptNodes) {
     if (live.has(id)) continue;
@@ -260,7 +270,11 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
   const sig = `${m.role}:${m.text.length}:${m.reasoning?.length ?? 0}:${m.tools.join(",")}`;
   if (painted.get(node) === sig) return;
   painted.set(node, sig);
-  node.className = m.role === "user" ? "turn sent" : "turn output";
+  // `transcript` marks prose the agent WROTE, as opposed to output a
+  // program PAINTED. They are different kinds of text and get different
+  // typography: one is a message, the other is a terminal.
+  node.className =
+    m.role === "user" ? "turn sent" : "turn output transcript";
   node.replaceChildren();
 
   if (m.text) {
@@ -576,11 +590,31 @@ const SETTLED_LOOKBACK = 3;
  *  rendering it would say everything twice, so anything the transcript already
  *  has is dropped here and the rest is shown as the turn in flight. */
 function unsettledBlocks(t: TranscriptMsg): Block[] {
+  // Cut at the newest user block on screen and keep only what follows it: the
+  // reply being written right now. Everything above it belongs to an earlier
+  // exchange the transcript already owns.
+  //
+  // This has to be positional. Deciding by text alone left pieces of the
+  // previous answer behind, because the screen version of it is not the
+  // transcript version: the TUI wraps it to the grid and draws bullets, so a
+  // substring test against the raw Markdown misses. Those leftovers then
+  // rendered into #live-blocks, which sits BELOW #turns, and the previous
+  // answer reappeared underneath the question just asked.
+  const blocks = conv.liveBlocks;
+  let start = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (blocks[i].role === "user") {
+      start = i + 1;
+      break;
+    }
+  }
+  // The text test stays as a second gate: the step may have landed in the
+  // transcript between the screen painting it and this render.
   const settled = t.messages
     .slice(-SETTLED_LOOKBACK)
     .map((m) => collapse(m.text))
     .filter((text) => text !== "");
-  return conv.liveBlocks.filter((b) => {
+  return blocks.slice(start).filter((b) => {
     const text = collapse(b.lines.join(" "));
     if (text === "") return false;
     return !settled.some((s) => s.includes(text) || text.includes(s));

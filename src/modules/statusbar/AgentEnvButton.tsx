@@ -6,13 +6,17 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { cn } from "@/lib/utils";
+import { errorToast } from "@/lib/errorToast";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   type AgentEnvPreset,
   setAgentEnvPresets,
 } from "@/modules/settings/store";
-import { SlidersHorizontalIcon } from "@hugeicons/core-free-icons";
+import {
+  Delete02Icon,
+  PencilEdit02Icon,
+  SlidersHorizontalIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
@@ -42,10 +46,22 @@ type Props = {
 export function AgentEnvButton({ onApply }: Props) {
   const presets = usePreferencesStore((s) => s.agentEnvPresets);
   const [open, setOpen] = useState(false);
+  const [alias, setAlias] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [token, setToken] = useState("");
   const [model, setModel] = useState("");
   const [busy, setBusy] = useState(false);
+
+  /* Entries written by older builds hold DPAPI ciphertext instead of the
+     token. Decrypt those once so they keep working; everything saved from now
+     on is plain. */
+  const readToken = async (preset: AgentEnvPreset): Promise<string> => {
+    if (preset.token) return preset.token;
+    if (!preset.tokenCipher) return "";
+    return await invoke<string>("secret_unprotect", {
+      value: preset.tokenCipher,
+    });
+  };
 
   const run = (command: string): boolean => {
     if (!onApply) {
@@ -59,18 +75,15 @@ export function AgentEnvButton({ onApply }: Props) {
     if (!baseUrl.trim() || !token.trim() || !model.trim()) return;
     setBusy(true);
     try {
-      const cipher = await invoke<string>("secret_protect", {
-        value: token.trim(),
-      });
       const values = [baseUrl.trim(), token.trim(), model.trim()];
       if (!run(assignments(values))) return;
 
       const next: AgentEnvPreset = {
         id: `${Date.now()}`,
+        alias: alias.trim() || undefined,
         baseUrl: baseUrl.trim(),
         model: model.trim(),
-        tokenCipher: cipher,
-        tokenHint: hint(token.trim()),
+        token: token.trim(),
         usedAt: Date.now(),
       };
       await setAgentEnvPresets([
@@ -80,10 +93,9 @@ export function AgentEnvButton({ onApply }: Props) {
           (p) =>
             p.baseUrl !== next.baseUrl ||
             p.model !== next.model ||
-            p.tokenHint !== next.tokenHint,
+            p.token !== next.token,
         ),
       ]);
-      setToken("");
       setOpen(false);
       toast.success("已设置，下次启动 claude 时生效");
     } catch (e) {
@@ -93,12 +105,41 @@ export function AgentEnvButton({ onApply }: Props) {
     }
   };
 
+  /* Load a saved set back into the form so it can be corrected instead of
+     retyped. The token is decrypted into the field, which is a password input,
+     so it is no more exposed than while it was first being entered. */
+  const editPreset = async (preset: AgentEnvPreset) => {
+    setBusy(true);
+    try {
+      const plain = await readToken(preset);
+      setAlias(preset.alias ?? "");
+      setBaseUrl(preset.baseUrl);
+      setToken(plain);
+      setModel(preset.model);
+    } catch (e) {
+      errorToast("读取历史配置失败", e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /* Forget one saved set. No confirmation: it holds nothing that cannot be
+     entered again, and the entry it deletes is the one under the pointer. */
+  const deletePreset = async (preset: AgentEnvPreset) => {
+    setBusy(true);
+    try {
+      await setAgentEnvPresets(presets.filter((p) => p.id !== preset.id));
+    } catch (e) {
+      errorToast("删除历史配置失败", e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const applyPreset = async (preset: AgentEnvPreset) => {
     setBusy(true);
     try {
-      const plain = await invoke<string>("secret_unprotect", {
-        value: preset.tokenCipher,
-      });
+      const plain = await readToken(preset);
       if (!run(assignments([preset.baseUrl, plain, preset.model]))) return;
       await setAgentEnvPresets([
         { ...preset, usedAt: Date.now() },
@@ -141,6 +182,16 @@ export function AgentEnvButton({ onApply }: Props) {
       <PopoverContent align="end" side="top" className="w-96 p-3">
         <div className="flex flex-col gap-2.5">
           <div className="flex flex-col gap-1">
+            <Label className="text-[11px]">别名</Label>
+            <Input
+              className="h-8"
+              value={alias}
+              onChange={(e) => setAlias(e.target.value)}
+              placeholder="例如 DeepSeek 正式"
+              spellCheck={false}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
             <Label className="text-[11px]">Base URL</Label>
             <Input
               className="h-8"
@@ -154,7 +205,6 @@ export function AgentEnvButton({ onApply }: Props) {
             <Label className="text-[11px]">Auth Token</Label>
             <Input
               className="h-8"
-              type="password"
               value={token}
               onChange={(e) => setToken(e.target.value)}
               placeholder="sk-..."
@@ -203,23 +253,50 @@ export function AgentEnvButton({ onApply }: Props) {
                 历史配置
               </span>
               {presets.map((preset) => (
-                <button
+                <div
                   key={preset.id}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void applyPreset(preset)}
-                  className={cn(
-                    "flex flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left",
-                    "hover:bg-foreground/[0.06] disabled:opacity-50",
-                  )}
+                  className="group flex items-center gap-1 rounded-md pr-1 hover:bg-foreground/[0.06]"
                 >
-                  <span className="truncate text-[11px] text-foreground">
-                    {preset.model}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void applyPreset(preset)}
+                    title="套用这组参数"
+                    className="flex min-w-0 flex-1 flex-col items-start gap-0.5 px-2 py-1.5 text-left disabled:opacity-50"
+                  >
+                    <span className="w-full truncate text-[11px] text-foreground">
+                      {preset.alias || preset.model}
+                    </span>
+                    <span className="w-full truncate text-[10px] text-muted-foreground">
+                      {preset.alias ? `${preset.model} · ` : ""}
+                      {preset.baseUrl}
+                      {preset.token ? ` · ${preset.token}` : ""}
+                    </span>
+                  </button>
+                  {/* Shown on hover so a list of endpoints stays readable, but
+                      kept in the tab order and visible on focus: hover-only
+                      controls are unreachable from the keyboard. */}
+                  <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void editPreset(preset)}
+                      title="编辑：载入上方表单"
+                      className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-foreground/10 hover:text-foreground disabled:opacity-50"
+                    >
+                      <HugeiconsIcon icon={PencilEdit02Icon} size={12} strokeWidth={1.75} />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void deletePreset(preset)}
+                      title="删除这条历史"
+                      className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-destructive/15 hover:text-destructive disabled:opacity-50"
+                    >
+                      <HugeiconsIcon icon={Delete02Icon} size={12} strokeWidth={1.75} />
+                    </button>
                   </span>
-                  <span className="truncate text-[10px] text-muted-foreground">
-                    {preset.baseUrl} · {preset.tokenHint}
-                  </span>
-                </button>
+                </div>
               ))}
             </div>
           ) : null}
@@ -238,7 +315,4 @@ function assignments(values: string[]): string {
   ).join("; ");
 }
 
-/** Enough of a token to recognise it, not enough to use it. */
-function hint(token: string): string {
-  return token.length <= 8 ? "····" : `····${token.slice(-4)}`;
-}
+

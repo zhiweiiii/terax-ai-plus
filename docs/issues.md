@@ -98,7 +98,13 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 
 **17　diff 里「添加到 agent」发送选中内容** - 已修。`GitDiffPaneHandle` 加了 `getSelection()`，`captureActiveSelection` 补上 `git-diff` / `git-commit-file` 分支。`sendSelectionToClaude` 本来就有这两个 kind 的分支，缺的只是取选中内容那一半。表头那个「添加到 Claude Code」按钮保留，作为"整份文件给 agent"的入口。
 
-**18　Claude Code 参数面板** - 已实现（`statusbar/AgentEnvButton.tsx`）。写进当前 pane，保留历史配置一键套用。四个安全点都处理了：面板明说改完要重启 agent 才生效；**令牌用 Windows DPAPI 加密后落盘**（`secret::secret_protect` / `secret_unprotect`，`windows-sys` 补 `Win32_Security_Cryptography` feature），base_url 和 model 走普通设置；`$env:` 赋值排除出命令历史；历史列表里令牌遮成 `sk-...bda`。
+**18　Claude Code 参数面板** - 已实现（`statusbar/AgentEnvButton.tsx`）。写进当前 pane，保留历史配置一键套用，每条可编辑、可删除、可起别名。面板明说改完要重启 agent 才生效；`$env:` 赋值排除出命令历史。
+
+**令牌的存储方式已按使用者的决定改为明文，这是一个有意接受的安全代价。** 最初实现用 Windows DPAPI 加密落盘（`secret::secret_protect` / `secret_unprotect`），界面上只显示尾号。使用者要求去掉遮挡后又明确要求"存储也不加密"，在代价被说明之后仍然确认。现状：令牌以明文存在 `%APPDATA%/app.crynta.terax/terax-settings.json`，这是一个跨窗口同步的普通 JSON 文件，**任何能读该用户配置目录的东西都能读到这些令牌**，界面上也完整显示。
+
+`readToken()` 保留了一条只读的旧数据路径：早期用 DPAPI 写入的条目会在套用或编辑时解密一次并转成明文，所以升级不会让已存的历史作废。Rust 侧的 `secret_protect` / `secret_unprotect` 命令保留（`secret_unprotect` 仍被这条迁移路径使用，`secret_protect` 目前无调用方）。
+
+**这条不要"顺手修回去"** - 它不是遗漏，是被要求的行为。要改回加密需要重新和使用者确认。
 
 **19　手机端气泡按 Markdown 渲染** - 已实现（`src/web/markdown.ts`）。只对 transcript 那一路生效，屏幕那一路不做（TUI 已经自己把 Markdown 渲染成 ANSI 了）。**自己建 DOM 节点，全程 `textContent`，没有任何 `innerHTML`**，也没有引第三方库。覆盖围栏代码块、行内代码、加粗、标题、有序/无序列表，不认识的语法原样当文字。代码块放在自己的 `overflow-x: auto` 容器里。
 

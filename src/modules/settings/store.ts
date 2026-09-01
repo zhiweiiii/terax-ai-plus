@@ -524,13 +524,22 @@ export async function setAgentKeyPassthrough(value: boolean): Promise<void> {
 /** One remembered Claude Code parameter set. */
 export type AgentEnvPreset = {
   id: string;
+  /** What the user calls this endpoint. Optional: older entries predate it,
+   *  and the model name is a usable fallback. */
+  alias?: string;
   baseUrl: string;
   model: string;
-  /** DPAPI ciphertext. Decrypted only at the moment it is applied. */
-  tokenCipher: string;
-  /** Last few characters of the token, for telling presets apart on screen
-   *  without putting a live credential in the UI. */
-  tokenHint: string;
+  /** The token itself, in the clear.
+   *
+   *  It used to be DPAPI ciphertext with only the last few characters shown.
+   *  Storing and displaying it plainly is a deliberate decision by the owner
+   *  of this build, taken with the consequence stated: this file is plain
+   *  JSON under %APPDATA%, so anything that can read the user's profile can
+   *  read these tokens. */
+  token: string;
+  /** DPAPI ciphertext written by older builds. Read once to carry an existing
+   *  entry over to `token`, never written. */
+  tokenCipher?: string;
   usedAt: number;
 };
 

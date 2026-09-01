@@ -2,6 +2,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import { errorToast } from "@/lib/errorToast";
+import { native } from "@/lib/native";
 import { joinPath } from "@/modules/explorer/lib/useFileTree";
 import { setDiffCollapseUnchanged } from "@/modules/settings/store";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -12,6 +14,7 @@ import { openSearchPanel } from "@codemirror/search";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
+import { toast } from "sonner";
 import {
   forwardRef,
   useCallback,
@@ -26,6 +29,7 @@ import {
   fetchCommitDiff,
   fetchWorkingDiff,
   getCachedDiff,
+  invalidateRepoDiffs,
   workingDiffKey,
 } from "./lib/diffCache";
 import {
@@ -63,10 +67,14 @@ type Props = {
 const LARGE_FILE_THRESHOLD = 256 * 1024;
 
 const SHARED_EXT = buildSharedExtensions();
+/* Typing is off in both cases. `readOnly` additionally blocks programmatic
+   transactions, which is right for a commit diff (history cannot be edited)
+   and wrong for a working-tree one, where reverting a chunk has to dispatch. */
 const READONLY_EXT = [
   EditorState.readOnly.of(true),
   EditorView.editable.of(false),
 ];
+const NO_TYPING_EXT = [EditorView.editable.of(false)];
 const DIFF_THEME = EditorView.theme({
   "&.cm-merge-b .cm-changedText, .cm-changedText": {
     background: "rgba(110, 200, 120, 0.20) !important",
@@ -95,6 +103,26 @@ const DIFF_THEME = EditorView.theme({
   ".cm-changeGutter": {
     width: "2px !important",
     paddingLeft: "0 !important",
+  },
+  /* The revert button sits on the chunk it acts on. Quiet until hovered:
+     it is an escape hatch, not the main thing on the line. */
+  ".cm-terax-revert": {
+    marginLeft: "6px",
+    padding: "0 6px",
+    border: "1px solid rgba(127, 127, 127, 0.35)",
+    borderRadius: "5px",
+    background: "transparent",
+    color: "var(--muted-foreground, #9ca3af)",
+    font: "inherit",
+    fontSize: "10.5px",
+    lineHeight: "16px",
+    cursor: "pointer",
+    opacity: 0.65,
+  },
+  ".cm-terax-revert:hover": {
+    opacity: 1,
+    background: "rgba(220, 90, 90, 0.12)",
+    borderColor: "rgba(220, 90, 90, 0.55)",
   },
   ".cm-collapsedLines": {
     backgroundColor: "transparent",
@@ -254,15 +282,44 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
     const useFallback = isBinary || isTooLarge;
 
     const langExt = loaded?.langExt ?? null;
+
+    // Reverting is only meaningful against the working tree: a commit diff is
+    // history, and there is nothing there to put back.
+    const revertable = source.kind === "working";
+    const absolutePath = useMemo(
+      () => joinPath(source.repoRoot, source.path),
+      [source.repoRoot, source.path],
+    );
+
+    /* Write the doc back to the file after a chunk was reverted.
+       The revert itself is the merge extension's own action, which knows which
+       chunk the button belongs to; it applies synchronously, so by the time
+       this runs the doc already holds the reverted text. Saving the doc rather
+       than recomputing the file keeps what lands on disk identical to what is
+       on screen.
+
+       Nothing is staged or committed: this is the same edit the user could
+       have made by hand in the editor. */
+    const persistRevert = useCallback(() => {
+      const view = cmRef.current?.view;
+      if (!view) return;
+      native
+        .writeFile(absolutePath, view.state.doc.toString())
+        .then(() => {
+          invalidateRepoDiffs(source.repoRoot);
+          toast.success("已回滚该处改动");
+        })
+        .catch((e) => errorToast("回滚失败", e));
+    }, [absolutePath, source.repoRoot]);
+
     const extensions = useMemo(
       () => [
         ...SHARED_EXT,
         DEFAULT_INDENT,
         languageCompartment.of(langExt ?? []),
-        ...READONLY_EXT,
+        ...(revertable ? NO_TYPING_EXT : READONLY_EXT),
         unifiedMergeView({
           original: originalContent,
-          mergeControls: false,
           highlightChanges: true,
           gutter: true,
           syntaxHighlightDeletions: true,
@@ -272,10 +329,31 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
           collapseUnchanged: collapseUnchanged
             ? { margin: 3, minSize: 6 }
             : undefined,
+          // One button, labelled for what it does here. The library's default
+          // pair is Accept/Reject, which is merge-conflict vocabulary: there
+          // is no conflict on screen, only a change the user may want undone.
+          // "Accept" would mean nothing, so it is not rendered.
+          mergeControls: revertable
+            ? (type, action) => {
+                const btn = document.createElement("button");
+                btn.className = "cm-terax-revert";
+                if (type === "accept") {
+                  btn.style.display = "none";
+                  return btn;
+                }
+                btn.textContent = "回滚";
+                btn.title = "把这一处改回提交时的内容";
+                btn.onmousedown = (e) => {
+                  action(e);
+                  persistRevert();
+                };
+                return btn;
+              }
+            : false,
         }),
         DIFF_THEME,
       ],
-      [originalContent, langExt, collapseUnchanged],
+      [originalContent, langExt, collapseUnchanged, revertable, persistRevert],
     );
 
     // Cache-hit path only: the diff came from the cache before the language
@@ -343,10 +421,16 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                 variant="ghost"
                 size="sm"
                 className="h-6 gap-1 px-1.5 text-[10.5px]"
+                /* Labelled with the VERB, and the tooltip says where you are.
+                   The old labels were bare nouns ("完整文件" / "仅变动"), which
+                   read as a description of what is on screen rather than as
+                   what the click does: with the fold off the button said
+                   "仅变动" next to a fully expanded file, so a working toggle
+                   looked broken. */
                 title={
                   collapseUnchanged
-                    ? "显示完整文件"
-                    : "只显示变动的代码"
+                    ? "当前：仅显示变动。点击展开为完整文件"
+                    : "当前：完整文件。点击折叠未变动的部分"
                 }
                 onClick={() => void setDiffCollapseUnchanged(!collapseUnchanged)}
               >
@@ -355,7 +439,7 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                   size={13}
                   strokeWidth={1.75}
                 />
-                {collapseUnchanged ? "完整文件" : "仅变动"}
+                {collapseUnchanged ? "展开全文" : "折叠未变动"}
               </Button>
             ) : null}
             {onAttachToAgent ? (
@@ -403,12 +487,19 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
             </ScrollArea>
           ) : (
             <CodeMirror
-              // Remount when the fold is toggled. `unifiedMergeView` computes
-              // its collapsed ranges when the state field is created, and a
-              // reconfigure does not rebuild them - so swapping the extension
-              // array changed the option and nothing on screen. Remounting is
-              // the only thing that actually re-runs it.
-              key={collapseUnchanged ? "folded" : "full"}
+              // Remount when the fold is toggled, and again when the language
+              // pack lands. `unifiedMergeView` computes its collapsed ranges
+              // when the state field is created and a reconfigure does not
+              // rebuild them, so ANY later change to the extension array drops
+              // the folds while leaving the option set.
+              //
+              // The language is the other thing that changes it. It resolves
+              // synchronously only when its pack is already cached; the first
+              // diff of a .java or .xml file in a session mounts with
+              // `langExt` null, folded correctly, and then the import lands
+              // and reconfigures the view back to the whole file. Keying on
+              // readiness costs one remount the first time a language is seen.
+              key={`${collapseUnchanged ? "folded" : "full"}:${langExt ? "lang" : "nolang"}`}
               ref={cmRef}
               value={modifiedContent}
               theme={themeExt}
