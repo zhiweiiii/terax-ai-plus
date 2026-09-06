@@ -5,6 +5,7 @@ pub mod history;
 pub mod lsp;
 pub mod proc;
 pub mod pty;
+pub mod schedule;
 pub mod secret;
 pub mod shell;
 pub mod transcript;

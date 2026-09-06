@@ -108,10 +108,32 @@ body {
   gap: 10px;
   padding: 12px 12px 20px;
 }
+
+/* Under an agent transcript #pending holds the question you just asked and
+   #live-blocks holds the reply being written to it, so the question leads.
+   On the screen path the DOM order stands: there the pending bubble is the
+   newest thing, and the program's repaint below it is older. */
+.stream[data-order="transcript"] > #turns {
+  order: 0;
+}
+.stream[data-order="transcript"] > #pending {
+  order: 1;
+}
+.stream[data-order="transcript"] > #live-blocks {
+  order: 2;
+}
+
 .bubbles {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* An empty group is still a flex item, and the column's own gap opens around
+   it: two of the three are usually empty, so every thread carried 20px of
+   stray space and the bubbles sat where nothing explained. */
+.bubbles:empty {
+  display: none;
 }
 
 /* Every turn wraps at the phone's width. Nothing here is laid out against
@@ -150,6 +172,20 @@ body {
   font-size: 12px;
   line-height: 1.5;
   color: var(--muted);
+}
+
+/* What a PROGRAM painted wraps at the phone's width.
+   
+   This block panned sideways for a while, to keep the columns of a diff or a
+   table intact. Reading it back, that was the wrong half of the trade: a long
+   command is the common case and a wide table is the rare one, and having to
+   drag every line into view costs more than the alignment it buys. So it wraps
+   again — `pre-wrap` keeps the internal spacing, so indentation and alignment
+   still read wherever a line does fit, and `anywhere` breaks the paths and
+   URLs that have no space to break at. Nothing on this page pans. */
+.turn.output:not(.transcript) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Prose the AGENT WROTE, read from its own transcript. This is the answer, so
@@ -614,22 +650,73 @@ body {
   white-space: normal;
 }
 
-.turn-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 6px;
+/* ── A tool call, where it ran ────────────────────────────────────────── */
+/* The call and its output, in the position the agent made it — the same shape
+   the desktop shows. Both halves are read from the agent's own record, so this
+   is a rendering of declared data, not a parse of a screen. */
+.tool {
+  margin: 7px 0;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+}
+.tool:first-child {
+  margin-top: 0;
+}
+.tool:last-child {
+  margin-bottom: 0;
+}
+.tool.failed {
+  border-left-color: #f85149;
 }
 
-.tool-chip {
-  padding: 1.5px 7px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border);
+.tool-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.tool-name {
+  color: var(--accent);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.tool.failed .tool-name {
+  color: #f85149;
+}
+
+/* The command itself. It wraps rather than scrolls: it is one line of text,
+   and a truncated command tells you nothing about what ran. */
+.tool-subject {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* What it printed. A grid like any other program output, so it scrolls inside
+   its own box instead of being folded at the phone's width. */
+/* A command's output, wrapped for the same reason as the block above. */
+.tool-out {
+  margin: 4px 0 0;
+  padding: 5px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-more {
+  margin-top: 3px;
   color: var(--muted);
   font-family: var(--mono);
   font-size: 10px;
-  letter-spacing: 0.01em;
+  opacity: 0.75;
 }
 
 /* An option's own description. Wraps, unlike the label, because it is the
@@ -654,6 +741,105 @@ body {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.35;
+}
+
+/* ── Queued commands ─────────────────────────────────────────────────── */
+/* The countdown runs on the desktop, not here; this panel only asks for one
+   and lists what is waiting. */
+.sched {
+  flex-shrink: 0;
+  padding: 6px 2px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.sched-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.sched-num {
+  width: 3.2em;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--out-bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: center;
+  outline: none;
+}
+.sched-num:focus {
+  border-color: var(--accent);
+}
+
+.sched-unit {
+  font-size: 12px;
+}
+
+.sched-go {
+  margin-left: auto;
+  padding: 5px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--fg);
+  font-size: 12px;
+}
+.sched-go:active {
+  background: rgba(88, 166, 255, 0.3);
+}
+
+.sched-list {
+  margin-top: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sched-item {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11.5px;
+}
+
+.sched-when {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+
+/* The command wraps rather than truncates: a queued command you cannot read
+   in full is one you cannot decide to cancel. */
+.sched-cmd {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.sched-drop {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sched-empty {
+  padding: 3px 6px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 /* ── Back to latest ──────────────────────────────────────────────────── */

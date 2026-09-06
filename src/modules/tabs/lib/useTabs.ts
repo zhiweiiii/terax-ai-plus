@@ -397,6 +397,7 @@ export function planGitDiffOpen(
   spaceId: string,
   pin: boolean,
   allocId: () => number,
+  ownerTabId?: number,
 ): { tabs: Tab[]; targetId: number } {
   const title = input.title ?? `${basename(input.path)} (${input.mode})`;
   const originalPath = input.originalPath ?? null;
@@ -433,6 +434,7 @@ export function planGitDiffOpen(
     id,
     kind: "git-diff",
     spaceId,
+    ...(ownerTabId !== undefined && { ownerTabId }),
     title,
     path: input.path,
     repoRoot: input.repoRoot,
@@ -461,6 +463,7 @@ export function planCommitHistoryOpen(
   input: { repoRoot: string; branch?: string | null },
   spaceId: string,
   allocId: () => number,
+  ownerTabId?: number,
 ): { tabs: Tab[]; targetId: number } {
   const existing = tabs.find(
     (tab) =>
@@ -487,6 +490,7 @@ export function planCommitHistoryOpen(
         id,
         kind: "git-history",
         spaceId,
+        ...(ownerTabId !== undefined && { ownerTabId }),
         title,
         repoRoot: input.repoRoot,
       } satisfies GitHistoryTab,
@@ -866,6 +870,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         id,
         kind: "preview",
         spaceId: activeSpaceIdRef.current,
+        ...(activeTerminalIdRef.current !== undefined && {
+          ownerTabId: activeTerminalIdRef.current,
+        }),
         title: titleFromUrl(url),
         url,
       },
@@ -962,6 +969,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
       activeSpaceIdRef.current,
       pin,
       () => nextIdRef.current++,
+      activeTerminalIdRef.current,
     );
     if (plan.tabs !== curr) {
       tabsRef.current = plan.tabs;
@@ -979,6 +987,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         input,
         activeSpaceIdRef.current,
         () => nextIdRef.current++,
+        activeTerminalIdRef.current,
       );
       if (plan.tabs !== curr) {
         tabsRef.current = plan.tabs;
@@ -1031,6 +1040,9 @@ export function useTabs(initial?: Partial<TerminalTab>) {
           id,
           kind: "git-commit-file",
           spaceId: activeSpaceIdRef.current,
+          ...(activeTerminalIdRef.current !== undefined && {
+            ownerTabId: activeTerminalIdRef.current,
+          }),
           title,
           repoRoot: input.repoRoot,
           sha: input.sha,

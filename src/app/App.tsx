@@ -607,6 +607,33 @@ export default function App() {
     [findClaudeLeaf, setActiveId, focusPane],
   );
 
+  /** Hand arbitrary text to the agent in this command line, for callers that
+   *  build their own payload (the commit panel's "write me a message"). */
+  const sendTextToAgent = useCallback(
+    (text: string): boolean => {
+      const leafId = findClaudeLeaf(null);
+      if (leafId === null) {
+        toast.error("请先打开 agent", {
+          description: "在当前命令行里启动 Claude Code 或 opencode 后再发送。",
+        });
+        return false;
+      }
+      if (!pasteToLeaf(leafId, text)) {
+        toast.error("该 agent 所在的命令行已关闭");
+        return false;
+      }
+      const tab = tabsRef.current.find(
+        (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
+      );
+      if (tab) {
+        setActiveId(tab.id);
+        focusPane(tab.id, leafId);
+      }
+      return true;
+    },
+    [findClaudeLeaf, setActiveId, focusPane],
+  );
+
   const sendSelectionToClaude = useCallback(
     (targetLeafId?: number) => {
       const selection = captureActiveSelection();
@@ -1597,7 +1624,11 @@ export default function App() {
                   >
                     {sidebarView === "open-files" ? (
                       <OpenFilesPanel
-                        tabs={tabs}
+                        // The panel lists what belongs to the project you are
+                        // in. Passing every tab let a diff opened in another
+                        // space show up here, because git tabs are not scoped
+                        // by owner the way file tabs are.
+                        tabs={spaceTabs}
                         activeId={activeId}
                         currentOwnerTabId={currentOwnerTabId}
                         onSelectTab={setActiveId}
@@ -1629,6 +1660,7 @@ export default function App() {
                       <SourceControlPanel
                         open={sidebarOpen}
                         sourceControl={sourceControl}
+                        onSendToAgent={sendTextToAgent}
                         repos={multiRepo.repos}
                         repoStatusEntries={multiRepo.repoStatusEntries}
                         applyRepoStatus={multiRepo.applyRepoStatus}
@@ -1722,6 +1754,7 @@ export default function App() {
               onWorkspaceChange={handleWorkspaceChange}
               onOpenSettings={() => void openSettingsWindow()}
               onRunInTerminal={runInActiveTerminal}
+              activeLeafId={activeLeafId}
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true
               }

@@ -11,6 +11,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { DiagnosticsBadge } from "./DiagnosticsBadge";
 import { AgentEnvButton } from "./AgentEnvButton";
+import { ScheduleButton } from "./ScheduleButton";
 import { WebStatusBadge } from "./WebStatusBadge";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
 
@@ -25,6 +26,8 @@ type Props = {
   /** Runs a command in the terminal the status bar is describing. Undefined
    *  when there is none, which disables the parameter panel's actions. */
   onRunInTerminal?: (command: string) => boolean;
+  /** The terminal a queued command runs in. Null when there is none. */
+  activeLeafId?: number | null;
 };
 
 export function StatusBar({
@@ -36,6 +39,7 @@ export function StatusBar({
   onOpenSettings,
   privateActive,
   onRunInTerminal,
+  activeLeafId,
 }: Props) {
   return (
     <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-border/60 bg-card/60 pl-3 pr-4 text-[11px]">
@@ -63,6 +67,7 @@ export function StatusBar({
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <AgentEnvButton onApply={onRunInTerminal} />
+        <ScheduleButton leafId={activeLeafId ?? null} />
         <WebStatusBadge />
         <Button
           variant="ghost"

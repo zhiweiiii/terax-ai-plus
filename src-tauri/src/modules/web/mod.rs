@@ -14,6 +14,8 @@
 //!                          completeness; the current page never sends it —
 //!                          the desktop owns the PTY size)
 //!   Later (text):        { "attach": <id> }        → switch session
+//!                        { "scheduleAdd": { "command": …, "delaySeconds": N } }
+//!                        { "scheduleCancel": <job id> }
 //!
 //! Wire protocol (server → client):
 //!   binary '0' + bytes   → terminal output
@@ -45,6 +47,7 @@ mod auth;
 
 use crate::modules::pty;
 use crate::modules::pty::{PtyState, Session, SizeOwner, WebMsg};
+use crate::modules::schedule;
 use crate::modules::transcript;
 use tauri::{Emitter, Manager};
 
@@ -819,6 +822,10 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
     let mut transcript_mark: Option<i64> = None;
     let mut transcript_rev: i64 = -1;
     let mut last_transcript = std::time::Instant::now();
+    // Queued commands. The clock runs in the schedule module, not here; this
+    // connection only mirrors the list, and compares a revision counter so an
+    // untouched queue costs one atomic read per tick.
+    let mut schedule_rev: u64 = u64::MAX;
 
     // Push the session list so the page renders without a round trip.
     send_sessions(&mut conn, &state);
@@ -891,6 +898,23 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                 &mut transcript_mark,
                 &mut transcript_rev,
             );
+        }
+
+        // Mirror the queued commands whenever they change - added here, run,
+        // or cancelled from the desktop.
+        {
+            let sched = app.state::<schedule::ScheduleState>();
+            let rev = sched.revision();
+            if rev != schedule_rev {
+                schedule_rev = rev;
+                let jobs = sched.list();
+                if let Ok(payload) = serde_json::to_value(&jobs) {
+                    let _ = send_text(
+                        &mut conn,
+                        &json!({ "type": "schedules", "jobs": payload }).to_string(),
+                    );
+                }
+            }
         }
 
         // Server heartbeat: keep half-open connections honest and let NAT
@@ -1020,6 +1044,43 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     last_transcript = std::time::Instant::now();
                 } else if parsed.get("list").and_then(|v| v.as_bool()) == Some(true) {
                     send_sessions(&mut conn, &state);
+                } else if let Some(req) = parsed.get("scheduleAdd") {
+                    // Queued against the attached terminal: the phone never
+                    // names a leaf of its own, and scheduling into a terminal
+                    // you are not looking at is not something to infer.
+                    let outcome = match attached_id {
+                        None => Err("no terminal attached".to_string()),
+                        Some(leaf) => {
+                            let command = req
+                                .get("command")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let secs =
+                                req.get("delaySeconds").and_then(|v| v.as_u64()).unwrap_or(0);
+                            app.state::<schedule::ScheduleState>().add(
+                                leaf,
+                                command,
+                                Duration::from_secs(secs),
+                            )
+                            .map(|_| ())
+                        }
+                    };
+                    if let Err(reason) = outcome {
+                        let _ = send_error(&mut conn, &reason);
+                    } else {
+                        let _ = app.emit(
+                            schedule::SCHEDULE_EVENT,
+                            app.state::<schedule::ScheduleState>().list(),
+                        );
+                    }
+                } else if let Some(id) = parsed.get("scheduleCancel").and_then(|v| v.as_u64()) {
+                    if app.state::<schedule::ScheduleState>().cancel(id) {
+                        let _ = app.emit(
+                            schedule::SCHEDULE_EVENT,
+                            app.state::<schedule::ScheduleState>().list(),
+                        );
+                    }
                 }
             }
             Ok(Some((OP_BIN, payload))) => {

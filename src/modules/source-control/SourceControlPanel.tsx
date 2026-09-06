@@ -37,7 +37,6 @@ import {
 } from "@/components/ui/tooltip";
 import {
   type GitBranchEntry,
-  type GitLogEntry,
   type GitRepoHead,
   type GitStatusSnapshot,
   native,
@@ -69,6 +68,7 @@ import {
   FolderGitTwoIcon,
   GitBranchIcon,
   Refresh01Icon,
+  SparklesIcon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -84,6 +84,7 @@ import {
   useState,
 } from "react";
 import { errorToast } from "@/lib/errorToast";
+import { toast } from "sonner";
 import { PushDialog } from "./PushDialog";
 import {
   defaultLocalNameForRemote,
@@ -120,6 +121,9 @@ type Props = {
     title?: string;
   }) => void;
   onOpenFile?: (absolutePath: string) => void;
+  /** Paste text into the agent running in the current command line. Returns
+   *  false when there is none, which is when the button has nothing to do. */
+  onSendToAgent?: (text: string) => boolean;
   onNavigateToPath?: (path: string) => void;
   repositoryTarget: SourceControlRepositoryTarget;
   onFollowRepositoryContext: () => void;
@@ -644,6 +648,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   onOpenGitGraph,
   onOpenDiff,
   onOpenFile,
+  onSendToAgent,
   onNavigateToPath,
   repositoryTarget,
   onFollowRepositoryContext,
@@ -763,6 +768,61 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   // Aggregate, like changedCount: the staged count under the commit box has to
   // match what Commit will actually include across every repo.
   const stagedCount = scm.fileEntries.filter((f) => f.staged).length;
+
+  const [draftBusy, setDraftBusy] = useState(false);
+
+  /* Hand the staged diff to the agent and ask it for the commit message.
+     The patch is what a message has to be written from; a list of file names
+     is not enough to say WHY something changed. Multi-repo sends each repo's
+     patch under its own heading, because one message per repo is what the
+     commit flow will ask for.
+
+     Sent without a trailing newline so the prompt lands in the agent's input
+     unsent: the user gets to add context before pressing enter. */
+  const sendChangesToAgent = useCallback(async () => {
+    if (!onSendToAgent) {
+      toast.error("请先打开 agent");
+      return;
+    }
+    const roots =
+      scm.repoGroups.length > 0
+        ? scm.repoGroups
+            .filter((g) => g.files.some((f) => f.staged))
+            .map((g) => ({ repoRoot: g.repoRoot, name: g.name }))
+        : scm.repo
+          ? [{ repoRoot: scm.repo.repoRoot, name: basename(scm.repo.repoRoot) }]
+          : [];
+    if (roots.length === 0) return;
+    setDraftBusy(true);
+    try {
+      const parts: string[] = [];
+      for (const r of roots) {
+        const res = await native.gitDiff(r.repoRoot, null, true);
+        const patch = res.diffText.trim();
+        if (!patch) continue;
+        parts.push(
+          roots.length > 1 ? `### ${r.name}\n\n${patch}` : patch,
+        );
+      }
+      if (parts.length === 0) {
+        toast.error("勾选的变更没有可读的差异");
+        return;
+      }
+      const body = [
+        "根据以下 git 变更内容，生成一条提交信息（commit message）：",
+        "",
+        "```diff",
+        parts.join("\n\n"),
+        "```",
+      ].join("\n");
+      if (!onSendToAgent(body)) return;
+      toast.success("已发送到 agent");
+    } catch (e) {
+      errorToast("读取变更失败", e);
+    } finally {
+      setDraftBusy(false);
+    }
+  }, [onSendToAgent, scm.repoGroups, scm.repo]);
   const changedCount = scm.fileEntries.length;
   const pushStatusLabel = upstreamBadgeLabel(scm.status?.upstream);
   const hasUpstream = !!scm.status?.upstream;
@@ -1329,38 +1389,25 @@ export const SourceControlPanel = memo(function SourceControlPanel({
               </div>
 
               <div className="flex min-w-0 items-center gap-1.5">
-                <label
-                  htmlFor="scm-amend-toggle"
-                  className="flex shrink-0 cursor-pointer select-none items-center gap-1.5 text-[10.5px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="h-6 shrink-0 gap-1 px-1.5 text-[10.5px]"
+                  disabled={!!scm.actionBusy || stagedCount === 0 || draftBusy}
+                  title={
+                    stagedCount === 0
+                      ? "先勾选要提交的变更"
+                      : "把勾选的变更发给 agent，让它写提交信息"
+                  }
+                  onClick={() => void sendChangesToAgent()}
                 >
-                  <Checkbox
-                    id="scm-amend-toggle"
-                    aria-label="Amend the most recent commit"
-                    checked={scm.amendEnabled}
-                    disabled={!!scm.actionBusy}
-                    onCheckedChange={(checked) =>
-                      scm.setAmendEnabled(checked === true)
-                    }
-                    className="size-3.5"
+                  <HugeiconsIcon
+                    icon={SparklesIcon}
+                    size={12}
+                    strokeWidth={1.75}
                   />
-                  Amend
-                </label>
-                {scm.amendEnabled && scm.amendSpecificSupported ? (
-                  <AmendCommitDropdown
-                    commits={scm.recentCommits}
-                    selectedSha={scm.amendTargetSha}
-                    disabled={!!scm.actionBusy}
-                    onSelect={scm.setAmendTargetSha}
-                    onOpen={() => void scm.refreshRecentCommits()}
-                  />
-                ) : null}
-                {scm.amendEnabled ? (
-                  <span className="ml-auto truncate text-[10px] text-muted-foreground/60">
-                    {scm.amendTargetSha
-                      ? "Merges changes into the selected commit"
-                      : "Merges changes into the most recent commit"}
-                  </span>
-                ) : null}
+                  {draftBusy ? "读取中…" : "让 agent 写提交信息"}
+                </Button>
               </div>
 
               <div className="grid w-full grid-cols-2 gap-1.5">
@@ -2078,98 +2125,6 @@ function IconActionButton({
   );
 }
 
-function AmendCommitDropdown({
-  commits,
-  selectedSha,
-  disabled,
-  onSelect,
-  onOpen,
-}: {
-  commits: GitLogEntry[];
-  selectedSha: string | null;
-  disabled: boolean;
-  onSelect: (sha: string) => void;
-  onOpen: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const selected = commits.find((c) => c.sha === selectedSha);
-  return (
-    <DropdownMenu
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (next) onOpen();
-      }}
-    >
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          disabled={disabled}
-          className={cn(
-            "inline-flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md border border-border/50 bg-foreground/[0.04] px-1.5 py-1 text-[10.5px] font-medium text-muted-foreground transition-colors",
-            "hover:bg-foreground/[0.08] hover:text-foreground disabled:cursor-default disabled:opacity-60",
-          )}
-        >
-          {selected ? (
-            <>
-              <code className="shrink-0 font-mono text-foreground/80">
-                {selected.shortSha}
-              </code>
-              <span className="max-w-28 truncate">{selected.subject}</span>
-            </>
-          ) : (
-            <span>Merge into commit…</span>
-          )}
-          <HugeiconsIcon
-            icon={ArrowDown01Icon}
-            size={9}
-            strokeWidth={2}
-            className="shrink-0 text-muted-foreground/70"
-          />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        className="max-h-64 w-64 overflow-y-auto"
-      >
-        <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
-          Amend a specific commit
-        </DropdownMenuLabel>
-        <div className="px-2 pb-1.5 text-[10px] text-muted-foreground/60">
-          Merge staged changes into the selected historical commit.
-        </div>
-        {commits.length === 0 ? (
-          <div className="px-3 py-2 text-[11px] text-muted-foreground">
-            No commits found.
-          </div>
-        ) : (
-          <DropdownMenuGroup>
-            {commits.map((c) => (
-              <DropdownMenuItem
-                key={c.sha}
-                onSelect={() => onSelect(c.sha)}
-                className="flex cursor-pointer items-center gap-2 text-[12px]"
-              >
-                <code className="shrink-0 font-mono text-[10.5px] text-muted-foreground/70">
-                  {c.shortSha}
-                </code>
-                <span className="min-w-0 flex-1 truncate">{c.subject}</span>
-                {c.sha === selectedSha ? (
-                  <HugeiconsIcon
-                    icon={Tick02Icon}
-                    size={13}
-                    strokeWidth={2}
-                    className="shrink-0 text-primary"
-                  />
-                ) : null}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuGroup>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
 
 function CommitFeedback({
   feedback,

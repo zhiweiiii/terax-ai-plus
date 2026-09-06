@@ -6,6 +6,30 @@
 //   node scripts/web-synthetic-test.mjs
 
 import assert from "node:assert";
+import { execFileSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// The bundle is a build artifact and nothing else rebuilds it, so it rots
+// silently: this suite spent two weeks asserting against a parser that no
+// longer existed, and reported ALL PASS the whole time. A test that passes
+// because it is testing yesterday's code is worse than no test. Rebuild
+// whenever the source has moved.
+const here = dirname(fileURLToPath(import.meta.url));
+const bundle = join(here, "convo-bundle", "conversation.mjs");
+const source = join(here, "..", "src", "web", "conversation.ts");
+if (
+  !existsSync(bundle) ||
+  statSync(bundle).mtimeMs < statSync(source).mtimeMs
+) {
+  console.log("rebuilding parser bundle (source is newer)...");
+  execFileSync(
+    "npx",
+    ["vite", "build", "--config", "scripts/convo-test.config.mjs"],
+    { cwd: join(here, ".."), stdio: "inherit", shell: true },
+  );
+}
 
 globalThis.window = globalThis;
 const { Conversation } = await import("./convo-bundle/conversation.mjs");
@@ -409,6 +433,70 @@ function check(name, cond, detail) {
   rows[32] = "  ~\\AppData\\Local\\Temp\\opencode\\oc-scratch:master  1.18.18  ctrl+p commands";
   const conv = await parseScreen(rows);
   check("opencode input box is not an agent chip", conv.agents.length === 0, conv.agents.join(" | "));
+}
+
+// ---- with no subagent running, the bottom footer row is the MODE ----
+// It is taken by position, so the same row was read twice: once as the mode
+// label under the composer, once as a chip above the thread — "auto mode on"
+// at both ends of the phone.
+{
+  const rows = blank();
+  rows[28] = "  Looking into it.";
+  rows[34] = "  " + "─".repeat(58);
+  rows[35] = "  Opus 5 oc-scratch  强度:high  5h已用 8%";
+  rows[36] = "  main";
+  rows[37] = "  ◯ auto mode on";
+  const conv = await parseScreen(rows);
+  check("mode row is not reported as a subagent chip",
+    conv.agents.length === 0, conv.agents.join(" | "));
+  check("the mode is still read off that row",
+    (conv.mode ?? "").toLowerCase().includes("auto mode"), String(conv.mode));
+}
+
+// ---- a spinner that scrolled off must not become a permanent bubble ----
+// Rows leaving an alt screen go straight into the history with no
+// working-line pass, so every repaint of the spinner used to land in the
+// thread. The seconds and the token count belong to the indicator above the
+// composer, which already shows them.
+{
+  const rows = blank();
+  rows[10] = "  Here is what I found.";
+  rows[11] = "  ✦ Thinking… (12s · ↑ 1.2k tokens · esc to interrupt)";
+  rows[12] = "  ✦ Musing… (1m 5s · ↑ 8.4k tokens)";
+  rows[13] = "  And here is the rest.";
+  rows[34] = "  " + "─".repeat(58);
+  rows[35] = "  main";
+  const conv = await parseScreen(rows);
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join(" | ");
+  check("elapsed-time spinner is not a bubble", !/12s/.test(all), all);
+  check("token counter is not a bubble", !/1\.2k|8\.4k/.test(all), all);
+  check("the prose around it survives",
+    /Here is what I found/.test(all) && /here is the rest/.test(all), all);
+}
+
+// ---- prose that merely trails off is still prose ----
+{
+  const rows = blank();
+  rows[10] = "  Let me think about this…";
+  rows[34] = "  " + "─".repeat(58);
+  rows[35] = "  main";
+  const conv = await parseScreen(rows);
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join(" | ");
+  check("an ellipsis alone does not make a line a spinner",
+    /Let me think about this/.test(all), all);
+}
+
+// ---- claude's update notice is furniture, not something anyone said ----
+{
+  const rows = blank();
+  rows[27] = "  Working on it.";
+  rows[28] = "  ✓ Update installed · Restart to apply";
+  rows[34] = "  " + "─".repeat(58);
+  rows[35] = "  main";
+  const conv = await parseScreen(rows);
+  const all = conv.liveBlocks.map((b) => b.lines.join(" ")).join("\n");
+  check("update notice is not a bubble", !/update installed/i.test(all), all);
+  check("the message next to it survives", /Working on it/.test(all), all);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);

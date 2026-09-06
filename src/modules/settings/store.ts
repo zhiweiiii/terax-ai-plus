@@ -115,6 +115,8 @@ export type Preferences = {
   hideGitIgnored: boolean;
   /** Let a running agent have the shortcuts it needs (Ctrl+P, Ctrl+T, …). */
   agentKeyPassthrough: boolean;
+  /** Fold a run of directories that each hold only the next one. */
+  compactFolders: boolean;
   /** Previously applied Claude Code parameter sets, newest first. The token is
    *  DPAPI ciphertext, never plaintext (see `modules/secret.rs`). */
   agentEnvPresets: AgentEnvPreset[];
@@ -189,6 +191,7 @@ const KEY_EDITOR_WORD_WRAP = "editorWordWrap";
 const KEY_SHOW_HIDDEN = "showHidden";
 const KEY_HIDE_GIT_IGNORED = "hideGitIgnored";
 const KEY_AGENT_KEY_PASSTHROUGH = "agentKeyPassthrough";
+const KEY_COMPACT_FOLDERS = "compactFolders";
 const KEY_AGENT_ENV_PRESETS = "agentEnvPresets";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
@@ -254,6 +257,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   showHidden: false,
   hideGitIgnored: false,
   agentKeyPassthrough: true,
+  compactFolders: true,
   agentEnvPresets: [] as AgentEnvPreset[],
   explorerGitDecorations: true,
   protectedBranches: ["main", "master", "develop"],
@@ -341,6 +345,8 @@ export async function loadPreferences(): Promise<Preferences> {
     agentKeyPassthrough:
       get<boolean>(KEY_AGENT_KEY_PASSTHROUGH) ??
       DEFAULT_PREFERENCES.agentKeyPassthrough,
+    compactFolders:
+      get<boolean>(KEY_COMPACT_FOLDERS) ?? DEFAULT_PREFERENCES.compactFolders,
     agentEnvPresets:
       get<AgentEnvPreset[]>(KEY_AGENT_ENV_PRESETS) ??
       DEFAULT_PREFERENCES.agentEnvPresets,
@@ -519,6 +525,10 @@ export async function setHideGitIgnored(value: boolean): Promise<void> {
 
 export async function setAgentKeyPassthrough(value: boolean): Promise<void> {
   await writePref(KEY_AGENT_KEY_PASSTHROUGH, value);
+}
+
+export async function setCompactFolders(value: boolean): Promise<void> {
+  await writePref(KEY_COMPACT_FOLDERS, value);
 }
 
 /** One remembered Claude Code parameter set. */
@@ -719,6 +729,7 @@ export async function onPreferencesChange(
     [KEY_SHOW_HIDDEN]: "showHidden",
     [KEY_HIDE_GIT_IGNORED]: "hideGitIgnored",
     [KEY_AGENT_KEY_PASSTHROUGH]: "agentKeyPassthrough",
+    [KEY_COMPACT_FOLDERS]: "compactFolders",
     [KEY_AGENT_ENV_PRESETS]: "agentEnvPresets",
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
     [KEY_PROTECTED_BRANCHES]: "protectedBranches",

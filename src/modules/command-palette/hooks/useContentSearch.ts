@@ -20,10 +20,18 @@ type GrepResponse = {
   files_scanned: number;
 };
 
+type Options = {
+  /** Shortest term worth a full-tree grep. Defaults to CONTENT_SEARCH_MIN_QUERY. */
+  minLength?: number;
+  /** Idle time before the walk starts. Defaults to DEBOUNCE_MS. */
+  debounceMs?: number;
+};
+
 export function useContentSearch(
   root: string | null,
   term: string,
   enabled: boolean,
+  options?: Options,
 ): AsyncQueryState<ContentHit> {
   const run = useCallback(
     async (q: string): Promise<ContentHit[]> => {
@@ -42,8 +50,8 @@ export function useContentSearch(
   return useAsyncQuery({
     enabled: enabled && !!root,
     term,
-    minLength: CONTENT_SEARCH_MIN_QUERY,
-    debounceMs: DEBOUNCE_MS,
+    minLength: options?.minLength ?? CONTENT_SEARCH_MIN_QUERY,
+    debounceMs: options?.debounceMs ?? DEBOUNCE_MS,
     run,
   });
 }

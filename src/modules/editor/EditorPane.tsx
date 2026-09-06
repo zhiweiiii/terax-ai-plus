@@ -1,3 +1,4 @@
+import { cn } from "@/lib/utils";
 import { lspFormatDocument, useLspExtension } from "@/modules/lsp";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { redo, undo } from "@codemirror/commands";
@@ -25,6 +26,8 @@ import {
   useRef,
   useState,
 } from "react";
+import { RefreshIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { toast } from "sonner";
 import { diagnosticsReporter } from "./lib/diagnosticsReporter";
 import { useDiagnosticsStore } from "./lib/diagnosticsStore";
@@ -562,7 +565,31 @@ export const EditorPane = memo(
     }
 
     return (
-      <div className="flex h-full min-h-0 flex-col zoom-exempt">
+      <div className="group/pane relative flex h-full min-h-0 flex-col zoom-exempt">
+        {/* Re-read from disk. The pane already polls the file's mtime
+            (`revalidate`), so this is the way out of the case where that did
+            not fire. Floating rather than in a header bar: an editor pane has
+            no chrome, and adding a row to every one of them to carry a button
+            used occasionally is the wrong trade. Hidden until the pointer is
+            in the pane, and skipped while the buffer is dirty, which is the
+            same rule `reload` itself enforces. */}
+        <button
+          type="button"
+          title="重新读取文件内容"
+          onClick={() => {
+            if (!reloadRef.current()) {
+              toast.info("有未保存的修改，已跳过刷新");
+            }
+          }}
+          className={cn(
+            "absolute right-2 top-2 z-10 flex size-6 items-center justify-center rounded-md",
+            "border border-border/50 bg-background/80 text-muted-foreground backdrop-blur",
+            "opacity-0 transition-opacity hover:bg-accent hover:text-foreground",
+            "focus-visible:opacity-100 group-hover/pane:opacity-100",
+          )}
+        >
+          <HugeiconsIcon icon={RefreshIcon} size={12} strokeWidth={1.75} />
+        </button>
         <CodeMirror
           ref={cmRef}
           value={doc.content}

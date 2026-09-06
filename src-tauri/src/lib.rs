@@ -1,6 +1,8 @@
 pub mod modules;
 
-use modules::{control, fs, git, history, lsp, pty, secret, shell, web, workspace};
+use modules::{
+    control, fs, git, history, lsp, pty, schedule, secret, shell, web, workspace,
+};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -256,6 +258,8 @@ pub fn run() {
         .manage(history::HistoryState::default())
         .manage(lsp::LspState::default())
         .manage(fs::grep::ContentSearchState::default())
+        .manage(fs::search::FileSearchState::default())
+        .manage(schedule::ScheduleState::default())
         .manage({
             let registry = workspace::WorkspaceRegistry::default();
             workspace::bootstrap_registry(&registry);
@@ -278,6 +282,9 @@ pub fn run() {
             pty::pty_has_foreground_job,
             pty::pty_shell_name,
             pty::pty_list_shells,
+            schedule::schedule_add,
+            schedule::schedule_list,
+            schedule::schedule_cancel,
             pty::web_sync_tabs,
             pty::web_sync_spaces,
             pty::web_sync_leaf_pty,
@@ -406,6 +413,9 @@ pub fn run() {
                     if let Err(e) = web::start(app.clone()) {
                         log::warn!("could not start web terminal server: {e}");
                     }
+                    // The clock for queued commands. Same reason it starts
+                    // here: it resolves terminals through managed state.
+                    schedule::start(app.clone());
                 }
                 // Servers exit on stdin EOF, but destructors are not guaranteed
                 // on process exit; kill explicitly.

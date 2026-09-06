@@ -57,7 +57,9 @@ export function useAsyncQuery<T>({
       setError(null);
       return;
     }
-    setResults([]);
+    // Keep the previous term's hits on screen while the new query runs. Blanking
+    // the list on every keystroke tore down and rebuilt every result row, which
+    // is the jank the "updating" affordance exists to avoid.
     setLoading(true);
     setError(null);
     const handle = window.setTimeout(() => execute(term), debounceMs);

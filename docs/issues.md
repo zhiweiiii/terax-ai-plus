@@ -6,6 +6,24 @@
 
 状态分三种：**已修**（解决了）、**已接受**（有意为之，登记在案）、**未决**（仍然存在）。
 
+## 定时发送命令（2026-09-05）
+
+「多少小时多少分钟后，把这条命令发到命令行并执行」，手机端和电脑端共用一份队列。
+
+**定时器在 Rust 侧，不在页面里。** 这是这个功能唯一重要的设计决策：手机会锁屏、浏览器标签关掉就带走它的定时器，只有桌面进程在那个时刻还活着。两个客户端都只做两件事——请求排一个队、读回队列里有什么。`src-tauri/src/modules/schedule.rs` 持有队列和那个每秒一次的 tick。
+
+**tick 单独起线程**，不折进 web 连接循环：那个循环负责转发终端输出，任何在里面阻塞的东西都会卡住所有观看者的流（这正是 transcript 全量重读目前的毛病）。
+
+**任务绑定 leaf 而不是 pty id。** 会话重启会换 pty id 但 leaf 不变，而且 leaf 本来就是两端命名终端的方式——手机按 leaf attach，桌面按 leaf 同步标签。
+
+**到点但终端还没开着不会直接丢。** `web_leaf_session` 对冷标签会发一个激活请求并这次返回空，所以任务留在队列上重试，下一 tick 就能找到前端刚开的 pty。重试窗口 60 秒，过了就放弃并记日志——否则一个标签页永久消失的任务会挂到进程结束。`due()` 因此**不消费队列**：只有真正写进终端、或耗尽重试窗口，任务才出队。
+
+**任务不持久化。** 这不是偷懒：任务指名一个终端，而没有终端能活过应用重启，所以恢复一个没有会话可跑的任务是一个兑现不了的承诺。
+
+**关掉的终端带走它的任务。** 前端每次同步标签时，队列里指向已不存在 leaf 的任务被清掉。
+
+两端 UI：桌面在状态栏（时钟按钮，有排队时带蓝点），手机在输入区（⏱ 展开面板，命令取自输入框）。列表是同一份，一端排的队另一端立刻看得到——桌面靠 `terax:schedules` 事件，手机靠 WS 上的 revision 比对。7 个单元测试覆盖排队顺序、取消、拒绝空命令、拒绝超长延时、`due` 不消费队列、终端关闭清理、revision 只在真发生变化时移动。
+
 ## 待办与本轮变更（2026-08-19 / 20）
 
 第 1 到 12 条已完成并**经使用者实测通过**（2026-08-20），未发现明显问题。逐条记在下面，留作后续改动的背景。
@@ -152,7 +170,9 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 
 前端那两个 `setTimeout(showWindow, 50)` / `500` 换成双层 `requestAnimationFrame`：等浏览器把 React 产出的那一帧真正提交之后再显示，既去掉了固定等待，也保证窗口出现时是有内容的而不是一个透明矩形。（第二个 500ms 的定时器本身就说明第一次经常不成功。）
 
-**26　关于页面里的链接指向上游** - 已实现。`REPO_URL` 改为 `github.com/zhiweiiii/terax-ai`；原来的 `terax.app` 是上游站点、本分支没有对应站点，那一行换成「上游项目」并链到 `crynta/terax-ai`，既不再谎报又保留了 Apache 2.0 要求的出处。`Bundle ID` 显示的 `app.crynta.terax` 按既定决策不动。
+**26　关于页面里的链接指向上游** - 已实现。`REPO_URL` 改为 `github.com/zhiweiiii/terax-ai-plus`；原来的 `terax.app` 是上游站点、本分支没有对应站点，那一行换成「上游项目」并链到 `crynta/terax-ai`，既不再谎报又保留了 Apache 2.0 要求的出处。`Bundle ID` 显示的 `app.crynta.terax` 按既定决策不动。
+
+**仓库名的坑**：远端仓库已改名为 `terax-ai-plus`，旧地址 `zhiweiiii/terax-ai` 只是 301 重定向。第一版改动照着旧名写，加上 fork **默认关闭 Issues**，「反馈问题」（`${REPO_URL}/issues/new`）因此 404。使用者已开启 Issues，链接也已指向新名。**本地 `git remote` 仍是旧地址**（靠重定向工作），要不要一并改由使用者决定。
 
 **27　opencode 里不要拦截 Ctrl+T / Ctrl+P 等快捷键** - 已实现。
 
@@ -222,6 +242,34 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 - `WindowControls` 的 effect 在异步注册于卸载之后完成时，可能泄漏一个 `onResized` 监听（没有 disposed 标志）。- **已接受**。
 
 ### 已修（记录，按主题）
+
+**顶部和底部同时显示 "auto mode on"。** `agents`（顶部 chip 条）取的是 footer 最底行，**纯按位置**，只排除了输入框。没有子代理在跑时那一行正好是模式行，于是同一行被读两次：顶部当子代理 chip，底部当模式标签。这和 `splitWorking` 必须最先取是同一类问题（进行状态也会落在那一行），只是模式行漏了这层。改为**先认模式并记下它在第几行**（`detectModeAt`），取 chip 条时跳过那一行。
+
+**思考行滚出屏幕后变成永久气泡。** `splitWorking` 只在 footer 和 body 末尾 4 行内找思考行——刻意收紧的，否则任何以省略号结尾的散文都会被当成 spinner。但 alt 屏滚出去的行走的是 `appendBlocks(toBlocks(prevScreen.slice(0, scrolled)))`，**完全没有思考行过滤**，于是 spinner 每重绘一次就在历史里留下一条 `Thinking… (12s · ↑ 1.2k tokens)`。加了一个更严格的判据 `isWorkingLine`：在 `readWorking` 的基础上**还要求带计数器**（括号里的耗时、token 数、或 esc to interrupt）。这一条严到可以在任何位置安全使用，因为没有工具会把 "Thinking… (12s · 1.2k tokens)" 当成谁说的话。耗时和 token 属于输入框上方那个指示器，它本来就在显示；出现在对话流里等于把同一个状态说了一百遍。
+
+**思考条和状态栏一闪一闪。** `#thinking` 和 `#progstatus` 都来自**逐帧**屏幕解析，某一帧抓在程序重绘中间没解析到就立刻 `hidden = true`，下一帧又回来。两者都在输入框上方，一藏一显会把整个对话流上下顶。它们是**状态**不是逐帧测量——架构文档自己写着"思考中是一个在它不成立之前一直成立的状态"，实现没兑现。加 2 秒迟滞；transcript 明确说轮次在跑时不走迟滞，真结束时不会拖着不走。
+
+**Claude 的更新提示进了对话。** `✓ Update installed · Restart to apply` 加进 `WIDGET` 读数列表。同时补了带箭头前缀的 token 计数（`↑ 1.2k tokens`）——原来的 `/^[\d,.]+/` 锚定在行首，箭头挡住了它。
+
+**合成测试两周来一直在测旧代码。** `web-synthetic-test.mjs` 导入的是 `scripts/convo-bundle/conversation.mjs`，一个预打包副本，没有任何东西会重建它；它停在 8 月 20 日，而 `conversation.ts` 一直在改。测试照常报 ALL PASS。**一个因为在测昨天的代码而通过的测试，比没有测试更糟。** 现在测试启动时比对源文件与 bundle 的 mtime，源更新就自动重建。上面两条修复的验证正是靠它才暴露出来的。
+
+**手机上看不到命令跑了什么、输出是什么。** 一轮里的工具原本只剩一个名字 chip（`Bash`），命令行和输出都没有，而桌面显示的是 `⏺ Bash(命令)` 加下面那段输出。曾经考虑过按样式一行行解析屏幕再和 JSONL 去重，但那条路不必走：**Claude 的 JSONL 里本来就带着这两样东西，而且是结构化的**——`tool_use` 块有 `name` 和 `input`，`tool_result` 块有输出和 `is_error`，两者用 `tool_use_id` 精确关联；现在的代码把它们解析出来然后丢掉（48MB 的 transcript 绝大部分就是它）。改为 `Part::Tool { name, subject, output, elided, failed }`，`claude.rs` 线性扫描时记录每个调用的位置、结果到达时回填。**没有屏幕解析、没有样式匹配、没有去重层**——去重层正是本轮四个前端 bug 的来源。输出在服务端裁剪到 10 行 / 800 字节并带上省略行数，payload 82KB → 125KB。opencode 侧的工具暂时仍只有名字（它的 `state` 对象每个工具形状都不同），位置是对的。
+
+**正文和命令各堆成一坨，不是交错的。** 桌面上一轮是"正文 → 跑工具 → 正文 → 跑工具"，手机上却变成所有正文在一起、所有工具 chip 在最下面一排。根因不在前端：`claude.rs` 的 `assistant_blocks` 和 `opencode.rs` 的 `parts()` 在**读取时**就把一轮压平成 `text.join("\n")` 加一个 `tools` 列表，`merge_assistant_steps` 再按同样方式合并连续步骤——顺序在进入前端之前就没了。现在 `Message` 携带有序的 `parts`（`Text` / `Tools`），两个后端都按 block / 数据库行的原始顺序构造它，`push_part` 只折叠相邻同类，前端按 parts 顺序逐个渲染。扁平的 `text` 保留但只用于比较（回显匹配、`unsettledBlocks` 去重）。`transcript` 模块补了 4 个单元测试钉住交错顺序——这个 bug 是"顺序被静默压平"，没有测试的话下一次重构会原样复发。
+
+**发出去的消息经常根本不显示。** `transcriptHasUserText` 在 transcript 的最后 6 条里做无锚点的 `includes`，问的其实是"用户有没有说过包含这段的话"。任何说过第二遍的内容（`1`、`继续`、`ok`，或恰好是早前某条消息子串的任何文本）都会命中一条**早于本次发送**的旧消息，于是 `awaitingTranscript` 立刻把它丢掉；而 transcript 里其实从来没有新增这条，气泡就再也没画出来过。现在每条待确认消息记下发送时 transcript 的最后一条用户消息 id，只有**在它之后**收录的消息才算数，且复用屏幕路径同一条按长度分层的 `sameMessage`。锚点不在了（换会话、压缩）时退回全量扫描，宁可多显示也不丢。
+
+**自己的提问显示在回答下面。** `#pending` 在 DOM 里排在 `#live-blocks` 之后。屏幕路径下这是对的——待确认气泡确实是最新的东西，压到程序重绘上方会落在比它旧的内容之上。但在 transcript 之下这两者的含义正好相反：`#pending` 是**你刚问的问题**，`#live-blocks` 是**正在写给它的回答**。现在 `.stream` 带 `data-order`，transcript 模式下用 flex `order` 把提问排到回答前面。
+
+**回答边到边被删掉。** `unsettledBlocks` 的去重是双向的（`s.includes(text) || text.includes(s)`）。反方向那半是错的：屏幕块**包含**某条已收录消息，恰恰说明屏幕比 transcript 多，也就是正在写的回答；而任何一条短的旧消息（`好的`、`1`）几乎是所有文本的子串，于是回答刚出现就被整块丢弃。现在只保留"已收录消息包含该块"这一个方向，并加 8 字符下限——短块的包含关系是巧合不是证据，多显示一瞬远比丢掉便宜。
+
+**回答会随 spinner 掉帧而闪断。** `isTurnInFlight` 只看 `transcript.working` 和屏幕 spinner，两者都空的一瞬 `liveBlocks` 被算成空，屏幕上的回答整块消失再回来。补上 `awaitingTranscript.length > 0`：本页发出去、transcript 还没收录的消息，本身就意味着一轮即将发生。
+
+**命令行输出的列对齐被拆散。** `.turn.output` 继承了 `white-space: pre-wrap` + `word-break: break-word`，于是每一条超出手机宽度的行都被折断，diff、表格、树形输出的列全部错位。程序画出来的文本是网格不是散文，改为和代码块同一套做法：`white-space: pre` + 自身 `overflow-x: auto`，只有这个块横向滚动，页面本身仍然从不左右拖动。`.turn.output.transcript`（agent 写的散文）排除在外，那里折行才是对的。
+
+**空的气泡组仍然占 gap。** `.stream` 是 `gap: 10px` 的 flex 列，`#turns`/`#live-blocks`/`#pending` 三个子项常驻，其中通常两个是空的，但列间距照样在它们周围展开，于是每屏都多出 20px 说不清来历的空白。`.bubbles:empty { display: none }`。
+
+**`build:web` 不在打包流程里。** `src-tauri/web.html` 是 `include_str!` 进二进制的，但 `beforeBuildCommand` 只有 `build:cli && build`。手机端 `src/web/*` 的任何改动都不会进安装包，除非有人记得先手跑一次 `pnpm build:web`——改了没生效，而且看不出为什么。已并入 `beforeBuildCommand`。
 
 **手机曾经渲染桌面网格，字太小到不可读。** 实测 192×28 的 PTY 配 335×590 的视口：网格被缩放到 0.238，字号剩 **3.3px**，74% 的屏幕是空的。缩放到适宽、左右拖动、按手机宽度重排，这三件事在终端视图里互斥。现在页面**完全不渲染网格**。相关的死代码（`inAltScreen`、`applyGridScale`、`scrollCursorIntoView`）随重写一起删除。
 

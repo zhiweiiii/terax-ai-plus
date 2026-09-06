@@ -7,7 +7,12 @@ import { native } from "@/lib/native";
 import { joinPath } from "@/modules/explorer/lib/useFileTree";
 import { setDiffCollapseUnchanged } from "@/modules/settings/store";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { SparklesIcon, UnfoldLessIcon, UnfoldMoreIcon } from "@hugeicons/core-free-icons";
+import {
+  RefreshIcon,
+  SparklesIcon,
+  UnfoldLessIcon,
+  UnfoldMoreIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { unifiedMergeView } from "@codemirror/merge";
 import { openSearchPanel } from "@codemirror/search";
@@ -29,6 +34,7 @@ import {
   fetchCommitDiff,
   fetchWorkingDiff,
   getCachedDiff,
+  invalidateDiff,
   invalidateRepoDiffs,
   workingDiffKey,
 } from "./lib/diffCache";
@@ -37,6 +43,7 @@ import {
   DEFAULT_INDENT,
   languageCompartment,
 } from "./lib/extensions";
+import { detectEol, normalizeToLf, restoreEol } from "./lib/eol";
 import { resolveLanguage, resolveLanguageSync } from "./lib/languageResolver";
 import { useEditorThemeExt } from "./lib/useEditorThemeExt";
 
@@ -216,6 +223,17 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
     );
 
     const key = cacheKey(source);
+    const [reloadNonce, setReloadNonce] = useState(0);
+
+    /* Read the file again from scratch.
+       The pane normally refreshes itself when the working tree changes; this
+       is the way out of the case where it did not. The cached entry is dropped
+       first, otherwise the load below would answer from it and the click would
+       appear to do nothing. */
+    const reload = useCallback(() => {
+      invalidateDiff(cacheKey(source));
+      setReloadNonce((n) => n + 1);
+    }, [source]);
 
     useEffect(() => {
       if (!active) return;
@@ -265,14 +283,34 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
       return () => {
         cancelled = true;
       };
-    }, [active, key, source]);
+    }, [active, key, source, reloadNonce]);
 
     const path = source.path;
     const repoRoot = source.repoRoot;
     const mode = source.kind === "working" ? source.mode : "+";
     const loaded = state.kind === "loaded" ? state : null;
-    const originalContent = loaded?.originalContent ?? "";
-    const modifiedContent = loaded?.modifiedContent ?? "";
+    /* The two sides do not arrive on equal footing: `original` is the blob
+       from git's object store, `modified` is the file on disk. With
+       `core.autocrlf=true` - the Git for Windows default - the blob holds LF
+       and the working tree holds CRLF, so EVERY line compares unequal, the
+       whole file becomes one chunk, and there is nothing left to collapse.
+       That is why the fold appeared to work in some repositories and not
+       others: it follows the line endings, not the file type. `git ls-files
+       --eol` reports 343 such files in this repository alone.
+
+       Both sides are compared in LF space. The worktree's own ending is kept
+       so a revert can write the file back the way it was found. */
+    const rawOriginal = loaded?.originalContent ?? "";
+    const rawModified = loaded?.modifiedContent ?? "";
+    const fileEol = useMemo(() => detectEol(rawModified), [rawModified]);
+    const originalContent = useMemo(
+      () => normalizeToLf(rawOriginal),
+      [rawOriginal],
+    );
+    const modifiedContent = useMemo(
+      () => normalizeToLf(rawModified),
+      [rawModified],
+    );
     const isBinary = loaded?.isBinary ?? false;
     const fallbackPatch = loaded?.fallbackPatch ?? "";
 
@@ -304,13 +342,13 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
       const view = cmRef.current?.view;
       if (!view) return;
       native
-        .writeFile(absolutePath, view.state.doc.toString())
+        .writeFile(absolutePath, restoreEol(view.state.doc.toString(), fileEol))
         .then(() => {
           invalidateRepoDiffs(source.repoRoot);
           toast.success("已回滚该处改动");
         })
         .catch((e) => errorToast("回滚失败", e));
-    }, [absolutePath, source.repoRoot]);
+    }, [absolutePath, source.repoRoot, fileEol]);
 
     const extensions = useMemo(
       () => [
@@ -414,6 +452,17 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                 </span>
               </>
             ) : null}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 gap-1 px-1.5 text-[10.5px]"
+              title="重新读取文件内容"
+              disabled={state.kind === "loading"}
+              onClick={reload}
+            >
+              <HugeiconsIcon icon={RefreshIcon} size={13} strokeWidth={1.75} />
+              刷新
+            </Button>
             {/* The fold has nothing to act on in the patch fallback: that view
                 is the patch, which is already only the changes. */}
             {!useFallback ? (

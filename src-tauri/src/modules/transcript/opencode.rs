@@ -15,7 +15,10 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
-use super::{merge_assistant_steps, normalize_dir, Message, Transcript, Working};
+use super::{
+    flatten_text, merge_assistant_steps, normalize_dir, push_part, Message, Part, Transcript,
+    Working,
+};
 
 fn database() -> Option<PathBuf> {
     let path = dirs::home_dir()?
@@ -132,33 +135,38 @@ fn messages(conn: &Connection, session_id: &str) -> Option<Vec<Message>> {
             Some("assistant") => "assistant",
             _ => continue,
         };
-        let (text, reasoning, tools) = parts(conn, &id);
+        let (text, reasoning, parts) = message_parts(conn, &id);
         out.push(Message {
             id,
             role,
             at,
             text,
             reasoning,
-            tools,
+            parts,
         });
     }
     Some(out)
 }
 
-/// A message's content, split the way the reader needs it. `step-start` and
-/// `step-finish` are the model round trip's own bookkeeping and carry nothing.
-fn parts(conn: &Connection, message_id: &str) -> (String, Option<String>, Vec<String>) {
-    let mut text: Vec<String> = Vec::new();
+/// A message's content, in the order opencode stored the parts. `step-start`
+/// and `step-finish` are the model round trip's own bookkeeping and carry
+/// nothing.
+///
+/// The row order is the turn's order, which is why the query is sorted: prose,
+/// the tools it led to, then the next prose. Collecting the two kinds into
+/// separate lists threw that away and the phone drew all the commands after
+/// all of the writing.
+fn message_parts(conn: &Connection, message_id: &str) -> (String, Option<String>, Vec<Part>) {
+    let mut parts: Vec<Part> = Vec::new();
     let mut reasoning = None;
-    let mut tools = Vec::new();
 
     let Ok(mut stmt) = conn.prepare(
         "select data from part where message_id = ?1 order by time_created, id",
     ) else {
-        return (String::new(), None, tools);
+        return (String::new(), None, parts);
     };
     let Ok(rows) = stmt.query_map([message_id], |row| row.get::<_, String>(0)) else {
-        return (String::new(), None, tools);
+        return (String::new(), None, parts);
     };
     for data in rows.flatten() {
         let Ok(part) = serde_json::from_str::<Value>(&data) else {
@@ -167,10 +175,12 @@ fn parts(conn: &Connection, message_id: &str) -> (String, Option<String>, Vec<St
         match part.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(t) = part.get("text").and_then(Value::as_str) {
-                    let t = t.trim();
-                    if !t.is_empty() {
-                        text.push(t.to_string());
-                    }
+                    push_part(
+                        &mut parts,
+                        Part::Text {
+                            text: t.trim().to_string(),
+                        },
+                    );
                 }
             }
             Some("reasoning") => {
@@ -183,13 +193,25 @@ fn parts(conn: &Connection, message_id: &str) -> (String, Option<String>, Vec<St
             }
             Some("tool") => {
                 if let Some(name) = part.get("tool").and_then(Value::as_str) {
-                    tools.push(name.to_string());
+                    // opencode stores the call's arguments and output under a
+                    // `state` object whose shape varies by tool; until that is
+                    // read, the name alone still lands in the right place.
+                    push_part(
+                        &mut parts,
+                        Part::Tool {
+                            name: name.to_string(),
+                            subject: None,
+                            output: None,
+                            elided: 0,
+                            failed: false,
+                        },
+                    );
                 }
             }
             _ => {}
         }
     }
-    (text.join("\n"), reasoning, tools)
+    (flatten_text(&parts), reasoning, parts)
 }
 
 /// When the newest assistant message has no completion time, opencode is still

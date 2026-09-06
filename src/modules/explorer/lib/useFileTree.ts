@@ -38,6 +38,7 @@ export function dirname(path: string): string {
 }
 
 const EXPANSION_CACHE_LIMIT = 8;
+const CHAIN_LIMIT = 32;
 const expansionCache = new Map<string, string[]>();
 
 function rememberExpansion(root: string, expanded: Set<string>): void {
@@ -248,6 +249,33 @@ export function useFileTree(rootPath: string | null, options?: Options) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden, gitDecorations, rootPath, fetchChildren]);
 
+  /* Open a directory, and keep going while each level holds nothing but the
+     next directory. Without this a Java package took one click per segment,
+     and the explorer could never fold a run it had not read. Bounded, because
+     a pathological tree should not turn one click into unbounded IO. */
+  const expandChain = useCallback(
+    async (path: string) => {
+      let current = path;
+      for (let i = 0; i < CHAIN_LIMIT; i++) {
+        await fetchChildren(current);
+        const node = nodesRef.current[current];
+        if (node?.status !== "loaded") return;
+        if (node.entries.length !== 1) return;
+        const only = node.entries[0];
+        if (only.kind !== "dir") return;
+        current = joinPath(current, only.name);
+        setExpanded((curr) => {
+          if (curr.has(current)) return curr;
+          const next = new Set(curr);
+          next.add(current);
+          return next;
+        });
+        addWatch(current);
+      }
+    },
+    [fetchChildren, addWatch],
+  );
+
   const toggle = useCallback(
     (path: string) => {
       if (expandedRef.current.has(path)) {
@@ -264,10 +292,10 @@ export function useFileTree(rootPath: string | null, options?: Options) {
           return next;
         });
         addWatch(path);
-        void fetchChildren(path);
+        void expandChain(path);
       }
     },
-    [fetchChildren, addWatch, removeWatch],
+    [expandChain, addWatch, removeWatch],
   );
 
   const expand = useCallback(

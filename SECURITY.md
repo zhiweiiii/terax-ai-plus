@@ -4,7 +4,7 @@ Terax 会启动 shell、读写文件、并把桌面的终端会话通过内嵌 w
 
 ## 报告方式
 
-在本仓库开一个 [security advisory](https://github.com/zhiweiiii/terax-ai/security/advisories/new)（私有），请写清楚：
+在本仓库开一个 [security advisory](https://github.com/zhiweiiii/terax-ai-plus/security/advisories/new)（私有），请写清楚：
 
 - 问题是什么，攻击者能借此做到什么
 - 复现步骤（有个小 PoC 最好）

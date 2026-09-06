@@ -436,22 +436,32 @@ export class Conversation {
     // Pull it out by position before condensing the rest into the status
     // label, so agent activity becomes its own chip instead of a status
     // fragment — and is never mistaken for conversation.
+    // The mode is read off the footer BEFORE condensing, since the lines
+    // carrying it (opencode's "Build · <model>", Claude's model line) are
+    // dropped as readouts by the condense pass — and before the tab strip is
+    // taken, because the two compete for the same row.
+    const mode = detectModeAt(footer, body);
+    this.mode = mode.mode;
+
     let strip: string | null = null;
     let statusFooter = footer;
+    let stripRow = -1;
     for (let i = footer.length - 1; i >= 0; i--) {
       if (footer[i].trim() !== "") {
         strip = footer[i];
+        stripRow = i;
         statusFooter = footer.slice(0, i);
         break;
       }
     }
+    // With no subagent running, the bottom row is whatever else the program
+    // pins there — usually the mode. Showing it as a chip above the thread put
+    // "auto mode on" at the top of the phone while the composer showed the
+    // same thing at the bottom. A row already spoken for is not a tab strip.
     this.agents =
-      strip !== null && !isInputBox(strip) ? [stripChrome(strip).trim()] : [];
-
-    // The mode is read off the footer BEFORE condensing, since the lines
-    // carrying it (opencode's "Build · <model>", Claude's model line) are
-    // dropped as readouts by the condense pass.
-    this.mode = detectMode(footer, body);
+      strip !== null && !isInputBox(strip) && stripRow !== mode.footerRow
+        ? [stripChrome(strip).trim()]
+        : [];
 
     this.status = condenseStatus(statusFooter, this.recentSends);
 
@@ -817,6 +827,7 @@ const WIDGET = [
   /^\+?\s*Thought:?\s/i, // "+ Thought: 904ms"
   /^Context$/i,
   /^[\d,.]+\s*(tokens?|k)\b/i, // "15,981 tokens"
+  /^\W*[\d,.]+\s*k?\s*tokens?(?![a-z])/i, // "↑ 1.2k tokens", with its arrow
   /^[\d.]+%\s*$/,
   /^\$[\d.]+$/,
   /^\$[\d.]+\s+spent$/i,
@@ -826,6 +837,7 @@ const WIDGET = [
   /^(Build|Plan|Chat)\s+·\s+/i, // opencode's model line
   /^Opus\s*\d/i, // claude's model line ("Opus 5 claude-fresh 强度:high …")
   /auto-update failed/i, // claude's startup warning (npm-prefix write error)
+  /^\W*update installed/i, // claude's "✓ Update installed · Restart to apply"
   /^\d+\s*(files?|additions?|deletions?)$/i,
 ];
 
@@ -862,7 +874,7 @@ export function toBlocks(body: string[]): Block[] {
     const userMark = USER_MARK.test(text) && !MENU_ITEM.test(text);
     const clean = userMark ? text.replace(USER_MARK, "") : text;
     if (clean.trim() === "") continue;
-    if (!userMark && isWidget(clean.trim())) {
+    if (!userMark && (isWidget(clean.trim()) || isWorkingLine(raw))) {
       cur = null; // a readout also separates what surrounds it
       continue;
     }
@@ -1110,6 +1122,29 @@ function splitWorking(
   return { thinking: null, body, footer };
 }
 
+/** The counters these tools print alongside the verb: an elapsed time in
+ *  parentheses, a token tally, the interrupt hint. */
+const WORKING_METRIC =
+  /\(\s*(?:\d+\s*m\s*)?\d+\s*s(?![a-z])|[\d,.]+\s*k?\s*tokens?(?![a-z])|esc to interrupt/i;
+
+/** A line that is unambiguously the program's working status, safe to drop
+ *  wherever it appears on the screen.
+ *
+ *  `readWorking` is deliberately loose and is only trusted next to the input
+ *  box, because "a short line trailing off in an ellipsis" also describes
+ *  prose. Requiring one of the counters as well removes that ambiguity: no
+ *  tool writes "Thinking… (12s · 1.2k tokens)" as something anyone said.
+ *
+ *  It exists because the rows that scroll off an alt screen go straight into
+ *  the history with no working-line pass at all, so every repaint of the
+ *  spinner became its own permanent bubble. The elapsed time and the token
+ *  count belong to the indicator above the composer, which already shows
+ *  them - in the thread they are the same state said a hundred times over. */
+function isWorkingLine(raw: string): boolean {
+  if (readWorking(raw) === null) return false;
+  return WORKING_METRIC.test(stripChrome(raw));
+}
+
 function readWorking(raw: string): Thinking | null {
   const text = stripChrome(raw).replace(SPINNER_LEAD, "").trim();
   if (text === "" || text.length > WORKING_MAX) return null;
@@ -1137,7 +1172,16 @@ const MODE_LEAD = /^(Build|Plan|Chat)\s*·/i;
 /** How far above the status rule the mode line can sit. */
 const MODE_WINDOW = 6;
 
-function detectMode(footer: string[], body: string[]): string | null {
+/** The mode, and which footer row carried it.
+ *
+ *  The row matters as much as the value: the footer's bottom row is otherwise
+ *  taken as the subagent tab strip, purely by position. When no subagent is
+ *  running the mode line IS that bottom row, so it was read twice - once as
+ *  the mode label under the composer, once as a chip above the thread. */
+function detectModeAt(
+  footer: string[],
+  body: string[],
+): { mode: string | null; footerRow: number } {
   const read = (raw: string): string | null => {
     const text = collapse(stripChrome(raw));
     if (text === "") return null;
@@ -1148,7 +1192,7 @@ function detectMode(footer: string[], body: string[]): string | null {
   };
   for (let i = footer.length - 1; i >= 0; i--) {
     const hit = read(footer[i]);
-    if (hit) return hit;
+    if (hit) return { mode: hit, footerRow: i };
   }
   // opencode prints its mode on the input box's own row, which sits ABOVE the
   // status rule and so counts as body. Only the rows next to the box are
@@ -1157,9 +1201,9 @@ function detectMode(footer: string[], body: string[]): string | null {
   const from = Math.max(0, body.length - MODE_WINDOW);
   for (let i = body.length - 1; i >= from; i--) {
     const hit = read(body[i]);
-    if (hit) return hit;
+    if (hit) return { mode: hit, footerRow: -1 };
   }
-  return null;
+  return { mode: null, footerRow: -1 };
 }
 
 /** A numbered menu row: "❯ 1. Yes", "  2. No, and tell Claude why". */
@@ -1302,7 +1346,7 @@ const BANNER_MAX_LETTERS = 120;
  *  A short message has to match exactly: looking for "1" as a substring would
  *  hit a token count or a timing. Anything long enough to be distinctive can
  *  match loosely, since these tools wrap and decorate what you typed. */
-function sameMessage(painted: string, sent: string): boolean {
+export function sameMessage(painted: string, sent: string): boolean {
   if (sent.length >= 10) return painted.includes(sent);
   if (sent.length >= 4) {
     // A short send ("claude", "cd x") can appear inside the tool's own UI: a

@@ -8,12 +8,27 @@ use grep_searcher::{BinaryDetection, SearcherBuilder};
 use ignore::{WalkBuilder, WalkState};
 use serde::Serialize;
 
-use super::to_canon;
+use super::search::PRUNE_DIRS;
+use super::{blocking, to_canon};
 use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 const FILE_SIZE_CAP: u64 = 5 * 1024 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 200;
 const HARD_MAX_RESULTS: usize = 2000;
+
+/// Hard cap on files opened for one interactive query. Keeps a search rooted at
+/// a huge tree from pinning the CPU long after the user stopped caring.
+const MAX_FILES_SCANNED: usize = 20_000;
+
+/// Threads the parallel walker may use. Deliberately below the core count:
+/// saturating every core starves the webview and makes the whole app janky
+/// while typing in the search box.
+fn walk_threads() -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores.saturating_sub(1)).clamp(1, 4)
+}
 
 /// Supersession counter for interactive content search. Each new interactive
 /// query bumps the generation; in-flight walks observe the change and quit,
@@ -21,7 +36,7 @@ const HARD_MAX_RESULTS: usize = 2000;
 /// them run to completion.
 #[derive(Default)]
 pub struct ContentSearchState {
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
 }
 
 #[derive(Serialize)]
@@ -67,6 +82,16 @@ fn search_tree(
         .ignore(true)
         .parents(true)
         .follow_links(false)
+        .threads(walk_threads())
+        .filter_entry(|dent| {
+            if dent.depth() == 0 {
+                return true;
+            }
+            match dent.file_name().to_str() {
+                Some(name) => !PRUNE_DIRS.contains(&name),
+                None => true,
+            }
+        })
         .build_parallel();
 
     let hits: Arc<Mutex<Vec<GrepHit>>> = Arc::new(Mutex::new(Vec::new()));
@@ -104,7 +129,10 @@ fn search_tree(
                 }
             }
 
-            scanned.fetch_add(1, Ordering::Relaxed);
+            if scanned.fetch_add(1, Ordering::Relaxed) >= MAX_FILES_SCANNED {
+                truncated.store(true, Ordering::Relaxed);
+                return WalkState::Quit;
+            }
 
             let abs = display_path(path, &root_path, &root_display, &workspace);
             let rel_clone = rel.clone();
@@ -117,6 +145,9 @@ fn search_tree(
                 &matcher,
                 path,
                 UTF8(|line_num, text| {
+                    if cancel() {
+                        return Ok(false);
+                    }
                     let line_text = text.trim_end_matches('\n').to_string();
                     let mut guard = hits.lock().unwrap();
                     if guard.len() >= cap {
@@ -152,7 +183,7 @@ fn search_tree(
 /// Treats the query as a literal (smart-case), and self-cancels when a newer
 /// query arrives.
 #[tauri::command]
-pub fn fs_grep_interactive(
+pub async fn fs_grep_interactive(
     state: tauri::State<'_, ContentSearchState>,
     pattern: String,
     root: String,
@@ -162,7 +193,8 @@ pub fn fs_grep_interactive(
     if pattern.trim().is_empty() {
         return Err("empty pattern".into());
     }
-    let my_gen = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let generation = state.generation.clone();
+    let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
 
     let workspace = WorkspaceEnv::from_option(workspace);
     let root_path = resolve_path(&root, &workspace);
@@ -179,15 +211,20 @@ pub fn fs_grep_interactive(
         .build(&escape_literal(&pattern))
         .map_err(|e| format!("bad pattern: {e}"))?;
 
-    let cancel = || state.generation.load(Ordering::SeqCst) != my_gen;
-    Ok(search_tree(
-        &root_path,
-        &root,
-        &workspace,
-        &matcher,
-        cap,
-        &cancel,
-    ))
+    // The walk is CPU-bound and can take seconds on a large tree: it must never
+    // run on the main thread, or every frame of the app stalls behind it.
+    blocking(move || {
+        let cancel = || generation.load(Ordering::SeqCst) != my_gen;
+        Ok(search_tree(
+            &root_path,
+            &root,
+            &workspace,
+            &matcher,
+            cap,
+            &cancel,
+        ))
+    })
+    .await
 }
 
 fn display_path(

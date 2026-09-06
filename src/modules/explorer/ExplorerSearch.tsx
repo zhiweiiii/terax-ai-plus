@@ -1,10 +1,6 @@
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { fileIconUrl } from "./lib/iconResolver";
-import {
-  CONTENT_SEARCH_MIN_QUERY,
-  useContentSearch,
-} from "@/modules/command-palette/hooks/useContentSearch";
+import { useContentSearch } from "@/modules/command-palette/hooks/useContentSearch";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -18,6 +14,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { fileIconUrl } from "./lib/iconResolver";
 
 type Props = {
   rootPath: string;
@@ -48,8 +45,14 @@ function basename(rel: string): string {
 }
 
 const MIN_QUERY_LEN = 1;
-const FILE_SEARCH_DEBOUNCE_MS = 200;
+const FILE_SEARCH_DEBOUNCE_MS = 250;
 const FILE_SEARCH_LIMIT = 50;
+
+// A content search walks the whole tree, so it costs far more than the
+// file-name pass. Hold off until the term is specific enough to be worth it
+// and until typing has actually settled.
+const CONTENT_MIN_QUERY = 3;
+const CONTENT_DEBOUNCE_MS = 300;
 
 /**
  * Persistent search bar in the explorer sidebar. Matches both file names
@@ -66,7 +69,10 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
     const scrollRef = useRef<HTMLDivElement>(null);
     const lastKeyboardNavAt = useRef(0);
 
-    const active = q.trim().length > 0;
+    // Trim once: keeping the raw value out of the effect deps stops a trailing
+    // space from re-firing both searches.
+    const query = q.trim();
+    const active = query.length > 0;
 
     useEffect(() => {
       onActiveChange?.(active);
@@ -74,7 +80,6 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
 
     // File-name search (fuzzy, debounced).
     useEffect(() => {
-      const query = q.trim();
       if (query.length < MIN_QUERY_LEN) {
         setFileHits([]);
         setFileSearching(false);
@@ -104,14 +109,13 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
         alive = false;
         clearTimeout(handle);
       };
-    }, [q, rootPath]);
+    }, [query, rootPath]);
 
     // File-content search (same backend as Ctrl+Shift+P).
-    const content = useContentSearch(
-      rootPath,
-      q,
-      q.length >= CONTENT_SEARCH_MIN_QUERY,
-    );
+    const content = useContentSearch(rootPath, query, active, {
+      minLength: CONTENT_MIN_QUERY,
+      debounceMs: CONTENT_DEBOUNCE_MS,
+    });
     const contentHits = content.results;
 
     // Merged list: file-name hits first, then content hits.
@@ -136,10 +140,6 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
         el?.scrollIntoView({ block: "nearest" });
       }
     }, [activeIndex, results, active]);
-
-    useEffect(() => {
-      setActiveIndex(0);
-    }, [q]);
 
     useImperativeHandle(
       ref,
@@ -175,7 +175,10 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
             ref={inputRef}
             value={q}
             placeholder="Search files & contents…"
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              setQ(e.target.value);
+              setActiveIndex(0);
+            }}
             onKeyDown={(e) => {
               if (results.length > 0) {
                 if (e.key === "ArrowDown") {
@@ -236,9 +239,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
                   results.map((r, index) => {
                     const isSelected = index === activeIndex;
                     if (r.kind === "file") {
-                      const url = r.hit.is_dir
-                        ? null
-                        : fileIconUrl(r.hit.name);
+                      const url = r.hit.is_dir ? null : fileIconUrl(r.hit.name);
                       return (
                         <button
                           key={`file:${r.hit.path}`}

@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use ignore::WalkBuilder;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -29,9 +32,17 @@ pub struct SearchResult {
 /// tree is effectively unbounded.
 const MAX_SCANNED: usize = 50_000;
 
+/// Supersession counter for the explorer's file-name search. Each new query
+/// bumps the generation so in-flight walks for keystrokes the user has already
+/// typed past abandon their scan instead of running to completion.
+#[derive(Default)]
+pub struct FileSearchState {
+    generation: Arc<AtomicU64>,
+}
+
 /// Directory names pruned unconditionally — they're rarely useful in a
 /// file-explorer search and they dominate scan time when present.
-const PRUNE_DIRS: &[&str] = &[
+pub(super) const PRUNE_DIRS: &[&str] = &[
     "node_modules",
     ".git",
     "target",
@@ -46,13 +57,20 @@ const PRUNE_DIRS: &[&str] = &[
 
 #[tauri::command]
 pub async fn fs_search(
+    state: tauri::State<'_, FileSearchState>,
     root: String,
     query: String,
     limit: Option<usize>,
     workspace: Option<WorkspaceEnv>,
     show_hidden: Option<bool>,
 ) -> Result<SearchResult, String> {
-    blocking(move || fs_search_impl(root, query, limit, workspace, show_hidden)).await
+    let generation = state.generation.clone();
+    let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
+    blocking(move || {
+        let cancel = move || generation.load(Ordering::SeqCst) != my_gen;
+        search_with_cancel(root, query, limit, workspace, show_hidden, &cancel)
+    })
+    .await
 }
 
 pub fn fs_search_impl(
@@ -61,6 +79,17 @@ pub fn fs_search_impl(
     limit: Option<usize>,
     workspace: Option<WorkspaceEnv>,
     show_hidden: Option<bool>,
+) -> Result<SearchResult, String> {
+    search_with_cancel(root, query, limit, workspace, show_hidden, &|| false)
+}
+
+fn search_with_cancel(
+    root: String,
+    query: String,
+    limit: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    show_hidden: Option<bool>,
+    cancel: &dyn Fn() -> bool,
 ) -> Result<SearchResult, String> {
     let q = query.trim();
     if q.is_empty() {
@@ -77,7 +106,15 @@ pub fn fs_search_impl(
         return Err(format!("not a directory: {root}"));
     }
 
-    let mut cands: Vec<SearchHit> = Vec::new();
+    // Score each entry as it is visited and keep only the matches. Building a
+    // SearchHit for every one of up to MAX_SCANNED entries and ranking
+    // afterwards allocated three strings per entry on every keystroke, which is
+    // what made typing here stutter.
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+
+    let mut scored: Vec<(u32, SearchHit)> = Vec::new();
     let mut scanned: usize = 0;
     let mut truncated = false;
 
@@ -108,6 +145,11 @@ pub fn fs_search_impl(
             truncated = true;
             break;
         }
+        // Superseded by a newer keystroke — drop the rest of the walk.
+        if scanned.is_multiple_of(512) && cancel() {
+            truncated = true;
+            break;
+        }
         let path = dent.path();
         if path == root_path {
             continue;
@@ -116,45 +158,29 @@ pub fn fs_search_impl(
             Ok(r) => to_canon(r),
             Err(_) => continue,
         };
+        let Some(score) = pattern.score(Utf32Str::new(&rel, &mut buf), &mut matcher) else {
+            continue;
+        };
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         let is_dir = dent.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        cands.push(SearchHit {
-            path: display_path(path, &root_path, &root, &workspace),
-            rel,
-            name,
-            is_dir,
-        });
+        scored.push((
+            score,
+            SearchHit {
+                path: display_path(path, &root_path, &root, &workspace),
+                rel,
+                name,
+                is_dir,
+            },
+        ));
     }
 
-    let hits = rank_fuzzy(cands, q, cap);
+    // Best score first; ties break toward shorter relative paths.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.rel.len().cmp(&b.1.rel.len())));
+    let hits = scored.into_iter().take(cap).map(|(_, h)| h).collect();
     Ok(SearchResult { hits, truncated })
-}
-
-/// Fuzzy-rank candidates against the query (path-aware, smart-case), keeping
-/// the top `cap`. Ties break toward shorter relative paths.
-fn rank_fuzzy(cands: Vec<SearchHit>, query: &str, cap: usize) -> Vec<SearchHit> {
-    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-    let mut buf = Vec::new();
-
-    let mut scored = Vec::with_capacity(cands.len());
-    for (i, c) in cands.iter().enumerate() {
-        if let Some(s) = pattern.score(Utf32Str::new(&c.rel, &mut buf), &mut matcher) {
-            scored.push((s, i));
-        }
-    }
-    scored.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| cands[a.1].rel.len().cmp(&cands[b.1].rel.len()))
-    });
-    scored
-        .into_iter()
-        .take(cap)
-        .map(|(_, i)| cands[i].clone())
-        .collect()
 }
 
 #[derive(Serialize)]

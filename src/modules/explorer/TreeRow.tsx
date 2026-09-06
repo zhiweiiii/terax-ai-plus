@@ -16,6 +16,9 @@ export type RowActions = {
 
 export type EntryRowProps = {
   path: string;
+  /** For a compacted row (com/example/app) this is its head, so collapsing
+   *  folds the whole run instead of only its last segment. */
+  collapsePath?: string;
   name: string;
   isDir: boolean;
   isExpanded: boolean;
@@ -39,6 +42,7 @@ function EntryRowImpl(props: EntryRowProps) {
     name,
     isDir,
     isExpanded,
+    collapsePath,
     depth,
     actions,
     renameInProgress,
@@ -79,7 +83,9 @@ function EntryRowImpl(props: EntryRowProps) {
   const handleClick = () => {
     if (renameInProgress) return;
     onSelectPath(path);
-    if (isDir) actions.toggle(path);
+    // Expanding opens the deepest level so the run continues from there;
+    // collapsing acts on the head so one click puts the whole run away.
+    if (isDir) actions.toggle(isExpanded ? (collapsePath ?? path) : path);
     else onOpenFile(path);
   };
 

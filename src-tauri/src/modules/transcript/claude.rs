@@ -9,7 +9,10 @@ use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
-use super::{merge_assistant_steps, same_dir, Message, Transcript, Working};
+use super::{
+    clip_output, flatten_text, merge_assistant_steps, push_part, same_dir, Message, Part,
+    Transcript, Working,
+};
 
 /// Only look at directories touched this recently when the escaped-name guess
 /// misses and we have to search. A project nobody has used today cannot be the
@@ -157,6 +160,8 @@ fn parse(file: &Path) -> Option<Transcript> {
     let mut turn_started: Option<i64> = None;
     let mut turn_open = false;
     let mut pending_tools: i32 = 0;
+    // tool_use id -> where its Part sits, so the result can be written back.
+    let mut awaiting_result: HashMap<String, (usize, usize)> = HashMap::new();
 
     for line in text.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -183,6 +188,10 @@ fn parse(file: &Path) -> Option<Transcript> {
                     != Some("human")
                 {
                     pending_tools = (pending_tools - count_blocks(&value, "tool_result")).max(0);
+                    // Not conversation, but it carries what the calls printed.
+                    // This is the whole reason the phone can show a command and
+                    // its output where it ran without reading the screen.
+                    fill_tool_results(&value, &mut steps, &awaiting_result);
                     continue;
                 }
                 let at = timestamp(&value);
@@ -195,14 +204,24 @@ fn parse(file: &Path) -> Option<Transcript> {
                     at,
                     text: user_text(&value),
                     reasoning: None,
-                    tools: Vec::new(),
+                    parts: Vec::new(),
                 });
             }
             Some("assistant") => {
                 let at = timestamp(&value);
                 revision = revision.max(at);
-                let (text, reasoning, tools) = assistant_blocks(&value);
-                pending_tools += tools.len() as i32;
+                let (text, reasoning, parts) = assistant_blocks(&value);
+                // Remember where each call landed so the result, which arrives
+                // on a later line, can be written back into it.
+                let mut call_ids = tool_use_ids(&value).into_iter();
+                for (index, part) in parts.iter().enumerate() {
+                    if let Part::Tool { .. } = part {
+                        if let Some(id) = call_ids.next() {
+                            awaiting_result.insert(id, (steps.len(), index));
+                        }
+                    }
+                }
+                pending_tools += count_blocks(&value, "tool_use");
                 // Still going while a call it just made has not come back.
                 turn_open = pending_tools > 0;
                 steps.push(Message {
@@ -211,7 +230,7 @@ fn parse(file: &Path) -> Option<Transcript> {
                     at,
                     text,
                     reasoning,
-                    tools,
+                    parts,
                 });
             }
             _ => {}
@@ -260,6 +279,120 @@ fn entry_id(value: &Value, index: usize) -> String {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| format!("entry-{index}"))
+}
+
+/// The ids of this entry's tool calls, in the order the blocks appear — the
+/// same order `assistant_blocks` pushes their parts, so the two zip.
+fn tool_use_ids(value: &Value) -> Vec<String> {
+    value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|b| b.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Input keys worth showing, best first.
+///
+/// What the desktop prints after the tool name is the one field that says
+/// which call this was: the command, the file, the pattern. Tools disagree
+/// about what to call it, and an unknown tool simply gets no subject rather
+/// than a guess at one.
+const SUBJECT_KEYS: &[&str] = &[
+    "command",
+    "file_path",
+    "path",
+    "pattern",
+    "query",
+    "url",
+    "skill",
+    "description",
+    "prompt",
+];
+
+/// The call's subject, on one line.
+fn call_subject(input: Option<&Value>) -> Option<String> {
+    let input = input?.as_object()?;
+    let raw = SUBJECT_KEYS
+        .iter()
+        .find_map(|key| input.get(*key).and_then(Value::as_str))?;
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    const MAX: usize = 140;
+    if flat.chars().count() <= MAX {
+        return Some(flat);
+    }
+    Some(flat.chars().take(MAX).collect::<String>() + "…")
+}
+
+/// Write each `tool_result` in this entry back into the call it answers.
+///
+/// The link is the `tool_use_id` the agent itself recorded, so nothing here is
+/// matched on text or position.
+fn fill_tool_results(
+    value: &Value,
+    steps: &mut [Message],
+    awaiting: &HashMap<String, (usize, usize)>,
+) {
+    let Some(blocks) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(&(step, index)) = awaiting.get(id) else {
+            continue;
+        };
+        let Some(Part::Tool {
+            output,
+            elided,
+            failed,
+            ..
+        }) = steps.get_mut(step).and_then(|m| m.parts.get_mut(index))
+        else {
+            continue;
+        };
+        let (text, elided_now) = clip_output(&tool_result_text(block));
+        *failed = block
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        *elided = elided_now;
+        *output = Some(text);
+    }
+}
+
+/// A result's text. The content is a plain string for most tools and an array
+/// of blocks for the rest; images and other non-text blocks are skipped rather
+/// than described, because a phone showing "[image]" learns nothing.
+fn tool_result_text(block: &Value) -> String {
+    match block.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 /// Timestamps are ISO-8601 with milliseconds. Parsed by hand rather than
@@ -324,25 +457,32 @@ fn user_text(value: &Value) -> String {
         .to_string()
 }
 
-fn assistant_blocks(value: &Value) -> (String, Option<String>, Vec<String>) {
-    let mut text = Vec::new();
+/// One entry's content, in the order Claude wrote the blocks.
+///
+/// That order IS the turn's order: a `text` block, the `tool_use` blocks it
+/// led to, then the next `text`. Collecting the two kinds into separate lists
+/// threw it away, and the phone drew every command after all of the prose
+/// while the desktop drew them interleaved.
+fn assistant_blocks(value: &Value) -> (String, Option<String>, Vec<Part>) {
+    let mut parts: Vec<Part> = Vec::new();
     let mut reasoning = None;
-    let mut tools = Vec::new();
     let Some(blocks) = value
         .get("message")
         .and_then(|m| m.get("content"))
         .and_then(Value::as_array)
     else {
-        return (String::new(), None, tools);
+        return (String::new(), None, parts);
     };
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 if let Some(t) = block.get("text").and_then(Value::as_str) {
-                    let t = t.trim();
-                    if !t.is_empty() {
-                        text.push(t.to_string());
-                    }
+                    push_part(
+                        &mut parts,
+                        Part::Text {
+                            text: t.trim().to_string(),
+                        },
+                    );
                 }
             }
             Some("thinking") => {
@@ -355,11 +495,20 @@ fn assistant_blocks(value: &Value) -> (String, Option<String>, Vec<String>) {
             }
             Some("tool_use") => {
                 if let Some(name) = block.get("name").and_then(Value::as_str) {
-                    tools.push(name.to_string());
+                    push_part(
+                        &mut parts,
+                        Part::Tool {
+                            name: name.to_string(),
+                            subject: call_subject(block.get("input")),
+                            output: None,
+                            elided: 0,
+                            failed: false,
+                        },
+                    );
                 }
             }
             _ => {}
         }
     }
-    (text.join("\n"), reasoning, tools)
+    (flatten_text(&parts), reasoning, parts)
 }

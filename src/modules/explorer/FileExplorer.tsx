@@ -16,7 +16,11 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import type { GitStatusSnapshot } from "@/lib/native";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { setHideGitIgnored, setShowHidden } from "@/modules/settings/store";
+import {
+  setCompactFolders,
+  setHideGitIgnored,
+  setShowHidden,
+} from "@/modules/settings/store";
 import { useGlobalShortcuts } from "@/modules/shortcuts";
 import type { TerminalPathDropTarget } from "@/modules/terminal";
 import {
@@ -88,6 +92,9 @@ type Row =
       key: string;
       path: string;
       name: string;
+      /** Head of a compacted chain ("com" for a row reading com/example/app).
+       *  Collapsing acts here, so one click folds the whole run away. */
+      collapsePath: string;
       isDir: boolean;
       isExpanded: boolean;
       depth: number;
@@ -141,11 +148,25 @@ function applyFilter(
   });
 }
 
+/** The one subdirectory a directory holds, when that is all it holds. */
+function soleChildDir(
+  tree: ReturnType<typeof useFileTree>,
+  path: string,
+): { name: string; path: string } | null {
+  const node = tree.nodes[path];
+  if (node?.status !== "loaded") return null;
+  if (node.entries.length !== 1) return null;
+  const only = node.entries[0];
+  if (only.kind !== "dir") return null;
+  return { name: only.name, path: tree.joinPath(path, only.name) };
+}
+
 function buildRows(
   rootPath: string,
   tree: ReturnType<typeof useFileTree>,
   lookup: (path: string) => GitStatusCode | null,
   hideGitIgnored: boolean,
+  compactFolders: boolean,
 ): { rows: Row[]; entryIndexByPath: Map<string, number> } {
   const rows: Row[] = [];
   const entryIndexByPath = new Map<string, number>();
@@ -154,8 +175,23 @@ function buildRows(
     const node = tree.nodes[parent];
     if (!node || node.status !== "loaded") return;
     for (const entry of node.entries) {
-      const path = tree.joinPath(parent, entry.name);
+      let path = tree.joinPath(parent, entry.name);
       const isDir = entry.kind === "dir";
+      /* A package like com/example/app/service is four rows carrying one piece
+         of information. While each level holds nothing but the next directory,
+         they are folded into a single row. Only expanded, loaded levels can be
+         folded: an unread directory's contents are unknown, which is why
+         expanding one cascades down the run (`useFileTree.toggle`). */
+      let name = entry.name;
+      const collapsePath = path;
+      if (compactFolders && isDir && tree.expanded.has(path)) {
+        for (;;) {
+          const only = soleChildDir(tree, path);
+          if (!only || !tree.expanded.has(only.path)) break;
+          name = `${name}/${only.name}`;
+          path = only.path;
+        }
+      }
       const expanded = isDir && tree.expanded.has(path);
       const isRenaming = tree.renaming === path;
       const gitignored = parentIgnored || entry.gitignored;
@@ -181,7 +217,8 @@ function buildRows(
           kind: "entry",
           key: path,
           path,
-          name: entry.name,
+          name,
+          collapsePath,
           isDir,
           isExpanded: expanded,
           depth,
@@ -250,6 +287,7 @@ export const FileExplorer = memo(
     const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
     const hideGitIgnored = usePreferencesStore((s) => s.hideGitIgnored);
     const showHidden = usePreferencesStore((s) => s.showHidden);
+    const compactFolders = usePreferencesStore((s) => s.compactFolders);
     const { lookup: lookupGitStatus } = useGitStatus(
       rootPath,
       gitDecorations ? gitStatuses : null,
@@ -267,7 +305,13 @@ export const FileExplorer = memo(
           rows: [] as Row[],
           entryIndexByPath: new Map<string, number>(),
         };
-      return buildRows(rootPath, tree, lookupGitStatus, hideGitIgnored);
+      return buildRows(
+        rootPath,
+        tree,
+        lookupGitStatus,
+        hideGitIgnored,
+        compactFolders,
+      );
       // `tree` is intentionally omitted: its identity changes every render, but
       // the listed fields are the only inputs buildRows actually reads.
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -279,6 +323,7 @@ export const FileExplorer = memo(
       tree.pendingCreate,
       lookupGitStatus,
       hideGitIgnored,
+      compactFolders,
     ]);
 
     const rowActions = useMemo<RowActions>(
@@ -544,6 +589,9 @@ export const FileExplorer = memo(
           return (
             <EntryRow
               path={row.path}
+              collapsePath={
+                row.kind === "entry" ? row.collapsePath : undefined
+              }
               name={row.name}
               isDir={row.isDir}
               isExpanded={row.kind === "entry" ? row.isExpanded : false}
@@ -664,6 +712,12 @@ export const FileExplorer = memo(
               {/* Without git decorations Rust never fills `gitignored`, so
                   every entry reads as not-ignored and this filter would
                   silently do nothing. Say why instead of pretending. */}
+              <DropdownMenuCheckboxItem
+                checked={compactFolders}
+                onCheckedChange={(v) => applyFilter(setCompactFolders, v === true)}
+              >
+                合并单层目录
+              </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
                 checked={hideGitIgnored}
                 disabled={!gitDecorations}

@@ -550,9 +550,35 @@ pub fn pty_list_shells() -> Vec<shell_init::ShellInfo> {
 }
 
 /// Frontend syncs its terminal tabs here so the web page can list them all.
+///
+/// This is also where a closed terminal is noticed: the frontend sends the
+/// tabs it still has, so any queued command naming one that is gone is dropped
+/// rather than waiting for a terminal that will never come back.
 #[tauri::command]
-pub fn web_sync_tabs(state: tauri::State<PtyState>, tabs: Vec<WebTab>) {
+pub fn web_sync_tabs(
+    state: tauri::State<PtyState>,
+    schedule: tauri::State<crate::modules::schedule::ScheduleState>,
+    app: tauri::AppHandle,
+    tabs: Vec<WebTab>,
+) {
+    let live: std::collections::HashSet<u32> = tabs.iter().map(|t| t.leaf_id).collect();
     state.web_sync_tabs(tabs);
+    let before = schedule.revision();
+    for leaf in schedule
+        .list()
+        .iter()
+        .map(|j| j.leaf_id)
+        .filter(|leaf| !live.contains(leaf))
+        .collect::<std::collections::HashSet<_>>()
+    {
+        schedule.forget_leaf(leaf);
+    }
+    if schedule.revision() != before {
+        let _ = app.emit(
+            crate::modules::schedule::SCHEDULE_EVENT,
+            schedule.list(),
+        );
+    }
 }
 
 /// Frontend syncs its groups (spaces) here — including empty ones — so the

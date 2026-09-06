@@ -28,23 +28,29 @@ export function OpenFilesPanel({
   onSelectTab,
   onCloseTab,
 }: Props) {
-  // Files belong to the current command line (terminal tab). Switching command
-  // lines switches this list. Files with no owner are shown only when there is
-  // no active terminal to scope to. Git tabs (diff / history / commit file)
-  // are repo-level, not tied to a command line, so they always show.
-  const isGitTab = (t: Tab) =>
+  // Every tab here belongs to the command line it was opened from, git tabs
+  // included. They used to bypass the filter as "repo-level", which meant a
+  // diff opened in one project stayed on screen in another: a list that is
+  // supposed to say what you have open in THIS project cannot show tabs from
+  // somewhere else.
+  //
+  // Ownership is required, not preferred: an unowned tab does not appear while
+  // a command line is scoping the list. Nothing is stranded by that, because
+  // tabs restored without an owner are adopted by their space's first terminal
+  // on boot (`adoptOrphanTabs`).
+  const listed = (t: Tab) =>
+    t.kind === "editor" ||
+    t.kind === "markdown" ||
+    t.kind === "preview" ||
     t.kind === "git-diff" ||
     t.kind === "git-history" ||
     t.kind === "git-commit-file";
   const fileTabs = tabs.filter(
     (t) =>
-      isGitTab(t) ||
-      ((t.kind === "editor" ||
-        t.kind === "markdown" ||
-        t.kind === "preview") &&
-        (currentOwnerTabId !== null
-          ? t.ownerTabId === currentOwnerTabId
-          : t.ownerTabId === undefined)),
+      listed(t) &&
+      (currentOwnerTabId !== null
+        ? t.ownerTabId === currentOwnerTabId
+        : t.ownerTabId === undefined),
   );
 
   if (fileTabs.length === 0) {

@@ -1,4 +1,9 @@
-import { type Block, Conversation, type Turn } from "./conversation";
+import {
+  type Block,
+  Conversation,
+  sameMessage,
+  type Turn,
+} from "./conversation";
 import { renderMarkdown } from "./markdown";
 import "./style.css";
 
@@ -6,6 +11,8 @@ import "./style.css";
 // client → server:
 //   first text: { "attach": <id> } or { "list": true }
 //   binary:     '0' + bytes        → write input
+//   text:       { "scheduleAdd": { command, delaySeconds } } → queue a command
+//               { "scheduleCancel": <job id> }
 //               '1' + JSON         → resize { "cols": N, "rows": N }
 // server → client:
 //   binary '0' + bytes             → terminal output (seed frame first)
@@ -15,6 +22,7 @@ import "./style.css";
 //         { "type": "opening", "id": N }
 //         { "type": "resized", "cols": C, "rows": R }
 //         { "type": "exit", "id": N, "code": C }
+//         { "type": "schedules", "jobs": [...] }
 //         { "type": "error", "message": "..." }
 //
 // One session has ONE grid, and whoever is typing owns it (SizeOwner in the
@@ -48,13 +56,30 @@ type SpaceInfo = { id: string; name: string };
 /** One turn of an agent conversation, read from the agent's OWN transcript
  *  (`~/.claude/projects/**.jsonl`, opencode's SQLite) rather than parsed off
  *  its screen. See the Rust `transcript` module. */
+/** One piece of a turn, in the order the agent produced it. */
+type TranscriptPart =
+  | { kind: "text"; text: string }
+  | {
+      kind: "tool";
+      name: string;
+      /** What it was called on: the command, the path, the pattern. */
+      subject?: string;
+      /** What it printed, already clipped server-side. */
+      output?: string;
+      /** Lines the clip dropped. */
+      elided?: number;
+      failed?: boolean;
+    };
+
 type TranscriptMessage = {
   id: string;
   role: "user" | "assistant";
   at: number;
+  /** The message for a user turn; the prose flattened out of `parts` for an
+   *  agent one. Compared against, not rendered — `parts` is what is drawn. */
   text: string;
   reasoning?: string;
-  tools: string[];
+  parts: TranscriptPart[];
 };
 
 type TranscriptMsg = {
@@ -67,6 +92,23 @@ type TranscriptMsg = {
   messages: TranscriptMessage[];
   working?: { since: number };
   revision: number;
+};
+
+/** A command queued to run later. The clock is server-side (see
+ *  src-tauri/src/modules/schedule.rs): a phone that locked its screen, or a
+ *  tab that was closed, cannot be the thing counting down. */
+type ScheduledJob = {
+  id: number;
+  leaf_id: number;
+  command: string;
+  /** Epoch milliseconds. */
+  fire_at: number;
+  created_at: number;
+};
+
+type SchedulesMsg = {
+  type: "schedules";
+  jobs: ScheduledJob[];
 };
 
 type SessionsMsg = {
@@ -105,8 +147,16 @@ let transcript: TranscriptMsg | null = null;
  *  it drops a message as soon as the PROGRAM paints it. Under a transcript
  *  that is too early: the agent echoes your message on its screen a beat
  *  before it writes the turn out, so the bubble disappeared and came back.
- *  Held here instead until the transcript actually has it. */
-let awaitingTranscript: string[] = [];
+ *  Held here instead until the transcript actually has it.
+ *
+ *  Each entry remembers the last user message the transcript already carried
+ *  when it was sent, because "the transcript has this" can only be answered
+ *  against what arrived AFTER the send. See `transcriptRecorded`. */
+type Awaiting = { text: string; afterId: string | null };
+let awaitingTranscript: Awaiting[] = [];
+
+/** Commands queued to run later, as the server last reported them. */
+let schedules: ScheduledJob[] = [];
 
 /** The grid the parser falls back to if the server ever omits one. The phone
  *  does not have a grid of its own to want: it renders no terminal, so any
@@ -135,7 +185,7 @@ app.innerHTML = `
       <div class="empty-title">没有活动终端</div>
       <div class="empty-sub">在桌面端打开一个命令行后，这里会自动显示</div>
     </div>
-    <div class="stream">
+    <div id="stream" class="stream">
       <div id="turns" class="bubbles"></div>
       <div id="live-blocks" class="bubbles"></div>
       <div id="pending" class="bubbles"></div>
@@ -145,6 +195,18 @@ app.innerHTML = `
     <button id="to-bottom" class="to-bottom" hidden>回到最新 ↓</button>
     <div id="thinking" class="thinking" hidden></div>
     <div id="choices" class="choices" hidden></div>
+    <div id="sched" class="sched" hidden>
+      <div class="sched-form">
+        <input id="sched-h" class="sched-num" type="number" min="0" max="48"
+          inputmode="numeric" placeholder="0" aria-label="小时" />
+        <span class="sched-unit">小时</span>
+        <input id="sched-m" class="sched-num" type="number" min="0" max="59"
+          inputmode="numeric" placeholder="0" aria-label="分钟" />
+        <span class="sched-unit">分钟后执行</span>
+        <button id="sched-go" class="sched-go" type="button">安排</button>
+      </div>
+      <div id="sched-list" class="sched-list"></div>
+    </div>
     <div id="progstatus" class="progstatus" hidden></div>
     <div class="keyrow">
       <button class="key-btn" data-ctrl="3">Ctrl+C</button>
@@ -155,6 +217,7 @@ app.innerHTML = `
       <button class="key-btn" data-seq="up">↑</button>
       <button class="key-btn" data-seq="down">↓</button>
       <button class="key-btn" data-ctrl="13">↵</button>
+      <button id="btn-sched" class="key-btn" title="定时发送">⏱</button>
     </div>
     <div class="inputrow">
       <textarea id="input" class="input" rows="1" placeholder="输入命令或消息…"
@@ -173,6 +236,7 @@ app.innerHTML = `
 `;
 
 const threadEl = $("#thread") as HTMLDivElement;
+const streamEl = $("#stream") as HTMLDivElement;
 const turnsEl = $("#turns") as HTMLDivElement;
 const emptyHint = $("#empty-hint") as HTMLDivElement;
 const statusEl = $("#status") as HTMLSpanElement;
@@ -187,6 +251,10 @@ const agentsEl = $("#agents") as HTMLDivElement;
 const thinkingEl = $("#thinking") as HTMLDivElement;
 const toBottomEl = $("#to-bottom") as HTMLButtonElement;
 const choicesEl = $("#choices") as HTMLDivElement;
+const schedEl = $("#sched") as HTMLDivElement;
+const schedListEl = $("#sched-list") as HTMLDivElement;
+const schedHoursEl = $("#sched-h") as HTMLInputElement;
+const schedMinsEl = $("#sched-m") as HTMLInputElement;
 
 // ── Rendering ────────────────────────────────────────────────────────────
 // Turns are re-rendered on a rAF so a burst of output costs one DOM pass.
@@ -221,6 +289,16 @@ function render() {
   } else {
     renderScreenTurns();
   }
+  // Where the unconfirmed bubble belongs depends on what it is waiting for.
+  //
+  // Under a transcript it is the QUESTION and #live-blocks is the reply being
+  // written to it, so it has to come first — rendered last, your own message
+  // appeared underneath the answer to it.
+  //
+  // On the screen path it really is the newest thing: the program's repaint is
+  // what is on screen, and a bubble pushed above it would sit over content
+  // older than itself. So the DOM order stands there.
+  streamEl.dataset.order = transcript ? "transcript" : "screen";
   paintLiveScreen();
   if (stick) scrollToBottom();
 }
@@ -266,8 +344,66 @@ function renderTranscript(t: TranscriptMsg) {
   }
 }
 
+/** Prose the agent wrote, as Markdown.
+ *
+ *  The screen path is left alone: what it carries is Markdown the TUI already
+ *  drew. */
+function proseNode(text: string): HTMLElement {
+  const body = document.createElement("div");
+  body.className = "turn-text";
+  renderMarkdown(body, text);
+  return body;
+}
+
+/** One tool call, where it ran: what was invoked and what it printed.
+ *
+ *  Both halves come from the agent's own record — the call and its result are
+ *  separate entries linked by an id — so nothing here is recognised off a
+ *  screen or matched by text. */
+function toolNode(part: Extract<TranscriptPart, { kind: "tool" }>): HTMLElement {
+  const box = document.createElement("div");
+  box.className = part.failed ? "tool failed" : "tool";
+
+  const head = document.createElement("div");
+  head.className = "tool-head";
+  const name = document.createElement("span");
+  name.className = "tool-name";
+  name.textContent = part.name;
+  head.appendChild(name);
+  if (part.subject) {
+    const subject = document.createElement("span");
+    subject.className = "tool-subject";
+    subject.textContent = part.subject;
+    head.appendChild(subject);
+  }
+  box.appendChild(head);
+
+  if (part.output) {
+    const out = document.createElement("pre");
+    out.className = "tool-out";
+    out.textContent = part.output;
+    box.appendChild(out);
+  }
+  // Say what is missing rather than quietly showing less than there was.
+  if (part.elided) {
+    const more = document.createElement("div");
+    more.className = "tool-more";
+    more.textContent = `+${part.elided} 行`;
+    box.appendChild(more);
+  }
+  return box;
+}
+
 function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
-  const sig = `${m.role}:${m.text.length}:${m.reasoning?.length ?? 0}:${m.tools.join(",")}`;
+  const parts = m.parts ?? [];
+  const shape = parts
+    .map((p) =>
+      p.kind === "text"
+        ? `t${p.text.length}`
+        : `x${p.name}:${p.subject ?? ""}:${p.output?.length ?? -1}`,
+    )
+    .join("|");
+  const sig = `${m.role}:${m.text.length}:${m.reasoning?.length ?? 0}:${shape}`;
   if (painted.get(node) === sig) return;
   painted.set(node, sig);
   // `transcript` marks prose the agent WROTE, as opposed to output a
@@ -277,14 +413,22 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
     m.role === "user" ? "turn sent" : "turn output transcript";
   node.replaceChildren();
 
-  if (m.text) {
-    const body = document.createElement("div");
-    body.className = "turn-text";
-    // Transcript text is the agent's raw Markdown, so render it as such. The
-    // screen path is left alone: what it carries is Markdown the TUI already
-    // drew.
-    renderMarkdown(body, m.text);
-    node.appendChild(body);
+  // A turn is prose, the tools that prose led to, then more prose. Drawing all
+  // of the text and then all of the chips was the same turn in the wrong
+  // order: every command sat under the whole answer instead of where it ran,
+  // so the phone showed the writing in one lump and the commands in another
+  // while the desktop showed them interleaved.
+  //
+  // A user turn carries no parts — its whole content is `text` — and the
+  // fallback also covers a transcript from a server that predates `parts`.
+  if (parts.length > 0) {
+    for (const part of parts) {
+      node.appendChild(
+        part.kind === "text" ? proseNode(part.text) : toolNode(part),
+      );
+    }
+  } else if (m.text) {
+    node.appendChild(proseNode(m.text));
   }
   // What the agent worked through before answering. Set apart rather than
   // hidden: it is the most useful thing on the screen when an answer looks
@@ -299,39 +443,6 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
     think.append(summary, text);
     node.appendChild(think);
   }
-  if (m.tools.length > 0) {
-    const tools = document.createElement("div");
-    tools.className = "turn-tools";
-    for (const name of dedupeTools(m.tools)) {
-      const chip = document.createElement("span");
-      chip.className = "tool-chip";
-      chip.textContent = name;
-      tools.appendChild(chip);
-    }
-    node.appendChild(tools);
-  }
-}
-
-/** "Read, Read, Bash" reads as noise; "Read x2, Bash" reads as work. */
-function dedupeTools(tools: string[]): string[] {
-  const out: string[] = [];
-  let last = "";
-  let run = 0;
-  const flush = () => {
-    if (last === "") return;
-    out.push(run > 1 ? `${last} x${run}` : last);
-  };
-  for (const name of tools) {
-    if (name === last) {
-      run++;
-      continue;
-    }
-    flush();
-    last = name;
-    run = 1;
-  }
-  flush();
-  return out;
 }
 
 function renderScreenTurns() {
@@ -399,7 +510,9 @@ function paintLiveScreen() {
 
   // Sent, but not yet accounted for by whichever source owns the conversation.
   // Rendered last, because it is the newest thing in it.
-  const pending = transcript ? awaitingTranscript : conv.pending;
+  const pending = transcript
+    ? awaitingTranscript.map((a) => a.text)
+    : conv.pending;
   const psig = pending.join(" ");
   if (pendingEl.dataset.sig !== psig) {
     pendingEl.dataset.sig = psig;
@@ -419,8 +532,12 @@ function paintLiveScreen() {
   // apart from the rest.
   // The transcript states the mode and the model; the screen only ever
   // guessed at them from a status bar it had to find first.
-  const mode = transcript?.mode ?? conv.mode;
-  const status = transcript ? (transcript.model ?? null) : conv.status;
+  // The transcript states these; the screen only ever guessed them off a
+  // status bar it had to find first, so its half is what needs holding.
+  const mode = transcript?.mode ?? held("mode", conv.mode);
+  const status = transcript
+    ? (transcript.model ?? null)
+    : held("status", conv.status);
   const label = mode && status ? `${mode} · ${status}` : (mode ?? status);
   if (label) {
     if (progStatusEl.dataset.sig !== label) {
@@ -471,6 +588,38 @@ function paintLiveScreen() {
   }
 }
 
+/** How long a value read off the screen survives a frame that failed to
+ *  observe it.
+ *
+ *  The spinner and the status bar are parsed out of whatever frame happened to
+ *  be captured, and a frame caught mid-repaint simply does not contain them.
+ *  Treating that as "it stopped" hid the indicator for one frame and showed it
+ *  again on the next, which is a flicker, and because both sit in the composer
+ *  it shifted the whole thread each time. These are states that hold until
+ *  something contradicts them, not measurements taken per frame. */
+const SCREEN_STATE_GRACE_MS = 2000;
+
+const lastSeen = new Map<string, { value: string; at: number }>();
+
+/** Carry the last observed value through a short gap in observation. */
+function held(key: string, value: string | null): string | null {
+  if (value !== null) {
+    lastSeen.set(key, { value, at: Date.now() });
+    return value;
+  }
+  const previous = lastSeen.get(key);
+  if (previous && Date.now() - previous.at < SCREEN_STATE_GRACE_MS) {
+    return previous.value;
+  }
+  lastSeen.delete(key);
+  return null;
+}
+
+/** Drop a held value now, for the moments something does contradict it. */
+function forgetHeld(key: string) {
+  lastSeen.delete(key);
+}
+
 /** What the program is doing right now, and for how long.
  *
  *  Kept out of the bubbles on purpose: "thinking for 12s" is a state that is
@@ -485,12 +634,33 @@ function paintThinking() {
   // the screen the rest of the time INCLUDING under a transcript, which is
   // what makes "thinking" appear during an ordinary reply.
   const working = transcript?.working;
-  const t: typeof conv.thinking = working
-    ? {
-        label: "思考中",
-        seconds: Math.max(0, Math.round((Date.now() - working.since) / 1000)),
-      }
-    : conv.thinking;
+  let t: typeof conv.thinking;
+  if (working) {
+    // The transcript knows when the turn started, so this counts up on its own
+    // and never needs holding.
+    forgetHeld("thinking");
+    t = {
+      label: "思考中",
+      seconds: Math.max(0, Math.round((Date.now() - working.since) / 1000)),
+    };
+  } else {
+    // The screen's spinner, held across the frames that miss it.
+    const seen = conv.thinking;
+    const carried = held(
+      "thinking",
+      seen ? `${seen.label}:${seen.seconds ?? ""}` : null,
+    );
+    if (carried === null) {
+      t = null;
+    } else {
+      const cut = carried.lastIndexOf(":");
+      const seconds = carried.slice(cut + 1);
+      t = {
+        label: carried.slice(0, cut),
+        seconds: seconds === "" ? null : Number(seconds),
+      };
+    }
+  }
   if (!t) {
     thinkingEl.hidden = true;
     thinkingEl.dataset.sig = "";
@@ -564,24 +734,128 @@ function paintChoices() {
   );
 }
 
-/** Whether a transcript already carries this as something the user said. */
-function transcriptHasUserText(t: TranscriptMsg, text: string): boolean {
-  const want = collapse(text);
-  if (want === "") return true;
-  return t.messages
-    .slice(-SETTLED_LOOKBACK * 2)
-    .some((m) => m.role === "user" && collapse(m.text).includes(want));
+/** How long until a queued command runs, for the list. */
+function untilText(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  if (h > 0) return `${h}小时${m}分后`;
+  if (m > 0) return `${m}分${sec}秒后`;
+  return `${sec}秒后`;
 }
 
-/** Whether the agent is mid-turn, by either account. */
+function paintSchedules() {
+  const now = Date.now();
+  schedListEl.replaceChildren(
+    ...schedules.map((job) => {
+      const row = document.createElement("div");
+      row.className = "sched-item";
+
+      const when = document.createElement("span");
+      when.className = "sched-when";
+      when.textContent = untilText(job.fire_at - now);
+      row.appendChild(when);
+
+      const cmd = document.createElement("span");
+      cmd.className = "sched-cmd";
+      cmd.textContent = job.command;
+      row.appendChild(cmd);
+
+      const drop = document.createElement("button");
+      drop.type = "button";
+      drop.className = "sched-drop";
+      drop.textContent = "✕";
+      drop.setAttribute("aria-label", "取消");
+      drop.addEventListener("click", () => send({ scheduleCancel: job.id }));
+      row.appendChild(drop);
+      return row;
+    }),
+  );
+  if (schedules.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "sched-empty";
+    empty.textContent = "没有排队的命令";
+    schedListEl.appendChild(empty);
+  }
+}
+
+/** Tick the countdowns while the panel is open, and only then: a timer
+ *  running behind a closed panel is exactly the cost this page avoids. */
+let schedTimer = 0;
+function setSchedOpen(open: boolean) {
+  schedEl.hidden = !open;
+  if (open) {
+    paintSchedules();
+    if (!schedTimer) schedTimer = window.setInterval(paintSchedules, 1000);
+    followToBottom();
+  } else if (schedTimer) {
+    window.clearInterval(schedTimer);
+    schedTimer = 0;
+  }
+}
+
+/** The last user message the transcript currently carries, or null. */
+function lastUserId(t: TranscriptMsg | null): string | null {
+  if (!t) return null;
+  for (let i = t.messages.length - 1; i >= 0; i--) {
+    if (t.messages[i].role === "user") return t.messages[i].id;
+  }
+  return null;
+}
+
+/** Whether the transcript has recorded this send.
+ *
+ *  Two rules, and both exist because the bubble disappearing is worse than it
+ *  lingering: the message must have been recorded AFTER the send, and it must
+ *  match the way an echo matches.
+ *
+ *  Scanning the whole tail for a substring answered a different question -
+ *  "has the user ever said something containing this" - and anything said
+ *  twice ("1", "继续", "ok", or any text inside an earlier message) matched a
+ *  turn that predated the send. The entry was dropped, the transcript never
+ *  actually gained the new message, and the bubble was simply never drawn. */
+function transcriptRecorded(t: TranscriptMsg, a: Awaiting): boolean {
+  const want = collapse(a.text);
+  if (want === "") return true;
+  // An anchor the transcript no longer carries (a switched session, a
+  // compaction) cannot bound the scan, so fall back to scanning all of it
+  // rather than holding the bubble forever.
+  const anchored =
+    a.afterId !== null && t.messages.some((m) => m.id === a.afterId);
+  let after = !anchored;
+  for (const m of t.messages) {
+    if (!after) {
+      if (m.id === a.afterId) after = true;
+      continue;
+    }
+    if (m.role === "user" && sameMessage(collapse(m.text), want)) return true;
+  }
+  return false;
+}
+
+/** Whether the agent is mid-turn, by any account.
+ *
+ *  `awaitingTranscript` counts too: a message this page sent that the
+ *  transcript has not recorded is a turn about to happen, and the screen is
+ *  the only place its reply exists yet. Without it the reply blinked out
+ *  every time the spinner missed a frame. */
 function isTurnInFlight(): boolean {
-  return transcript?.working != null || conv.thinking !== null;
+  return (
+    transcript?.working != null ||
+    conv.thinking !== null ||
+    awaitingTranscript.length > 0
+  );
 }
 
 /** How many transcript turns to check a screen block against. The overlap is
  *  always at the end of the conversation; scanning all of it would cost more
  *  the longer the session ran, for nothing. */
 const SETTLED_LOOKBACK = 3;
+
+/** Shortest screen block that may be dropped as "the transcript already has
+ *  it". Below this, containment is coincidence rather than evidence. */
+const SETTLED_MIN_MATCH = 8;
 
 /** Screen blocks the transcript has not recorded yet.
  *
@@ -617,7 +891,18 @@ function unsettledBlocks(t: TranscriptMsg): Block[] {
   return blocks.slice(start).filter((b) => {
     const text = collapse(b.lines.join(" "));
     if (text === "") return false;
-    return !settled.some((s) => s.includes(text) || text.includes(s));
+    // Only one direction is safe. A settled turn CONTAINING this block means
+    // the transcript already says everything the block does, so the block is
+    // a repeat. The reverse - the block containing a settled turn - means the
+    // screen has MORE than the transcript, which is precisely the reply still
+    // being written, and dropping it deleted the answer as it arrived: any
+    // short earlier turn ("好的", "1") is a substring of almost everything.
+    //
+    // The length floor guards what is left: a two-character block is inside
+    // half the conversation by coincidence, and showing it twice for a moment
+    // costs far less than losing it.
+    if (text.length < SETTLED_MIN_MATCH) return true;
+    return !settled.some((s) => s.includes(text));
   });
 }
 
@@ -869,11 +1154,18 @@ function handleText(raw: unknown) {
       if (!Array.isArray(next.messages)) break;
       transcript = next;
       awaitingTranscript = awaitingTranscript.filter(
-        (text) => !transcriptHasUserText(next, text),
+        (a) => !transcriptRecorded(next, a),
       );
       render();
       // A running turn's elapsed time has to advance between polls.
       startWorkingTicker();
+      break;
+    }
+    case "schedules": {
+      const next = (raw as SchedulesMsg).jobs;
+      if (!Array.isArray(next)) break;
+      schedules = next;
+      if (schedEl.hidden === false) paintSchedules();
       break;
     }
     case "resized":
@@ -1062,8 +1354,10 @@ function submit() {
   if (!writePty(`${text}\r`)) return;
   conv.noteSent(text);
   // The transcript will not know about this until the agent writes the turn
-  // out, so the page holds it in the meantime.
-  if (transcript) awaitingTranscript.push(text);
+  // out, so the page holds it in the meantime — anchored to where the
+  // transcript stood now, so only a turn recorded after this one can retire it.
+  if (transcript)
+    awaitingTranscript.push({ text, afterId: lastUserId(transcript) });
   inputEl.value = "";
   autoGrow();
   followToBottom();
@@ -1083,6 +1377,29 @@ inputEl.addEventListener("keydown", (e) => {
     e.preventDefault();
     submit();
   }
+});
+
+$("#btn-sched").addEventListener("click", () => setSchedOpen(schedEl.hidden !== false));
+$("#sched-go").addEventListener("click", () => {
+  const command = inputEl.value.trim();
+  if (command === "") {
+    toast("先输入要执行的命令");
+    inputEl.focus();
+    return;
+  }
+  const hours = Number(schedHoursEl.value) || 0;
+  const minutes = Number(schedMinsEl.value) || 0;
+  const delaySeconds = hours * 3600 + minutes * 60;
+  if (delaySeconds <= 0) {
+    toast("请填写多久之后执行");
+    return;
+  }
+  send({ scheduleAdd: { command, delaySeconds } });
+  // Cleared the way sending clears it: the command has left the composer, and
+  // leaving it there invites sending it twice.
+  inputEl.value = "";
+  autoGrow();
+  toast(`已排队：${untilText(delaySeconds * 1000)}`);
 });
 
 toBottomEl.addEventListener("click", followToBottom);

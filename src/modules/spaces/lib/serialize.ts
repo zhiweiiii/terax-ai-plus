@@ -23,7 +23,7 @@ export type SerializedTab =
       customTitle?: string;
     }
   | { kind: "editor"; path: string; ownerTab?: number }
-  | { kind: "preview"; url: string }
+  | { kind: "preview"; url: string; ownerTab?: number }
   | { kind: "markdown"; path: string; ownerTab?: number };
 
 function basename(path: string): string {
@@ -78,19 +78,11 @@ function serializeTab(tab: Tab): SerializedTab | null {
         ...(tab.customTitle !== undefined && { customTitle: tab.customTitle }),
       };
     case "editor":
-      return {
-        kind: "editor",
-        path: tab.path,
-        ...(tab.ownerTabId !== undefined && { ownerTabId: tab.ownerTabId }),
-      };
+      return { kind: "editor", path: tab.path };
     case "preview":
       return { kind: "preview", url: tab.url };
     case "markdown":
-      return {
-        kind: "markdown",
-        path: tab.path,
-        ...(tab.ownerTabId !== undefined && { ownerTabId: tab.ownerTabId }),
-      };
+      return { kind: "markdown", path: tab.path };
     default:
       return null;
   }
@@ -113,7 +105,9 @@ export function serializeTabs(tabs: Tab[]): SerializedTab[] {
   return out.map((s, i) => {
     const ownerTabId = slots[i]?.tab.ownerTabId;
     if (
-      (s.kind === "editor" || s.kind === "markdown") &&
+      (s.kind === "editor" ||
+        s.kind === "markdown" ||
+        s.kind === "preview") &&
       ownerTabId !== undefined
     ) {
       const owner = terminalSlot.get(ownerTabId);
@@ -266,7 +260,12 @@ export function hydrateTabs(
         continue;
       }
       if (tab.kind === "terminal") terminalIdBySlot.set(i, tab.id);
-      if ((s.kind === "editor" || s.kind === "markdown") && s.ownerTab !== undefined) {
+      if (
+        (s.kind === "editor" ||
+          s.kind === "markdown" ||
+          s.kind === "preview") &&
+        s.ownerTab !== undefined
+      ) {
         ownerSlotByIndex.set(i, s.ownerTab);
       }
       hydrated.push(tab);
@@ -281,7 +280,12 @@ export function hydrateTabs(
     const tab = hydrated[i];
     if (!tab) continue;
     const ownerSlot = ownerSlotByIndex.get(i);
-    if (ownerSlot !== undefined && (tab.kind === "editor" || tab.kind === "markdown")) {
+    if (
+      ownerSlot !== undefined &&
+      (tab.kind === "editor" ||
+        tab.kind === "markdown" ||
+        tab.kind === "preview")
+    ) {
       const ownerId = terminalIdBySlot.get(ownerSlot);
       out.push({ ...tab, ownerTabId: ownerId });
     } else {
