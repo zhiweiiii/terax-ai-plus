@@ -23,6 +23,7 @@ import {
   registerPromptTracker,
   type ShellIntegrationState,
 } from "./osc-handlers";
+import { gatewayPin } from "./gatewayPins";
 import { openPty, type PtySession } from "./pty-bridge";
 import "../block/block.css";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
@@ -654,6 +655,7 @@ async function openPtyForSession(
     s.blocks,
     usePreferencesStore.getState().terminalShell || undefined,
     leafId,
+    gatewayPin(leafId),
   );
   // Only resize if the bound dims changed during the spawn: a same-size
   // ResizePseudoConsole during conhost warmup is a known ConPTY trigger for

@@ -47,7 +47,7 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - `shell::shell_run_command`：一次性子 shell 执行（worktree 功能用），与 PTY 会话无关，不是用户的交互终端。Windows 上走 PowerShell（`-NoProfile -Command`）。
 - `workspace::*`：`workspace_authorize` / `workspace_current_dir`（启动与 git 的 cwd 授权表），外加 WSL 桥（`wsl_list_distros`、`wsl_default_distro`、`wsl_home`）。
 - `lsp::*`：语言服务器进程宿主。一根笨的 JSON-RPC 管道：Content-Length 分帧与进程生命周期在 Rust（`lsp/framing.rs`），协议智能在前端。启动 cwd 经授权表把关；服务器跑在自己的进程组里并整组杀掉，Windows 子进程带 `proc::job::ProcessJob`。`RunEvent::Exit` 时全部杀掉。
-- `secret::secret_protect` / `secret_unprotect`：Windows DPAPI 加解密，IPC 上走 base64。agent 环境变量里的 token 靠它落盘，明文不进设置文件。
+- `gateway::gateway_status` / `gateway_set_config`：Claude Code 的本地供应商网关，见下。
 - `web::*`（`web::start`、`web::stop`、`web::web_status`、`web_set_password`、`web_has_custom_password`、`web_snapshot_reply`）：内嵌 HTTP + WebSocket 服务，见下。
 - `open_settings_window`：设置的独立 webview 窗口（可选 `tab` 参数深链到某一节）。
 
@@ -63,6 +63,22 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **一个会话一个网格，谁在打字谁拥有它**（`SizeOwner` / `claim` / `request_grid`）。手机不声明网格所以永不 claim，从手机打字不会让桌面屏幕重排。桌面只在真实按键时收回所有权，xterm 的协议应答（焦点上报、OSC 4 回复）刻意不 claim。
 - **Agent transcript**：附着的会话里跑着编码 agent 时，服务端推 `{type:"transcript"}`，内容读自 agent 自己的记录。手机据此渲染对话，屏幕解析只保留一件 transcript 不可能知道的事：**程序此刻在等你选什么**。三道闸门让空闲会话零开销：必须真有 agent 在跑（`Session::web_agent`，由 OSC 检测喂）、文件指纹必须变过、revision 必须变过。700ms 轮询而不是监听，因为 opencode 的提交落在 WAL 里，没有文件系统事件能描述它。
 - **标签同步**：`App.tsx` 的 `useWebTerminalSync` 把每个桌面终端标签同步给 Rust（`web_sync_tabs`），所以手机能列出全部命令行而不只是有活 PTY 的。手机连一个还没起 pty 的标签时，服务端发 `terax:web-activate`，前端激活该标签，手机收到 `opening` 后重试。
+
+### Claude 网关（`src-tauri/src/modules/gateway/`）
+
+回环上的一个 Anthropic Messages 端点，让 Claude Code 用上只卖 OpenAI 格式接口的中转站。Claude Code 只会说 Anthropic Messages，而多数中转站（含 OpenCode Zen 的 `/zen/go/v1`）只提供 OpenAI Chat Completions，网关把请求转出去、把响应连同 SSE 转回来，于是换供应商变成菜单里点一下。要点：
+
+- **端口**：dev 绑 `34267`，release 绑 `34266`，与 web 桥接的 34268/34269 错开，两者可并存。
+- **只绑 `127.0.0.1`，绝不 `0.0.0.0`**。它转发的是用户付费的凭据，LAN 监听等于把订阅交给网内任何人。入站还要校验网关令牌（`x-api-key` 或 Bearer 都收），令牌存在 `%LOCALAPPDATA%/terax/gateway-token`，跨重启不变，否则每次重启都会悄悄弄坏所有已配置的命令行。
+- **按命令行隔离**：供应商 id 钉在 URL 路径里（`/p/<id>/v1/messages`），不是取全局选择。`$env:` 本来就只作用于一个 shell，但如果网关按全局 `current` 路由，在终端 B 切一下就会把终端 A 里**已经在跑**的 Claude Code 悄悄改道，env 的隔离就是假的。前端按 leafId 记住每个命令行钉住的是谁（leafId 由只增不复用的计数器发放，所以映射不会张冠李戴）。没有前缀的请求才回落到全局选择，留给手工配置的端点。钉住的供应商被删掉时返回 503，绝不静默改用当前选中的那个去花钱。
+- **默认不启动**：开应用不路由任何东西、不 bind 任何端口。端口只在 `shell_env` 里开，也就是某个真要用它的 shell 正在 spawn 的时候；`gateway_set_config` 只存配置，不起监听。pin 是刻意不持久化、也刻意不从"当前供应商"继承的：继承意味着开个应用就悄悄起监听、并把每个新 shell 指向一个付费端点。tokio runtime 与 reqwest client 同样是 `OnceLock`，第一次真正转发时才创建。
+- **不新增依赖**：`tauri-plugin-updater` 已经把 reqwest（含 `stream` feature）、rustls、hyper、tokio 的 net 拉进依赖树，网关只是声明已经链接进来的东西。服务端沿用 web 桥接同款的阻塞 accept 循环加一线程一连接，不引入 axum。
+- **reqwest 有两个会 panic 的坑**，都已处理：它编译时不带 crypto provider（更新插件选了 `rustls-no-provider`），而插件只在检查更新时才惰性安装，所以 `upstream.rs` 自己装 ring provider；另外 `RequestBuilder::send()` 在**被调用时**就注册超时定时器，必须在 runtime 上下文里调用，不能作为 `block_on` 的实参在外面求值。
+- **转换层是纯函数**（`convert.rs` / `stream.rs` / `sse.rs`），不认识 Provider、不碰 IO，可直接单测。SSE 走推送式状态机而不是 Stream 组合子，因为连接线程本来就是同步读写。跨 chunk 被切成两半的多字节字符由 `sse::append_utf8` 兜住。
+- **按角色路由模型**：Claude Code 发的是 `claude-sonnet-4-5-20250929` 这类带日期的全名，按 opus / sonnet / haiku 关键词归档映射到中转站真实模型，所以切换时**清掉** `ANTHROPIC_MODEL` 而不是设置它，否则所有档位会被钉死在同一个模型上。`[1m]` 是客户端侧的上下文声明，上游会拒收，路由前剥掉。
+- **协议上的硬约束**：Anthropic 每条消息流只允许一个 `message_delta`，而部分中转站会连发多个带 `finish_reason` 的 chunk，重复发会让 Claude Code 直接断开。转换器只认第一个，并把它压到 `[DONE]` 才发出，这样 usage 是最终值。上游报错时只发 `error` 事件、不补成功收尾，绝不把失败伪装成正常完成。
+- **供应商的怪癖按 host 判**：OpenCode Zen 的 Go 计划缺 `x-opencode-session` 会直接 400（"cannot be routed efficiently"），它靠这个把一轮对话固定在同一后端。会话 id 从 Claude Code 的 `metadata.user_id`（形如 `..._session_<uuid>`）里挖，取不到时回落到一个进程内固定值，每次请求换一个新的会正好毁掉这个头存在的意义。另外测试探针发 `max_tokens: 16` 而不是 1，有中转站校验 `max_tokens > 2`，用 1 会把好的供应商测成坏的。
+- **配置由前端持有**：`claudeGateway` 存在 tauri-plugin-store 里，`gateway_set_config` 把同一份推给 Rust，Rust 侧只有这一处状态。
 
 ### PTY shell 集成
 
@@ -91,7 +107,7 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 - **preview/** - 自动探测的开发服务器预览标签（状态栏发现 localhost URL 时提示打开）。
 - **tabs/** - `useTabs` 是标签列表与活动 id 的事实来源。`useWorkspaceCwd` 推导资源管理器根目录、新标签继承的 cwd，以及文件/版本/窗口三个侧栏跟随的当前终端标签。**文件标签归属某个命令行**：每个 editor / markdown 标签带 `ownerTabId` 指向它被打开时所在的终端标签，`capEditorTabs` **按归属**限流（每个终端标签 10 个，最老先驱逐，脏的/刚打开的/活动的保留）。归属信息在序列化和标签移动后仍然保留；关掉终端会让它的文件变成"未归属"。
 - **header/** - 顶栏与行内搜索。`WindowControls` 在 `USE_CUSTOM_WINDOW_CONTROLS` 为真时渲染（Windows 上恒真）。
-- **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 环境变量面板（临时写入 `$env:`，token 经 DPAPI 加密后存偏好）。
+- **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 供应商面板（`ClaudeProviderButton`：选中一个中转站，把 `$env:ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 临时写进当前命令行并指向本地网关的 `/p/<id>`）。按钮左侧的徽标显示**当前命令行**走的是哪个供应商，没走网关时不渲染，指向已删除的供应商时转为琥珀色告警。已知中转站有一键预设（`PRESETS`），填完只差 API Key。
 - **shortcuts/** - 快捷键注册表（`shortcuts.ts`）+ `useGlobalShortcuts`。处理函数在 `App.tsx` 里按 id 传入。平台修饰键用 `metaKey || ctrlKey`。
 - **settings/** - 设置 store（`store.ts`，基于 `tauri-plugin-store`）、偏好 hook、设置窗口打开器。**`usePreferencesStore.init()` 必须在每次启动时都跑**，不能只在首次创建空间时跑，否则几十项主窗口设置会被钉死在默认值、且没有变更监听。
 - **sidebar/** - 活动栏与可折叠侧面板。打开的文件面板**按归属命令行分组**并跟随当前终端标签。git 标签（diff / history / commit-file）是仓库级的，与当前命令行无关，恒显示。

@@ -350,6 +350,7 @@ pub fn spawn(
     blocks: bool,
     shell: Option<String>,
     control: Option<crate::modules::control::ShellControlEnv>,
+    gateway_provider: Option<String>,
     on_data: Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>,
     on_exit: Option<Box<dyn Fn(i32) + Send + Sync>>,
 ) -> Result<(Arc<Session>, PtySize), String> {
@@ -367,7 +368,8 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let cmd = shell_init::build_command(cwd.clone(), workspace, blocks, shell, control)?;
+    let cmd =
+        shell_init::build_command(cwd.clone(), workspace, blocks, shell, control, gateway_provider)?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 

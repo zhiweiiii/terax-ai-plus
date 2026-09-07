@@ -10,7 +10,7 @@ import { IncognitoIcon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { DiagnosticsBadge } from "./DiagnosticsBadge";
-import { AgentEnvButton } from "./AgentEnvButton";
+import { ClaudeProviderButton } from "./ClaudeProviderButton";
 import { ScheduleButton } from "./ScheduleButton";
 import { WebStatusBadge } from "./WebStatusBadge";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
@@ -23,9 +23,6 @@ type Props = {
   onWorkspaceChange: (env: WorkspaceEnv) => void;
   onOpenSettings: () => void;
   privateActive: boolean;
-  /** Runs a command in the terminal the status bar is describing. Undefined
-   *  when there is none, which disables the parameter panel's actions. */
-  onRunInTerminal?: (command: string) => boolean;
   /** The terminal a queued command runs in. Null when there is none. */
   activeLeafId?: number | null;
 };
@@ -38,7 +35,6 @@ export function StatusBar({
   onWorkspaceChange,
   onOpenSettings,
   privateActive,
-  onRunInTerminal,
   activeLeafId,
 }: Props) {
   return (
@@ -66,7 +62,7 @@ export function StatusBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
-        <AgentEnvButton onApply={onRunInTerminal} />
+        <ClaudeProviderButton leafId={activeLeafId ?? null} />
         <ScheduleButton leafId={activeLeafId ?? null} />
         <WebStatusBadge />
         <Button

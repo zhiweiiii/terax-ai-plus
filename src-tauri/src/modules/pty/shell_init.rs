@@ -56,16 +56,17 @@ pub fn build_command(
     blocks: bool,
     shell: Option<String>,
     control: Option<ShellControlEnv>,
+    gateway_provider: Option<String>,
 ) -> Result<CommandBuilder, String> {
     let shell = sanitize_shell_override(shell);
     #[cfg(unix)]
     {
         let _ = workspace;
-        unix::build(cwd, blocks, shell, control)
+        unix::build(cwd, blocks, shell, control, gateway_provider)
     }
     #[cfg(windows)]
     {
-        windows::build(cwd, workspace, blocks, shell, control)
+        windows::build(cwd, workspace, blocks, shell, control, gateway_provider)
     }
 }
 
@@ -139,15 +140,40 @@ fn ensure_utf8_locale(cmd: &mut CommandBuilder) {
     cmd.env("LANG", fallback);
 }
 
+/// Point this shell's Claude Code at the local gateway, or make sure nothing
+/// inherited still points it somewhere else.
+///
+/// The two removals matter as much as the assignments. ANTHROPIC_MODEL would
+/// pin every role to one model and defeat the gateway's per-role routing, and
+/// ANTHROPIC_API_KEY is sent as `x-api-key`, which the gateway reads in
+/// preference to the Bearer header, so one left in the user's profile would
+/// outrank the token set here and turn every request into a 401.
+fn apply_gateway(cmd: &mut CommandBuilder, provider_id: Option<&str>) {
+    let Some(provider_id) = provider_id else {
+        return;
+    };
+    let Some((base_url, token)) = crate::modules::gateway::shell_env(provider_id) else {
+        log::warn!("pty gateway: provider {provider_id} unavailable, shell left unrouted");
+        return;
+    };
+    log::info!("pty gateway: routing this shell through {base_url}");
+    cmd.env("ANTHROPIC_BASE_URL", base_url);
+    cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+    cmd.env_remove("ANTHROPIC_MODEL");
+    cmd.env_remove("ANTHROPIC_API_KEY");
+}
+
 fn apply_common(
     cmd: &mut CommandBuilder,
     cwd: Option<String>,
     blocks: bool,
     control: Option<&ShellControlEnv>,
+    gateway_provider: Option<&str>,
 ) {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TERAX_TERMINAL", "1");
+    apply_gateway(cmd, gateway_provider);
     if blocks {
         cmd.env("TERAX_BLOCKS", "1");
     }
@@ -309,10 +335,11 @@ mod unix {
         blocks: bool,
         shell_override: Option<String>,
         control: Option<super::ShellControlEnv>,
+        gateway_provider: Option<String>,
     ) -> Result<CommandBuilder, String> {
         let (shell, shell_path) = Shell::resolve(shell_override);
         let mut cmd = CommandBuilder::new(&shell_path);
-        super::apply_common(&mut cmd, cwd, blocks, control.as_ref());
+        super::apply_common(&mut cmd, cwd, blocks, control.as_ref(), gateway_provider.as_deref());
         apply_shell_init(&mut cmd, &shell, &shell_path);
         Ok(cmd)
     }
@@ -538,9 +565,13 @@ mod windows {
         blocks: bool,
         shell: Option<String>,
         control: Option<super::ShellControlEnv>,
+        gateway_provider: Option<String>,
     ) -> Result<CommandBuilder, String> {
         if let WorkspaceEnv::Wsl { distro } = workspace {
-            let _ = (blocks, shell, control);
+            // A WSL shell cannot reach a Windows loopback listener by
+            // 127.0.0.1, so routing it through the gateway would hand it a URL
+            // that never connects.
+            let _ = (blocks, shell, control, gateway_provider);
             return build_wsl(cwd, distro);
         }
         let shell_path = shell
@@ -558,7 +589,7 @@ mod windows {
         let is_bash = shell_name == "bash.exe";
 
         let mut cmd = CommandBuilder::new(&shell_path);
-        super::apply_common(&mut cmd, cwd, blocks, control.as_ref());
+        super::apply_common(&mut cmd, cwd, blocks, control.as_ref(), gateway_provider.as_deref());
 
         if is_powershell {
             match prepare_ps_profile() {
@@ -1149,7 +1180,7 @@ mod tests {
             cli_path: Some("/app/terax-cli".into()),
             cli_bin_dir: Some(std::path::PathBuf::from("/app/bin")),
         };
-        apply_common(&mut command, None, false, Some(&control));
+        apply_common(&mut command, None, false, Some(&control), None);
 
         assert_eq!(
             command.get_env("TERAX_CONTROL_ADDR"),

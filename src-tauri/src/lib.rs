@@ -1,7 +1,7 @@
 pub mod modules;
 
 use modules::{
-    control, fs, git, history, lsp, pty, schedule, secret, shell, web, workspace,
+    control, fs, gateway, git, history, lsp, pty, schedule, shell, web, workspace,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -292,9 +292,10 @@ pub fn run() {
             web::web_status,
             web::web_snapshot_reply,
             web::web_set_password,
-            secret::secret_protect,
-            secret::secret_unprotect,
             web::web_has_custom_password,
+            gateway::gateway_test_provider,
+            gateway::gateway_status,
+            gateway::gateway_set_config,
             fs::tree::list_subdirs,
             fs::tree::fs_read_dir,
             fs::file::fs_read_file,

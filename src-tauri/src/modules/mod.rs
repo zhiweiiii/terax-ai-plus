@@ -1,12 +1,12 @@
 pub mod control;
 pub mod fs;
+pub mod gateway;
 pub mod git;
 pub mod history;
 pub mod lsp;
 pub mod proc;
 pub mod pty;
 pub mod schedule;
-pub mod secret;
 pub mod shell;
 pub mod transcript;
 pub mod web;

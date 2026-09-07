@@ -183,6 +183,9 @@ impl PtyState {
                     false,
                     None,
                     None,
+                    // The session the phone attaches to has no desktop pane to
+                    // inherit a provider choice from.
+                    None,
                     None,
                     None,
                 )
@@ -214,6 +217,7 @@ pub async fn pty_open(
     blocks: Option<bool>,
     shell: Option<String>,
     pane_id: Option<u32>,
+    gateway_provider: Option<String>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
 ) -> Result<u32, String> {
@@ -249,6 +253,7 @@ pub async fn pty_open(
             blocks,
             shell,
             control_env,
+            gateway_provider,
             data_cb,
             exit_cb,
         )

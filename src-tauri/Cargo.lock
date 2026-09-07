@@ -5100,11 +5100,12 @@ dependencies = [
 
 [[package]]
 name = "terax"
-version = "0.8.6"
+version = "0.9.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
  "dirs 6.0.0",
+ "futures-util",
  "getrandom 0.3.4",
  "globset",
  "grep-matcher",
@@ -5116,7 +5117,9 @@ dependencies = [
  "notify",
  "nucleo-matcher",
  "portable-pty",
+ "reqwest",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -5141,7 +5144,7 @@ dependencies = [
 
 [[package]]
 name = "terax-cli"
-version = "0.8.6"
+version = "0.9.0"
 dependencies = [
  "dirs 6.0.0",
  "libc",
@@ -5152,7 +5155,7 @@ dependencies = [
 
 [[package]]
 name = "terax-control-protocol"
-version = "0.8.6"
+version = "0.9.0"
 dependencies = [
  "serde",
  "serde_json",

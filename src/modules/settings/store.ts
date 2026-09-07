@@ -117,9 +117,8 @@ export type Preferences = {
   agentKeyPassthrough: boolean;
   /** Fold a run of directories that each hold only the next one. */
   compactFolders: boolean;
-  /** Previously applied Claude Code parameter sets, newest first. The token is
-   *  DPAPI ciphertext, never plaintext (see `modules/secret.rs`). */
-  agentEnvPresets: AgentEnvPreset[];
+  /** Relays Claude Code can be pointed at, and which one is selected. */
+  claudeGateway: ClaudeGatewayConfig;
   explorerGitDecorations: boolean;
   /** Branch names that must not be force-pushed / rebased without warning. */
   protectedBranches: string[];
@@ -192,7 +191,10 @@ const KEY_SHOW_HIDDEN = "showHidden";
 const KEY_HIDE_GIT_IGNORED = "hideGitIgnored";
 const KEY_AGENT_KEY_PASSTHROUGH = "agentKeyPassthrough";
 const KEY_COMPACT_FOLDERS = "compactFolders";
-const KEY_AGENT_ENV_PRESETS = "agentEnvPresets";
+const KEY_CLAUDE_GATEWAY = "claudeGateway";
+/** Parameter sets written by the panel this replaced. Read once, to carry an
+ *  existing endpoint over as a provider. */
+const LEGACY_KEY_AGENT_ENV_PRESETS = "agentEnvPresets";
 const LEGACY_KEY_SHOW_HIDDEN_DIRS = "showHiddenDirectories";
 const KEY_EXPLORER_GIT_DECORATIONS = "explorerGitDecorations";
 const KEY_PROTECTED_BRANCHES = "protectedBranches";
@@ -258,7 +260,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   hideGitIgnored: false,
   agentKeyPassthrough: true,
   compactFolders: true,
-  agentEnvPresets: [] as AgentEnvPreset[],
+  claudeGateway: { providers: [], current: null } as ClaudeGatewayConfig,
   explorerGitDecorations: true,
   protectedBranches: ["main", "master", "develop"],
   terminalWebglEnabled: true,
@@ -347,9 +349,11 @@ export async function loadPreferences(): Promise<Preferences> {
       DEFAULT_PREFERENCES.agentKeyPassthrough,
     compactFolders:
       get<boolean>(KEY_COMPACT_FOLDERS) ?? DEFAULT_PREFERENCES.compactFolders,
-    agentEnvPresets:
-      get<AgentEnvPreset[]>(KEY_AGENT_ENV_PRESETS) ??
-      DEFAULT_PREFERENCES.agentEnvPresets,
+    claudeGateway:
+      get<ClaudeGatewayConfig>(KEY_CLAUDE_GATEWAY) ??
+      migrateAgentEnvPresets(get<LegacyAgentEnvPreset[]>(
+        LEGACY_KEY_AGENT_ENV_PRESETS,
+      )),
     explorerGitDecorations:
       get<boolean>(KEY_EXPLORER_GIT_DECORATIONS) ??
       DEFAULT_PREFERENCES.explorerGitDecorations,
@@ -531,39 +535,89 @@ export async function setCompactFolders(value: boolean): Promise<void> {
   await writePref(KEY_COMPACT_FOLDERS, value);
 }
 
-/** One remembered Claude Code parameter set. */
-export type AgentEnvPreset = {
-  id: string;
-  /** What the user calls this endpoint. Optional: older entries predate it,
-   *  and the model name is a usable fallback. */
-  alias?: string;
-  baseUrl: string;
-  model: string;
-  /** The token itself, in the clear.
-   *
-   *  It used to be DPAPI ciphertext with only the last few characters shown.
-   *  Storing and displaying it plainly is a deliberate decision by the owner
-   *  of this build, taken with the consequence stated: this file is plain
-   *  JSON under %APPDATA%, so anything that can read the user's profile can
-   *  read these tokens. */
-  token: string;
-  /** DPAPI ciphertext written by older builds. Read once to carry an existing
-   *  entry over to `token`, never written. */
-  tokenCipher?: string;
-  usedAt: number;
+/** The wire format a relay speaks. Mirrors `gateway::config::ApiFormat`. */
+export type ClaudeApiFormat = "anthropic" | "openai_chat";
+
+/** How a relay wants its credential presented. Mirrors
+ *  `gateway::config::AuthStyle`. It cannot be inferred from the format:
+ *  OpenCode Zen serves Anthropic on `/zen/go` but ignores a Bearer header
+ *  there and only honours `x-api-key`. */
+export type ClaudeAuthStyle = "bearer" | "api_key";
+
+/** Upstream model per Claude Code role. Empty falls back to `default`, and an
+ *  empty `default` passes the requested name through. */
+export type ClaudeModelRoutes = {
+  default: string;
+  opus: string;
+  sonnet: string;
+  haiku: string;
 };
 
-/** Keep the list short. It is a convenience, not an archive, and every entry
- *  is a stored credential. */
-const AGENT_ENV_PRESET_LIMIT = 8;
+export type ClaudeProvider = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** The key itself, in the clear.
+   *
+   *  Storing it plainly is a deliberate decision by the owner of this build,
+   *  taken with the consequence stated: this file is plain JSON under
+   *  %APPDATA%, so anything that can read the user's profile can read it. */
+  apiKey: string;
+  apiFormat: ClaudeApiFormat;
+  authStyle: ClaudeAuthStyle;
+  models: ClaudeModelRoutes;
+};
 
-export async function setAgentEnvPresets(
-  value: AgentEnvPreset[],
+export type ClaudeGatewayConfig = {
+  providers: ClaudeProvider[];
+  /** Provider id, or null when none is selected and the gateway stays closed. */
+  current: string | null;
+};
+
+type LegacyAgentEnvPreset = {
+  id?: string;
+  alias?: string;
+  baseUrl?: string;
+  model?: string;
+  token?: string;
+};
+
+export const EMPTY_MODEL_ROUTES: ClaudeModelRoutes = {
+  default: "",
+  opus: "",
+  sonnet: "",
+  haiku: "",
+};
+
+/** Carry endpoints from the parameter panel this replaced. Those were written
+ *  straight into ANTHROPIC_BASE_URL, so they are Anthropic endpoints by
+ *  definition. Nothing is selected: routing through the gateway is a change in
+ *  behaviour and the user should opt into it. */
+function migrateAgentEnvPresets(
+  presets: LegacyAgentEnvPreset[] | undefined,
+): ClaudeGatewayConfig {
+  if (!presets?.length) return { providers: [], current: null };
+  const providers = presets
+    .filter((preset) => preset.baseUrl)
+    // An entry written before tokens were stored in the clear holds only DPAPI
+    // ciphertext. Carry the endpoint over with an empty key rather than drop
+    // it: the user re-enters one key instead of rebuilding the entry.
+    .map((preset, index) => ({
+      id: preset.id ?? `migrated-${index}`,
+      name: preset.alias || preset.model || (preset.baseUrl as string),
+      baseUrl: preset.baseUrl as string,
+      apiKey: preset.token ?? "",
+      apiFormat: "anthropic" as const,
+      authStyle: "bearer" as const,
+      models: { ...EMPTY_MODEL_ROUTES, default: preset.model ?? "" },
+    }));
+  return { providers, current: null };
+}
+
+export async function setClaudeGateway(
+  value: ClaudeGatewayConfig,
 ): Promise<void> {
-  await writePref(
-    KEY_AGENT_ENV_PRESETS,
-    value.slice(0, AGENT_ENV_PRESET_LIMIT),
-  );
+  await writePref(KEY_CLAUDE_GATEWAY, value);
 }
 
 export async function setExplorerGitDecorations(value: boolean): Promise<void> {
@@ -730,7 +784,7 @@ export async function onPreferencesChange(
     [KEY_HIDE_GIT_IGNORED]: "hideGitIgnored",
     [KEY_AGENT_KEY_PASSTHROUGH]: "agentKeyPassthrough",
     [KEY_COMPACT_FOLDERS]: "compactFolders",
-    [KEY_AGENT_ENV_PRESETS]: "agentEnvPresets",
+    [KEY_CLAUDE_GATEWAY]: "claudeGateway",
     [KEY_EXPLORER_GIT_DECORATIONS]: "explorerGitDecorations",
     [KEY_PROTECTED_BRANCHES]: "protectedBranches",
     [KEY_TERMINAL_WEBGL_ENABLED]: "terminalWebglEnabled",

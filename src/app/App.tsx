@@ -737,21 +737,6 @@ export default function App() {
     [activeLeafId],
   );
 
-  /** Run a command in the terminal the status bar describes. Used by the
-   *  Claude Code parameter panel, whose whole point is to set variables in the
-   *  shell in front of you. */
-  const runInActiveTerminal = useCallback(
-    (command: string): boolean => {
-      if (activeLeafId === null) return false;
-      const term = terminalRefs.current.get(activeLeafId);
-      if (!term) return false;
-      term.write(`${command}${String.fromCharCode(13)}`);
-      term.focus();
-      return true;
-    },
-    [activeLeafId],
-  );
-
   const cdInNewTab = useCallback(
     (path: string) => {
       const tabId = newTab(path);
@@ -1753,7 +1738,6 @@ export default function App() {
               onCd={sendCd}
               onWorkspaceChange={handleWorkspaceChange}
               onOpenSettings={() => void openSettingsWindow()}
-              onRunInTerminal={runInActiveTerminal}
               activeLeafId={activeLeafId}
               privateActive={
                 activeTab?.kind === "terminal" && activeTab.private === true

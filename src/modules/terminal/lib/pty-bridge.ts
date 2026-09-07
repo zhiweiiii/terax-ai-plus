@@ -31,6 +31,7 @@ export async function openPty(
   blocks?: boolean,
   shell?: string,
   paneId?: number,
+  gatewayProvider?: string,
 ): Promise<PtySession> {
   // Raw bytes — no base64/JSON round-trip; messages arrive as ArrayBuffer.
   const onData = new Channel<ArrayBuffer>();
@@ -59,6 +60,7 @@ export async function openPty(
     blocks: blocks ?? false,
     shell: shell ?? null,
     paneId: paneId ?? null,
+    gatewayProvider: gatewayProvider ?? null,
     onData,
     onExit,
   });

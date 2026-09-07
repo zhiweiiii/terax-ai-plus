@@ -1,6 +1,6 @@
 [package]
 name = "terax"
-version = "0.8.6"
+version = "0.9.0"
 description = "Terax — an open-source AI-native terminal emulator"
 authors = ["crynta"]
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ default-members = [".", "crates/terax-cli", "crates/terax-control-protocol"]
 resolver = "2"
 
 [workspace.package]
-version = "0.8.6"
+version = "0.9.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -56,7 +56,26 @@ tauri-plugin-os = "2"
 tauri-plugin-store = "2"
 tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = [
+	"rt",
+	"rt-multi-thread",
+	"net",
+	"time",
+] }
+# The Claude gateway's upstream half. All three are already linked through
+# tauri-plugin-updater, so declaring them costs no extra binary weight.
+reqwest = { version = "0.13", default-features = false, features = [
+	"json",
+	"stream",
+] }
+futures-util = "0.3"
+# reqwest is built without a bundled crypto provider and panics when none is
+# installed. Never enable rustls' default features here: they would pull in
+# aws-lc-rs alongside the ring build that is already compiled in.
+rustls = { version = "0.23", default-features = false, features = [
+	"ring",
+	"std",
+] }
 base64 = "0.22"
 sha1 = "0.10"
 tempfile = "3"
@@ -72,7 +91,6 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Security",
-	"Win32_Security_Cryptography",
 	"Win32_System_Console",
 	"Win32_System_DataExchange",
 	"Win32_System_JobObjects",
