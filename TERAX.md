@@ -80,6 +80,15 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **供应商的怪癖按 host 判**：OpenCode Zen 的 Go 计划缺 `x-opencode-session` 会直接 400（"cannot be routed efficiently"），它靠这个把一轮对话固定在同一后端。会话 id 从 Claude Code 的 `metadata.user_id`（形如 `..._session_<uuid>`）里挖，取不到时回落到一个进程内固定值，每次请求换一个新的会正好毁掉这个头存在的意义。另外测试探针发 `max_tokens: 16` 而不是 1，有中转站校验 `max_tokens > 2`，用 1 会把好的供应商测成坏的。
 - **配置由前端持有**：`claudeGateway` 存在 tauri-plugin-store 里，`gateway_set_config` 把同一份推给 Rust，Rust 侧只有这一处状态。
 
+### Claude Code 用量（`src-tauri/src/modules/usage.rs`）
+
+底栏显示订阅的 5 小时窗口与周窗口用量。数据靠跑 `claude -p "/usage"` 拿，因为**它不在磁盘上**：限额是 API 响应头带回来的，Claude Code 只把它转给 statusLine 命令，`~/.claude` 下没有任何文件存它。transcript 里记的是花掉的 token，那是另一个量，不是"占套餐窗口的百分之多少"。要点：
+
+- **绝不轮询**。查一次用量本身就要消耗一次请求，轮询等于用查询把额度烧掉。后端缓存 10 分钟（`MIN_REFETCH`），打开面板只是读缓存，只有点刷新才真的重查。首屏走 `claude_usage_cached`，不触发任何子进程。
+- **失败不进缓存**，否则一次网络抖动会让面板顶着同一条错误十分钟。
+- **输出是给人看的自然语言，不是 JSON**。解析只认 `Current session` / `Current week` 两个行首，宽松地抠 `N% used` 和 `resets ...`，其余一律不猜；完整原文始终保留在 `raw` 里，Claude Code 改文案时面板还能把权威答案原样显示出来。
+- 命令写成 `claude -p "/usage"`，`/usage` 必须带引号：Git Bash 会把裸的 `/usage` 当路径翻译成 `D:\program\Git\usage`，这个坑会让人误以为该功能不存在。
+
 ### PTY shell 集成
 
 PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pty-shell-integration.md`。
@@ -103,11 +112,11 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 
 - **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，上限 5）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
 - **editor/** - CodeMirror 6（`EditorStack` 与 `TerminalStack` 对称）。缓冲区活在 LF 空间，保存时还原原始 EOL（`lib/eol.ts` 多数投票检测）；缩进单位按文件检测（`lib/indent.ts`）。保存时用 `fs_read_file` / `fs_write_file` 返回的磁盘 mtime 做冲突检查（不一致时弹警告并要求显式覆盖，绝不静默 last-writer-wins）。超过 10 MB 的文件提供"仍然打开"（硬上限 50 MB），超过 4 MB 关掉语法高亮与 LSP。保存时格式化的实现在 `lib/externalFormat.ts`。编辑器字号单独存为 `editorFontSize`，不影响 `terminalFontSize`。
-- **explorer/** - 文件树，Material / Catppuccin 图标，键盘导航，行内重命名，右键操作。`basename` 认反斜杠。常驻搜索栏同时匹配**文件名**（模糊，`fs_search`）与**文件内容**（`fs_grep_interactive`）。工具栏的过滤按钮可开关"隐藏文件"与"git 忽略的文件"。定位按钮会展开当前文件的各级父目录并选中它，也能解析 git-diff / git-commit-file 标签（拼 `repoRoot` + 路径）。
+- **explorer/** - 文件树，Material / Catppuccin 图标，键盘导航，行内重命名，右键操作。`basename` 认反斜杠。常驻搜索栏同时匹配**文件名**（模糊，`fs_search`）与**文件内容**（`fs_grep_interactive`）。两者都是模糊的：内容搜索把查询按空白拆成词，要求**每个词都出现在同一行里**（纯子串、不计顺序），而不是把整个查询当一个字面串，后者的效果是打个空格就什么都搜不到。**实现上刻意不用正则**：把词用 `.*?` 串成一个正则表达的是同一个意思，但会让 searcher 失去快路径：单个字面量能用 memchr 大步跳过文件，带空隙的模式则要让自动机逐字节爬完。所以只把**最长的那个词**当字面量交给 searcher 去筛候选行（最长 = 最稀有 = 跳得最多），其余词在活下来的少数行上用 `contains` 校验。大小写沿用 smart case，全小写查询即不区分大小写。两条搜索的 walk 都带 `hidden` + `git_ignore`，所以结果不会冒出隐藏文件或被 git 忽略的文件。工具栏的过滤按钮可开关"隐藏文件"与"git 忽略的文件"。定位按钮会展开当前文件的各级父目录并选中它，也能解析 git-diff / git-commit-file 标签（拼 `repoRoot` + 路径）。
 - **preview/** - 自动探测的开发服务器预览标签（状态栏发现 localhost URL 时提示打开）。
 - **tabs/** - `useTabs` 是标签列表与活动 id 的事实来源。`useWorkspaceCwd` 推导资源管理器根目录、新标签继承的 cwd，以及文件/版本/窗口三个侧栏跟随的当前终端标签。**文件标签归属某个命令行**：每个 editor / markdown 标签带 `ownerTabId` 指向它被打开时所在的终端标签，`capEditorTabs` **按归属**限流（每个终端标签 10 个，最老先驱逐，脏的/刚打开的/活动的保留）。归属信息在序列化和标签移动后仍然保留；关掉终端会让它的文件变成"未归属"。
 - **header/** - 顶栏与行内搜索。`WindowControls` 在 `USE_CUSTOM_WINDOW_CONTROLS` 为真时渲染（Windows 上恒真）。
-- **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 供应商面板（`ClaudeProviderButton`：选中一个中转站，把 `$env:ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 临时写进当前命令行并指向本地网关的 `/p/<id>`）。按钮左侧的徽标显示**当前命令行**走的是哪个供应商，没走网关时不渲染，指向已删除的供应商时转为琥珀色告警。已知中转站有一键预设（`PRESETS`），填完只差 API Key。
+- **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 用量（`ClaudeUsageButton`，见下）、Claude Code 供应商面板（`ClaudeProviderButton`：选中一个中转站，把 `$env:ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 临时写进当前命令行并指向本地网关的 `/p/<id>`）。按钮左侧的徽标显示**当前命令行**走的是哪个供应商，没走网关时不渲染，指向已删除的供应商时转为琥珀色告警。已知中转站有一键预设（`PRESETS`），填完只差 API Key。
 - **shortcuts/** - 快捷键注册表（`shortcuts.ts`）+ `useGlobalShortcuts`。处理函数在 `App.tsx` 里按 id 传入。平台修饰键用 `metaKey || ctrlKey`。
 - **settings/** - 设置 store（`store.ts`，基于 `tauri-plugin-store`）、偏好 hook、设置窗口打开器。**`usePreferencesStore.init()` 必须在每次启动时都跑**，不能只在首次创建空间时跑，否则几十项主窗口设置会被钉死在默认值、且没有变更监听。
 - **sidebar/** - 活动栏与可折叠侧面板。打开的文件面板**按归属命令行分组**并跟随当前终端标签。git 标签（diff / history / commit-file）是仓库级的，与当前命令行无关，恒显示。

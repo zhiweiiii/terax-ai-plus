@@ -11,6 +11,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { DiagnosticsBadge } from "./DiagnosticsBadge";
 import { ClaudeProviderButton } from "./ClaudeProviderButton";
+import { ClaudeUsageButton } from "./ClaudeUsageButton";
 import { ScheduleButton } from "./ScheduleButton";
 import { WebStatusBadge } from "./WebStatusBadge";
 import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
@@ -62,6 +63,7 @@ export function StatusBar({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
+        <ClaudeUsageButton />
         <ClaudeProviderButton leafId={activeLeafId ?? null} />
         <ScheduleButton leafId={activeLeafId ?? null} />
         <WebStatusBadge />

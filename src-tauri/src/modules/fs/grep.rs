@@ -65,12 +65,80 @@ fn escape_literal(s: &str) -> String {
     out
 }
 
+/// More terms than this stops describing a line and starts describing a novel.
+const MAX_TERMS: usize = 12;
+
+/// How the query's words are matched against a line: every word has to be
+/// somewhere in it, plain substring, order irrelevant.
+///
+/// Deliberately not a regex over the whole query. Joining the words with `.*?`
+/// expresses the same idea but costs the searcher its fast path: a single
+/// literal is found with memchr and skips most of the file, while a pattern
+/// with gaps in it drags the automaton across every byte. So one word, the
+/// longest, is handed to the searcher as a literal to find candidate lines, and
+/// the rest are checked here with `contains` on the few lines that survived.
+struct Terms {
+    /// The word given to the searcher. The longest one, because the rarest
+    /// literal is what skips the most input.
+    anchor: String,
+    /// Everything else, lowercased when the match is case insensitive.
+    rest: Vec<String>,
+    /// Smart case: a query typed in lowercase matches either case.
+    ignore_case: bool,
+}
+
+impl Terms {
+    fn parse(query: &str) -> Option<Terms> {
+        let mut words: Vec<&str> = query.split_whitespace().take(MAX_TERMS).collect();
+        if words.is_empty() {
+            return None;
+        }
+        let ignore_case = !query.chars().any(char::is_uppercase);
+        let longest = words
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, word)| word.len())
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let anchor = words.remove(longest).to_string();
+        let rest = words
+            .into_iter()
+            .map(|word| {
+                if ignore_case {
+                    word.to_lowercase()
+                } else {
+                    word.to_string()
+                }
+            })
+            .collect();
+        Some(Terms {
+            anchor,
+            rest,
+            ignore_case,
+        })
+    }
+
+    /// Whether a line the searcher matched on the anchor also carries the rest.
+    fn accepts(&self, line: &str) -> bool {
+        if self.rest.is_empty() {
+            return true;
+        }
+        let haystack = if self.ignore_case {
+            line.to_lowercase()
+        } else {
+            line.to_string()
+        };
+        self.rest.iter().all(|word| haystack.contains(word))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn search_tree(
     root_path: &Path,
     root_display: &str,
     workspace: &WorkspaceEnv,
     matcher: &RegexMatcher,
+    terms: &Terms,
     cap: usize,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> GrepResponse {
@@ -149,6 +217,11 @@ fn search_tree(
                         return Ok(false);
                     }
                     let line_text = text.trim_end_matches('\n').to_string();
+                    // The searcher only knows the anchor word; the rest of the
+                    // query is applied here, on the few lines that got this far.
+                    if !terms.accepts(&line_text) {
+                        return Ok(true);
+                    }
                     let mut guard = hits.lock().unwrap();
                     if guard.len() >= cap {
                         truncated.store(true, Ordering::Relaxed);
@@ -180,8 +253,8 @@ fn search_tree(
 }
 
 /// Interactive content search for the header search bar and command palette.
-/// Treats the query as a literal (smart-case), and self-cancels when a newer
-/// query arrives.
+/// Matches the query's words as a subsequence within a line (smart-case), and
+/// self-cancels when a newer query arrives.
 #[tauri::command]
 pub async fn fs_grep_interactive(
     state: tauri::State<'_, ContentSearchState>,
@@ -205,10 +278,11 @@ pub async fn fs_grep_interactive(
         .unwrap_or(DEFAULT_MAX_RESULTS)
         .clamp(1, HARD_MAX_RESULTS);
 
+    let terms = Terms::parse(&pattern).ok_or_else(|| "empty pattern".to_string())?;
     let matcher = RegexMatcherBuilder::new()
         .case_smart(true)
         .line_terminator(Some(b'\n'))
-        .build(&escape_literal(&pattern))
+        .build(&escape_literal(&terms.anchor))
         .map_err(|e| format!("bad pattern: {e}"))?;
 
     // The walk is CPU-bound and can take seconds on a large tree: it must never
@@ -220,6 +294,7 @@ pub async fn fs_grep_interactive(
             &root,
             &workspace,
             &matcher,
+            &terms,
             cap,
             &cancel,
         ))
