@@ -100,9 +100,10 @@
 | Agent | 数据源 |
 |---|---|
 | Claude Code | `~/.claude/projects/<转义cwd>/<session>.jsonl` |
+| Codex | `~/.codex/sessions/<year>/<month>/<day>/rollout-*.jsonl` |
 | opencode | `~/.local/share/opencode/opencode.db`（SQLite，只读） |
 
-两者归一成同一结构：带 `reasoning` 和 `tools` 的用户/助手轮次，加上会话的 `mode`、`model`，以及当前轮是否还在进行。**agent 的连续步骤会合并成一轮**：两个工具都是每次模型往返写一行，而读的人要的是答案不是机械过程。
+三者归一成同一结构：带 `reasoning` 和 `tools` 的用户/助手轮次，加上会话的 `mode`、`model`，以及当前轮是否还在进行。**agent 的连续步骤会合并成一轮**：三个工具都是每次模型往返写一行，而读的人要的是答案不是机械过程。
 
 三道闸门让空闲会话不产生开销：
 
@@ -110,11 +111,11 @@
 2. **文件指纹。** `transcript::fingerprint` 是对最新 transcript 文件（以及 opencode 的数据库和它的 WAL）做一次 stat。没变就不读。
 3. **revision。** 只有最新时间戳变过的 transcript 才会被发送。
 
-**700 毫秒轮询而不是监听**，因为其中一个后端是 SQLite，它的提交落在 WAL 里，没有任何文件系统事件能有意义地描述这件事。
+**700 毫秒轮询而不是监听**，因为其中一个后端是 SQLite，它的提交落在 WAL 里，没有任何文件系统事件能有意义地描述这件事。已识别 agent 后只检查它自己的存储，Codex 的会话路径会短暂缓存，正常轮询只做一次 stat。
 
 **为什么直接读 opencode 的数据库。** 它运行中的 TUI 不监听任何端口，所以没有可连接的对象；`opencode export` 每次读取要起一个进程。数据库以只读方式打开、从不写入，运行中的 opencode 不受影响。它是 opencode 自己的存储、不是它承诺的接口，所以这里每条失败路径都降级成"没有 transcript"、让手机退回屏幕视图：表结构在我们脚下变了，不能把页面搞坏。
 
-transcript 唯一不可能知道的，是程序**此刻**在等你选什么：待处理的权限提示是实时 UI 状态，两个工具都不持久化它。那部分留给屏幕解析。
+transcript 唯一不可能知道的，是程序**此刻**在等你选什么：待处理的权限提示是实时 UI 状态，三个工具都不持久化它。那部分留给屏幕解析。
 
 ## 网格所有权
 

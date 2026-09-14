@@ -1407,6 +1407,7 @@ export function detectProgram(screen: string[]): string | null {
   const text = screen.join("\n");
   if (/claude code|anthropic|welcome back|opus\s*\d/i.test(text))
     return "Claude Code";
+  if (/(?:^|[^\w\\/])codex(?![\w\\/-])/i.test(text)) return "Codex";
   // "opencode" is also a folder name in a cwd path (and Claude's footer shows
   // the working directory), so only a bare word - the logo, the save screen,
   // the "OpenCode Go" footer - names the program.

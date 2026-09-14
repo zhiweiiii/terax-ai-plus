@@ -3,20 +3,22 @@
 //! The phone used to reconstruct an agent conversation by parsing the TUI's
 //! screen. That works, but it is a parse of a picture: a side panel reads as
 //! speech, a spinner reads as a sentence, and every layout change is a bug.
-//! Both agents we support already persist the conversation in a structured
+//! Every supported agent persists the conversation in a structured
 //! form, so the conversation is read from there and the screen is left to do
 //! the one thing only it knows: what the program is asking you to pick right
 //! now (see `docs/architecture/mobile-conversation-view.md`).
 //!
-//! Two backends, one shape:
+//! Three backends, one shape:
 //!
 //! - `claude` - `~/.claude/projects/<escaped cwd>/<session>.jsonl`, appended
 //!   as the session runs. No dependency, trivially re-read.
 //! - `opencode` - `~/.local/share/opencode/opencode.db`, SQLite. Its TUI opens
 //!   no port and `opencode export` costs a process per read, so the database
 //!   is read directly, read-only.
+//! - `codex` - `~/.codex/sessions/<year>/<month>/<day>/rollout-*.jsonl`.
 
 mod claude;
+mod codex;
 mod opencode;
 
 use serde::Serialize;
@@ -147,7 +149,7 @@ pub struct Working {
 
 #[derive(Serialize, Clone, Debug)]
 pub struct Transcript {
-    /// "claude" or "opencode".
+    /// "claude", "codex", or "opencode".
     pub source: &'static str,
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,35 +170,43 @@ pub struct Transcript {
 /// Read the newest agent session for a working directory.
 ///
 /// `agent` is what the PTY's own detection saw start (`pty::agent_detect`);
-/// when it is not known both backends are tried and the more recently updated
+/// when it is not known every backend is tried and the more recently updated
 /// one wins, because a directory can have been used by either.
 pub fn read(cwd: &str, agent: Option<&str>) -> Option<Transcript> {
     match agent {
         Some("claude") => claude::read(cwd),
+        Some("codex") => codex::read(cwd),
         Some("opencode") => opencode::read(cwd),
         _ => {
             let a = claude::read(cwd);
-            let b = opencode::read(cwd);
-            match (a, b) {
-                (Some(a), Some(b)) => Some(if a.revision >= b.revision { a } else { b }),
-                (a, b) => a.or(b),
-            }
+            let b = codex::read(cwd);
+            let c = opencode::read(cwd);
+            [a, b, c]
+                .into_iter()
+                .flatten()
+                .max_by_key(|transcript| transcript.revision)
         }
     }
 }
 
-/// Cheap change signal across both backends: the newest moment either of them
+/// Cheap change signal across all backends: the newest moment any of them
 /// wrote anything for this directory. A poller compares this and only calls
 /// `read` when it moved, so watching an idle agent costs a couple of stats.
 ///
 /// opencode's half is not per-directory - its whole database is one file - so
 /// activity in another project also invalidates. That costs one extra read,
 /// which then finds an unchanged `revision` and sends nothing.
-pub fn fingerprint(cwd: &str) -> Option<i64> {
-    claude::changed_at(cwd)
-        .into_iter()
-        .chain(opencode::changed_at())
-        .max()
+pub fn fingerprint(cwd: &str, agent: Option<&str>) -> Option<i64> {
+    match agent {
+        Some("claude") => claude::changed_at(cwd),
+        Some("codex") => codex::changed_at(cwd),
+        Some("opencode") => opencode::changed_at(),
+        _ => claude::changed_at(cwd)
+            .into_iter()
+            .chain(codex::changed_at(cwd))
+            .chain(opencode::changed_at())
+            .max(),
+    }
 }
 
 /// Windows paths reach us with either separator depending on who wrote them
@@ -217,7 +227,7 @@ pub(crate) fn normalize_dir(path: &str) -> String {
 
 /// Merge the agent's consecutive steps into one turn.
 ///
-/// Shared by both backends: they disagree about everything except that a turn
+/// Shared by all backends: they disagree about everything except that a turn
 /// is "one user message, then whatever the agent did until it asked again".
 pub(crate) fn merge_assistant_steps(steps: Vec<Message>) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(steps.len());

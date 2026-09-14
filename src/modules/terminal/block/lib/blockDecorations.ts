@@ -451,6 +451,9 @@ export class BlockDecorations {
   }
 
   private onOsc133(data: string): void {
+    // A full-screen program owns the terminal while the alternate buffer is
+    // active. Its OSC 133 sequences are not shell prompt boundaries.
+    if (this.term.buffer.active.type === "alternate") return;
     const marker = data[0];
     const rest = data.length > 2 && data[1] === ";" ? data.slice(2) : "";
     switch (marker) {
@@ -474,6 +477,7 @@ export class BlockDecorations {
         break;
     }
     this.emitMode();
+    if (marker === "A" || marker === "D") this.onMode?.("prompt");
   }
 
   private startBlock(commandFromMarker: string): void {

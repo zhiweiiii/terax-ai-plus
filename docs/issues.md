@@ -6,6 +6,18 @@
 
 状态分三种：**已修**（解决了）、**已接受**（有意为之，登记在案）、**未决**（仍然存在）。
 
+## Codex 运行时 blocks 输入栏闪烁（2026-09-11）
+
+**已修。** blocks 终端把 OSC 133 当作 shell 的 `prompt / running` 边界，并据此启用或禁用底部 CodeMirror 输入栏、转移焦点。Codex 在 alternate screen 或 inline 模式下运行和重绘时都可能输出 OSC 133；若照常消费，TUI 的序列会被误判为提示符，输入栏与其光标就在运行中快速闪动。
+
+`BlockDecorations` 现在仅在主缓冲区处理 OSC 133。进入 alternate screen 前，shell 已发出的 `C` 标记会保持会话为 running；inline 模式下的 `D` / `A` 也只会请求一次确认，`pty_has_foreground_job` 确认前台任务退出后才恢复 prompt。运行态在 `running` 和 `alt` 间变化时不会重复调用 `focus()`，所以不会让 CodeMirror 和 xterm textarea 争抢输入法焦点。
+
+## blocks 输入光标与终端滚动条（2026-09-14）
+
+**已修。** 底部 shell 输入框接管 prompt 时，xterm 虽已禁用 stdin，隐藏 textarea 仍可能保持焦点并在正文末行绘制光标。现在会在 prompt 交接时主动 blur xterm，再聚焦 CodeMirror，因此正文不再显示第二个输入光标。
+
+终端此前把 xterm 的自定义与原生滚动条同时隐藏，长输出只能用滚轮滚动。现在保留自定义层隐藏，恢复原生 viewport 的细窄右侧竖向拖拽条。它直接映射 xterm 的 scrollback，没有额外状态或同步开销。
+
 ## 定时发送命令（2026-09-05）
 
 「多少小时多少分钟后，把这条命令发到命令行并执行」，手机端和电脑端共用一份队列。

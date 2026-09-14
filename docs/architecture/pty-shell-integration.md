@@ -48,6 +48,10 @@ profile 会在用户的 `$PROFILE` 跑完之后包住其 `prompt` 函数，让�
 
 注入的脚本发出 **OSC 7**（cwd）与 **OSC 133 A/B/C/D**（提示符边界和退出码），这样 Terax 不用解析用户的提示符就能跟踪 cwd、识别命令边界。
 
+blocks 终端只在主缓冲区消费 OSC 133 来切换底部 shell 输入栏。全屏 TUI 在 alternate screen 内也可能发出同类序列，但它们不代表 PowerShell 的提示符边界；`BlockDecorations` 会忽略它们。inline TUI 也可能发出伪 prompt 标记，因此 prompt 不会立即移交焦点，而是经 `pty_has_foreground_job` 确认前台任务已经退出。这样 Codex 等持续重绘的 TUI 不会在运行中让底部输入栏与终端 textarea 争抢焦点，IME 候选窗也不会在两处跳动。
+
+底部 shell 输入框接管 prompt 时，xterm textarea 必须同步失焦。只禁用 stdin 仍会留下正文末行的渲染光标，造成用户看到两个输入位置。终端历史直接使用 xterm viewport 的原生竖向滚动条，拖拽和滚轮操作的是同一个缓冲区位置，不维护额外的滚动镜像。
+
 ## Windows 上的并发与进程生命周期
 
 ### `CONPTY_LIFECYCLE_LOCK`

@@ -54,7 +54,7 @@ type SessionInfo = {
 type SpaceInfo = { id: string; name: string };
 
 /** One turn of an agent conversation, read from the agent's OWN transcript
- *  (`~/.claude/projects/**.jsonl`, opencode's SQLite) rather than parsed off
+ *  (`~/.claude/projects/**.jsonl`, `~/.codex/sessions/**.jsonl`, opencode's SQLite) rather than parsed off
  *  its screen. See the Rust `transcript` module. */
 /** One piece of a turn, in the order the agent produced it. */
 type TranscriptPart =

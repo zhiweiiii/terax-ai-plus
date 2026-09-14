@@ -106,6 +106,7 @@ type Session = {
   // OSC 133 C..D window (or blocks running mode): a foreground process owns
   // the terminal, so the leaf must keep its live grid while hidden.
   commandRunning: boolean;
+  promptConfirmTimer: ReturnType<typeof setTimeout> | null;
   hiddenReleaseTimer: ReturnType<typeof setTimeout> | null;
   // Pane is parked on a dead shell (spawn failed, or the shell exited
   // abnormally) showing a notice; Enter respawns instead of reaching the pty.
@@ -367,6 +368,7 @@ function leafBusy(s: Session): boolean {
 }
 
 const HIDDEN_RELEASE_DELAY_MS = 300;
+const PROMPT_CONFIRM_DELAY_MS = 48;
 
 // A parked hidden leaf went idle: give the post-command prompt a moment to
 // render into the live buffer, then hand the slot back to the pool.
@@ -386,6 +388,45 @@ function cancelHiddenRelease(s: Session): void {
     clearTimeout(s.hiddenReleaseTimer);
     s.hiddenReleaseTimer = null;
   }
+}
+
+function cancelPromptConfirm(s: Session): void {
+  if (s.promptConfirmTimer !== null) {
+    clearTimeout(s.promptConfirmTimer);
+    s.promptConfirmTimer = null;
+  }
+}
+
+function confirmBlockPrompt(leafId: number): void {
+  const s = sessions.get(leafId);
+  if (!s || s.blockMode === "prompt" || s.promptConfirmTimer !== null) return;
+  s.promptConfirmTimer = setTimeout(() => {
+    s.promptConfirmTimer = null;
+    void (async () => {
+      const current = sessions.get(leafId);
+      if (!current || current.disposed || current.blockMode === "prompt")
+        return;
+      if (!current.pty || current.shellExited) {
+        applyBlockMode(leafId, "prompt");
+        return;
+      }
+      let foreground: boolean;
+      try {
+        foreground = await invoke<boolean>("pty_has_foreground_job", {
+          id: current.pty.id,
+        });
+      } catch (e) {
+        console.error(
+          "[terax] pty_has_foreground_job failed for block prompt",
+          e,
+        );
+        return;
+      }
+      if (!foreground && sessions.get(leafId) === current) {
+        applyBlockMode(leafId, "prompt");
+      }
+    })();
+  }, PROMPT_CONFIRM_DELAY_MS);
 }
 
 async function releaseIfIdle(leafId: number, s: Session): Promise<void> {
@@ -543,6 +584,7 @@ function ensureSession(
     everSubmitted: false,
     altScreenAtRelease: false,
     commandRunning: false,
+    promptConfirmTimer: null,
     hiddenReleaseTimer: null,
     awaitingRestart: false,
     shellState: createShellIntegrationState(),
@@ -670,17 +712,20 @@ async function openPtyForSession(
   return pty;
 }
 
-function applyBlockMode(leafId: number, mode: BlockMode): void {
+function applyBlockMode(leafId: number, mode: BlockMode, force = false): void {
   const s = sessions.get(leafId);
   if (!s) return;
+  const previousMode = s.blockMode;
+  if (previousMode === mode && !force) return;
+  const wasPrompt = previousMode === "prompt";
+  const prompt = mode === "prompt";
   s.blockMode = mode;
-  s.commandRunning = mode !== "prompt";
+  s.commandRunning = !prompt;
   // Mirrors the non-blocks prompt tracker so the OSC 52 clipboard gate
   // treats agent output (a running block) as untrusted too.
-  s.shellState.inCommand = mode !== "prompt";
+  s.shellState.inCommand = !prompt;
   const slot = getSlotForLeaf(leafId);
-  if (slot) {
-    const prompt = mode === "prompt";
+  if (slot && (wasPrompt !== prompt || force)) {
     slot.term.options.disableStdin = prompt;
     // Disable the helper textarea at the prompt so a grid click can't focus the
     // xterm (no flashing cursor) and can't steal focus from the shell input.
@@ -688,6 +733,7 @@ function applyBlockMode(leafId: number, mode: BlockMode): void {
     if (!prompt) {
       slot.term.focus();
     } else if (s.visibleNow && s.focusedNow) {
+      slot.term.blur();
       const inputFocus = s.inputFocus;
       if (inputFocus) setTimeout(inputFocus, 0);
     }
@@ -723,7 +769,14 @@ function bindLeafToSlot(leafId: number, s: Session): void {
             s.lastCwd = next;
             s.callbacks.onCwd?.(next);
           },
-          onMode: (mode) => applyBlockMode(leafId, mode),
+          onMode: (mode) => {
+            if (mode === "prompt") {
+              confirmBlockPrompt(leafId);
+              return;
+            }
+            cancelPromptConfirm(s);
+            applyBlockMode(leafId, mode);
+          },
           onViewport: () => {
             const set = blockViewportListeners.get(leafId);
             if (set) for (const l of set) l();
@@ -767,7 +820,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
   });
   s.snapshot = null;
   s.hasSlot = true;
-  if (s.blocks) applyBlockMode(leafId, s.blockMode);
+  if (s.blocks) applyBlockMode(leafId, s.blockMode, true);
   if (s.lastCwd !== null) s.callbacks.onCwd?.(s.lastCwd);
   if (s.pendingExit !== null) {
     const code = s.pendingExit;
@@ -844,6 +897,7 @@ export async function respawnSession(
   s.pendingInput = "";
   s.altScreenAtRelease = false;
   s.commandRunning = false;
+  cancelPromptConfirm(s);
   s.awaitingRestart = false;
   cancelHiddenRelease(s);
 
@@ -902,6 +956,7 @@ export function disposeSession(leafId: number): void {
   const s = sessions.get(leafId);
   if (!s) return;
   s.disposed = true;
+  cancelPromptConfirm(s);
   cancelHiddenRelease(s);
   disposeLeafSlot(leafId);
   s.hasSlot = false;

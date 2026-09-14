@@ -1174,7 +1174,7 @@ fn push_transcript(
     let (Some(cwd), Some(agent)) = (cwd, agent) else {
         return;
     };
-    let found = transcript::fingerprint(cwd);
+    let found = transcript::fingerprint(cwd, Some(agent));
     if found.is_some() && found == *mark {
         return;
     }
