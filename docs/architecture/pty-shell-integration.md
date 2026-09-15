@@ -50,7 +50,7 @@ profile 会在用户的 `$PROFILE` 跑完之后包住其 `prompt` 函数，让�
 
 blocks 终端只在主缓冲区消费 OSC 133 来切换底部 shell 输入栏。全屏 TUI 在 alternate screen 内也可能发出同类序列，但它们不代表 PowerShell 的提示符边界；`BlockDecorations` 会忽略它们。inline TUI 也可能发出伪 prompt 标记，因此 prompt 不会立即移交焦点，而是经 `pty_has_foreground_job` 确认前台任务已经退出。这样 Codex 等持续重绘的 TUI 不会在运行中让底部输入栏与终端 textarea 争抢焦点，IME 候选窗也不会在两处跳动。
 
-底部 shell 输入框接管 prompt 时，xterm textarea 必须同步失焦。只禁用 stdin 仍会留下正文末行的渲染光标，造成用户看到两个输入位置。终端历史直接使用 xterm viewport 的原生竖向滚动条，拖拽和滚轮操作的是同一个缓冲区位置，不维护额外的滚动镜像。
+blocks 终端的正文光标永不显示。prompt 时 xterm textarea 同步失焦，所有延后的 renderer focus 也会先检查 `disableStdin`，所以 Delete 等编辑键不会把焦点交回正文；运行时虽然 xterm 接收控制键，光标层仍隐藏，避免在 Working 行附近显示第二个输入位置。终端历史直接使用 xterm viewport 的原生竖向滚动条，拖拽和滚轮操作的是同一个缓冲区位置，不维护额外的滚动镜像。
 
 ## Windows 上的并发与进程生命周期
 

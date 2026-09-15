@@ -87,6 +87,10 @@ let windowActive =
 let windowActivityBound = false;
 let cursorBlinkEnabled = false;
 
+function focusInteractiveTerminal(term: Terminal): void {
+  if (!term.options.disableStdin) term.focus();
+}
+
 function bindWindowActivityListeners(): void {
   if (windowActivityBound || typeof window === "undefined") return;
   windowActivityBound = true;
@@ -210,14 +214,14 @@ function createSlot(): Slot {
     ...termOptions(),
     linkHandler: createTerminalLinkHandler(() => focusTerminal()),
   });
-  focusTerminal = () => term.focus();
+  focusTerminal = () => focusInteractiveTerminal(term);
   const fitAddon = new FitAddon();
   const serializeAddon = new SerializeAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(serializeAddon);
   term.loadAddon(
     new WebLinksAddon((_e, uri) => {
-      void openExternalUrl(uri, () => term.focus());
+    void openExternalUrl(uri, () => focusInteractiveTerminal(term));
     }),
   );
 
@@ -518,6 +522,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   const hadWebgl = !!slot.webglAddon;
   slot.retainedLeafId = null;
   slot.currentLeafId = p.leafId;
+  slot.host.dataset.teraxBlocks = adapter?.isLeafBlocks(p.leafId) ? "true" : "false";
   slot.lastUsedAt = performance.now();
 
   cancelPendingUnhide(slot);
@@ -562,9 +567,12 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
     } else {
       p.drainRing((bytes) => slot.term.write(bytes));
     }
-    try {
-      slot.term.write("\x1b[?25h");
-    } catch {}
+    // No `\x1b[?25h` here. The `reset()` above is a RIS and already leaves the
+    // cursor visible, so a previous tenant cannot bequeath a hidden one. Forcing
+    // it visible again after the replay instead overrides what the replayed
+    // bytes asked for: an inline TUI that hides the real cursor once at startup
+    // and paints its own (codex, Claude Code) never sends `?25l` again, so the
+    // real cursor stays lit and chases every repaint across the pane.
 
     for (const d of slot.oscDisposers) {
       try {
@@ -600,7 +608,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
         slot.term.refresh(0, slot.term.rows - 1);
       } catch {}
     }
-    if (adapter?.isLeafFocused(p.leafId)) slot.term.focus();
+    if (adapter?.isLeafFocused(p.leafId)) focusInteractiveTerminal(slot.term);
   } else {
     scheduleUnhide(slot, stale || hadWebgl);
   }
@@ -619,7 +627,7 @@ function scheduleUnhide(slot: Slot, stale: boolean): void {
       }
       const leafId = slot.currentLeafId;
       if (leafId !== null && adapter?.isLeafFocused(leafId)) {
-        slot.term.focus();
+        focusInteractiveTerminal(slot.term);
       }
     });
   });
@@ -1061,7 +1069,7 @@ export function applyTheme(): void {
 
 export function focusSlot(leafId: number): void {
   const slot = slots.find((s) => s.currentLeafId === leafId);
-  slot?.term.focus();
+  if (slot) focusInteractiveTerminal(slot.term);
 }
 
 export function setSlotFocused(leafId: number, focused: boolean): void {

@@ -12,6 +12,7 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - 主二进制：`terax-prod`（dev 与 release 同名，热部署和打包脚本都引用它）
 - 前端检查：`pnpm lint`、`pnpm check-types`
 - Rust 检查：`cd src-tauri && cargo clippy --all-targets --locked -- -D warnings`（测试已移除）
+- 测试策略：仓库不保留自动化或端到端测试及其专用依赖；改动通过静态检查和与变更相关的手工验证确认。
 
 ## 质量线
 

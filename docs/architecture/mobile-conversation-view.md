@@ -139,7 +139,7 @@ opencode 的工具调用目前只带名字：它的参数和输出存在一个�
 
 `flushNormal` 刻意停在光标行上方（那行可能是写了一半的提示符），但**首屏时不能这样**：一个停在提示符的 shell 全部内容就是那一行，跳过它等于打开一个白页。所以首屏会把光标行发一次，并把读游标推过去，实时流不会重复。
 
-`writeBacklog` 是更早的路径，生产环境已经不用了。它把原始字节流切片、片间读取，让全屏程序的帧被 `detectScroll` 重建；回放测试工具仍然用它驱动录制的会话。
+`writeBacklog` 是更早的路径，生产环境已经不用了。它把原始字节流切片、片间读取，让全屏程序的帧被 `detectScroll` 重建；当前产品不再保留依赖这条路径的回放工具。
 
 ## 输入
 
@@ -165,14 +165,11 @@ transcript 的正文是 agent 写的原始 Markdown，所以按 Markdown 渲染�
 
 脱离底部时会出现「回到最新」按钮，否则翻上去就没有回来的路。有三处滚动是**故意**的、无条件吸底：发送消息之后、回答菜单之后、软键盘改变视口之后。
 
-## 测试工具
+## 诊断工具
 
 对着运行中的开发实例驱动解析器和真实页面（不需要密码，认证 cookie 由 Rust 侧嵌入的同一个混淆常量解出）：
 
 - `scripts/web-capture.mjs` - 驱动 WebSocket：`list`，或 `drive <leaf> <scenario.json> <out.jsonl> <timeout>`，连接（对冷标签页会走 `opening` 重试）、按脚本输入、把每条文本消息和输出帧连同时间戳录成 JSONL。
-- `scripts/web-replay.mjs` - 把录制回放进页面用的同一个 `Conversation`（由 `scripts/convo-test.config.mjs` 打包）。`--trace` 会在实时块变化时打印，连同进行状态、模式和选项，适合观察一闪而过的权限菜单。
-- `scripts/web-synthetic-test.mjs` - 用构造的 alt 屏帧喂解析器并断言渲染结果。这是菜单、启动画面、回显规则的回归网，也是唯一不需要跑起应用就能跑的测试。
-- `scripts/e2e-phone.mjs` - 用 Playwright 驱动真实页面：cookie 认证、会话列表、连接，以及 TUI 气泡或一次发送往返。
 
 ## 边界
 

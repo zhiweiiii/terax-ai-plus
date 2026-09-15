@@ -73,7 +73,6 @@ terax-ai-plus 把自己定位为**轻量、快、生产级**。每个 PR 都按�
 - `pnpm check-types` 干净
 - `cargo clippy --all-targets --locked -- -D warnings` 干净
 - 推之前跑过 `cargo fmt`
-- 改了 `src/web/` 的话 `node scripts/web-synthetic-test.mjs` 全过
 - 已知热路径没有性能回退：终端渲染器、PTY 流、版本管理、文件资源管理器
 - 没有无理由引入的重依赖（客户端 bundle 超过 50KB gzip，或 Rust 侧编译后超过 5MB）
 - **只做 Windows**：平台对等的要求限定在 Windows + WSL。没有明确决定不要重新引入 macOS / Linux 分支。

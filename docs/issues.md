@@ -14,9 +14,9 @@
 
 ## blocks 输入光标与终端滚动条（2026-09-14）
 
-**已修。** 底部 shell 输入框接管 prompt 时，xterm 虽已禁用 stdin，隐藏 textarea 仍可能保持焦点并在正文末行绘制光标。现在会在 prompt 交接时主动 blur xterm，再聚焦 CodeMirror，因此正文不再显示第二个输入光标。
+**已修。** 底部 shell 输入框接管 prompt 时，xterm 虽已禁用 stdin，隐藏 textarea 仍可能保持焦点并在正文末行绘制光标。现在会在 prompt 交接时主动 blur xterm，再聚焦 CodeMirror。渲染槽位异步恢复可见时曾无条件 `focus()` xterm，覆盖这次交接，导致 Delete 等编辑键跳回正文末行；现在该路径会尊重 `disableStdin`。blocks 模式还会隐藏 xterm 的光标层，运行中的 Codex 不会在 Working 行附近留下第二个输入位置。
 
-终端此前把 xterm 的自定义与原生滚动条同时隐藏，长输出只能用滚轮滚动。现在保留自定义层隐藏，恢复原生 viewport 的细窄右侧竖向拖拽条。它直接映射 xterm 的 scrollback，没有额外状态或同步开销。
+终端此前把 xterm 的自定义与原生滚动条同时隐藏，长输出只能用滚轮滚动。现在保留自定义层隐藏，恢复原生 viewport 的细窄右侧竖向拖拽条。全局样式会默认隐藏 WebKit 滚动条，因此终端 viewport 显式覆盖 `display: none` 并强制其纵向轨道常驻。它直接映射 xterm 的 scrollback，没有额外状态或同步开销。
 
 ## 定时发送命令（2026-09-05）
 
@@ -34,7 +34,7 @@
 
 **关掉的终端带走它的任务。** 前端每次同步标签时，队列里指向已不存在 leaf 的任务被清掉。
 
-两端 UI：桌面在状态栏（时钟按钮，有排队时带蓝点），手机在输入区（⏱ 展开面板，命令取自输入框）。列表是同一份，一端排的队另一端立刻看得到——桌面靠 `terax:schedules` 事件，手机靠 WS 上的 revision 比对。7 个单元测试覆盖排队顺序、取消、拒绝空命令、拒绝超长延时、`due` 不消费队列、终端关闭清理、revision 只在真发生变化时移动。
+两端 UI：桌面在状态栏（时钟按钮，有排队时带蓝点），手机在输入区（⏱ 展开面板，命令取自输入框）。列表是同一份，一端排的队另一端立刻看得到——桌面靠 `terax:schedules` 事件，手机靠 WS 上的 revision 比对。
 
 ## 待办与本轮变更（2026-08-19 / 20）
 
@@ -263,11 +263,11 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 
 **Claude 的更新提示进了对话。** `✓ Update installed · Restart to apply` 加进 `WIDGET` 读数列表。同时补了带箭头前缀的 token 计数（`↑ 1.2k tokens`）——原来的 `/^[\d,.]+/` 锚定在行首，箭头挡住了它。
 
-**合成测试两周来一直在测旧代码。** `web-synthetic-test.mjs` 导入的是 `scripts/convo-bundle/conversation.mjs`，一个预打包副本，没有任何东西会重建它；它停在 8 月 20 日，而 `conversation.ts` 一直在改。测试照常报 ALL PASS。**一个因为在测昨天的代码而通过的测试，比没有测试更糟。** 现在测试启动时比对源文件与 bundle 的 mtime，源更新就自动重建。上面两条修复的验证正是靠它才暴露出来的。
+**过期的合成测试曾经在测旧代码。** 它导入的是预打包副本，而副本不会随 `conversation.ts` 自动更新。这个已失效的测试与其打包产物已删除，项目按当前约定只保留静态检查和手工验证。
 
 **手机上看不到命令跑了什么、输出是什么。** 一轮里的工具原本只剩一个名字 chip（`Bash`），命令行和输出都没有，而桌面显示的是 `⏺ Bash(命令)` 加下面那段输出。曾经考虑过按样式一行行解析屏幕再和 JSONL 去重，但那条路不必走：**Claude 的 JSONL 里本来就带着这两样东西，而且是结构化的**——`tool_use` 块有 `name` 和 `input`，`tool_result` 块有输出和 `is_error`，两者用 `tool_use_id` 精确关联；现在的代码把它们解析出来然后丢掉（48MB 的 transcript 绝大部分就是它）。改为 `Part::Tool { name, subject, output, elided, failed }`，`claude.rs` 线性扫描时记录每个调用的位置、结果到达时回填。**没有屏幕解析、没有样式匹配、没有去重层**——去重层正是本轮四个前端 bug 的来源。输出在服务端裁剪到 10 行 / 800 字节并带上省略行数，payload 82KB → 125KB。opencode 侧的工具暂时仍只有名字（它的 `state` 对象每个工具形状都不同），位置是对的。
 
-**正文和命令各堆成一坨，不是交错的。** 桌面上一轮是"正文 → 跑工具 → 正文 → 跑工具"，手机上却变成所有正文在一起、所有工具 chip 在最下面一排。根因不在前端：`claude.rs` 的 `assistant_blocks` 和 `opencode.rs` 的 `parts()` 在**读取时**就把一轮压平成 `text.join("\n")` 加一个 `tools` 列表，`merge_assistant_steps` 再按同样方式合并连续步骤——顺序在进入前端之前就没了。现在 `Message` 携带有序的 `parts`（`Text` / `Tools`），两个后端都按 block / 数据库行的原始顺序构造它，`push_part` 只折叠相邻同类，前端按 parts 顺序逐个渲染。扁平的 `text` 保留但只用于比较（回显匹配、`unsettledBlocks` 去重）。`transcript` 模块补了 4 个单元测试钉住交错顺序——这个 bug 是"顺序被静默压平"，没有测试的话下一次重构会原样复发。
+**正文和命令各堆成一坨，不是交错的。** 桌面上一轮是"正文 → 跑工具 → 正文 → 跑工具"，手机上却变成所有正文在一起、所有工具 chip 在最下面一排。根因不在前端：`claude.rs` 的 `assistant_blocks` 和 `opencode.rs` 的 `parts()` 在**读取时**就把一轮压平成 `text.join("\n")` 加一个 `tools` 列表，`merge_assistant_steps` 再按同样方式合并连续步骤——顺序在进入前端之前就没了。现在 `Message` 携带有序的 `parts`（`Text` / `Tools`），两个后端都按 block / 数据库行的原始顺序构造它，`push_part` 只折叠相邻同类，前端按 parts 顺序逐个渲染。扁平的 `text` 保留但只用于比较（回显匹配、`unsettledBlocks` 去重）。这个 bug 是"顺序被静默压平"，后续修改需要通过静态检查和手工验证确认交错顺序不回退。
 
 **发出去的消息经常根本不显示。** `transcriptHasUserText` 在 transcript 的最后 6 条里做无锚点的 `includes`，问的其实是"用户有没有说过包含这段的话"。任何说过第二遍的内容（`1`、`继续`、`ok`，或恰好是早前某条消息子串的任何文本）都会命中一条**早于本次发送**的旧消息，于是 `awaitingTranscript` 立刻把它丢掉；而 transcript 里其实从来没有新增这条，气泡就再也没画出来过。现在每条待确认消息记下发送时 transcript 的最后一条用户消息 id，只有**在它之后**收录的消息才算数，且复用屏幕路径同一条按长度分层的 `sameMessage`。锚点不在了（换会话、压缩）时退回全量扫描，宁可多显示也不丢。
 
@@ -303,7 +303,7 @@ Tab 和回车按钮本来就有。缺的是 **Shift+Tab**（`CSI Z`），两个 
 
 **后台标签页里渲染会停。** `requestAnimationFrame` 在 `document.hidden` 时不触发，而手机锁屏就是这个状态。退回定时器。
 
-**单字符消息被丢掉。** `pending` 过滤器带 `length >= 2` 守卫，`1` / `2` / `3` 这个恰好是测试用例的输入从来没渲染出来。短消息改为要求精确匹配。
+**单字符消息被丢掉。** `pending` 过滤器带 `length >= 2` 守卫，`1` / `2` / `3` 这类输入从来没渲染出来。短消息改为要求精确匹配。
 
 **alt 屏退出时最后一屏原样追加。** 输入框、状态行和回显的消息变成了匿名的 AI 输出。现在走与其它帧相同的解析。
 
@@ -373,9 +373,10 @@ Terax 在启动失败时不会退到另一个 shell：一个存在但起不来�
 为"手机上正常跑 opencode / claude"建立的一套可复用工具，留在 `scripts/` 下：
 
 - `web-capture.mjs` - 驱动手机桥接 WebSocket 录制真实会话（含 cold-leaf 的 opening 重试）。
-- `web-replay.mjs` - 把捕获按页面同款逻辑回放进 `Conversation`（`--trace` 看逐帧 live blocks，`--screen-at` dump 原始屏）。
-- `web-synthetic-test.mjs` - 合成屏幕回归：1/2/3 菜单、权限框、启动页、退出提示、agent 位置抽取、输入框排除、必须保持是正文的散文编号列表、散文列表压在真菜单上方、两种首屏形态（安静的 shell，以及滚动缓冲加运行中的程序）。
-- `e2e-phone.mjs` - Playwright 驱动真实页面（cookie 免密码）：登录、列表、attach、发送、气泡。
+
+## 测试与失效调试代码移除（2026-09-14）
+
+按产品要求，项目不再保留自动化测试、端到端测试及其专用打包产物。已删除 Rust 内嵌测试、浏览器测试和过期的回放/浏览器调试脚本，并移除仅供它们使用的 Playwright 依赖。`web-capture.mjs` 保留为连接真实 WebSocket 的人工诊断工具。
 
 **热部署稳定性**（`热部署.ps1`）：启动前**等 `terax-prod.exe` 解锁**（`FileShare.Delete` 探测，最多 10 秒）并**等开发端口真正释放**（轮询，最多 10 秒）。否则孤儿实例锁住 exe，cargo 覆盖失败（`拒绝访问 (os error 5)`）会连带把整个 `tauri dev` 和 vite 一起带走。它**刻意不碰 34268**，也会跳过被 `target/release/terax-prod.exe` 占用的端口，所以重启开发环境不会杀掉正在运行的打包版。
 

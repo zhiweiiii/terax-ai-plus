@@ -109,7 +109,6 @@ pnpm tauri build        # 生产打包（Web 桥接端口 34268）
 pnpm lint
 pnpm check-types
 cd src-tauri && cargo clippy --all-targets --locked -- -D warnings
-node scripts/web-synthetic-test.mjs   # 手机端解析器回归测试
 ```
 
 ## 技术栈
