@@ -149,6 +149,8 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 
 ### UI 约定
 
+GitDiffPane 的差异计算使用显式 `scanLimit: 10000` 和 `timeout: 200`，避免默认低额度把大型文件的稀疏修改合为整段；两侧仍先归一化为 LF，超时保留粗略比较兜底。
+
 - **shadcn/ui** 已配置（`components.json`，图标库 **hugeicons**）。`src/components/ui/` 里的原语**不要手改**，升级请重跑 `pnpm dlx shadcn add`。
 - **AI Elements**（Vercel）在 `src/components/ai-elements/`，同样是重新生成而不是手工打补丁（目前只剩 `markdown-code` 被 Markdown 预览用）。
 - **Tailwind v4** - 没有 `tailwind.config.*`，配置在 `src/App.css` 的 `@theme` 里。用 `@/lib/utils` 的 `cn()`。
@@ -176,6 +178,8 @@ Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: tru
 - 终端输入的回车发 `\r`（CR）不是 `\n`（LF），Windows 上的 PowerShell 要求 CR。
 
 ### 打包配置
+
+没有更新签名密钥时，可用 `pnpm tauri build --config src-tauri/tauri.manual-release.json` 生成仅供手动安装的 NSIS 包；该配置不生成自动更新产物，不改变默认签名/更新设置。手动 Release 使用 `build-v<version>` 标签，与正式签名流水线的 `v*` 区分。
 
 - `bundle.targets` 是 `["nsis"]`，**只出 exe 安装包**。MSI 会把任务栏图标指向 `C:\Windows\Installer\{ProductCode}\ProductIcon`，而 ProductCode 每次构建都变，覆盖安装后固定在任务栏的图标就没了。
 - NSIS 用 `perMachine` 模式（装到 `Program Files` 需要这个）。**默认目录不硬编码**：NSIS 的 `.onInit` 会调 `RestorePreviousInstallLocation`，安装时也写 `InstallLocation`，所以第一次选好目录以后就记住了。

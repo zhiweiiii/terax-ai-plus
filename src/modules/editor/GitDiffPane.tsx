@@ -359,6 +359,8 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
         unifiedMergeView({
           original: originalContent,
           highlightChanges: true,
+          // The default scan budget collapses sparse edits in larger files.
+          diffConfig: { scanLimit: 10000, timeout: 200 },
           gutter: true,
           syntaxHighlightDeletions: true,
           // Folded, the file is only what changed; unfolded it is the file

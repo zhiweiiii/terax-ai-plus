@@ -1,5 +1,7 @@
 # 双进程模型与 IPC 命令参考
 
+Git diff 展示：后端返回原始两侧内容，前端统一 LF 后由 CodeMirror 计算字符级差异。GitDiffPane 显式配置 scanLimit 10000、timeout 200ms，避免默认低扫描额度把大文件的少量分散修改合为整段；超时仍允许粗略结果。该配置不修改源文件或 Git 暂存区。
+
 本文是 `TERAX.md` 的展开。与 `TERAX.md` 冲突时以 `TERAX.md` 为准。
 
 ## 这条分界线

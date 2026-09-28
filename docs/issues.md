@@ -1,5 +1,11 @@
 # 已知问题与架构债
 
+## Git diff 把局部修改显示为整段替换（2026-09-28）
+
+此次手动发布使用 `pnpm tauri build --config src-tauri/tauri.manual-release.json`，仅为本次构建关闭 updater artifacts，不更换更新公钥或端点。环境缺少签名密钥，安装包不提供签名自动更新。远程 origin 重定向到 `zhiweiiii/terax-ai-plus`，手动安装版使用 `build-v<version>` 标签，避免触发当前仍依赖 MSI/SignPath 的旧发布工作流。
+
+已用真实暂存文件复现：Git 显示四处修改（+31/-2），CodeMirror 默认 scanLimit 500 将中间数百行合成一块。统一 diff 视图显式采用 scanLimit 10000、timeout 200ms，保留字符级高亮和 LF 归一化；样本恢复四个精细块。预算耗尽时仍可能退化为粗略结果，不能把精细比较视为无限计算承诺。原业务文件未修改。
+
 本文记录已知的代码问题、架构债和风险。它是 `TERAX.md` 的对照面：`TERAX.md` 描述架构**应该**怎么运作，本文记录现实在哪里偏离、哪里有风险、哪里可以安心忽略。
 
 严重度分三档：**高**（可见的 bug 或安全面）、**中**（潜伏的 bug、无用功或功能缺口）、**低**（观感、死代码或命名漂移）。
