@@ -101,7 +101,7 @@ terax-ai-plus 是一个终端优先的轻量开发环境，基于 Tauri 2 + Rust
 ```bash
 pnpm install
 pnpm tauri dev          # 开发（Web 桥接端口 34269）
-pnpm tauri build        # 生产打包（Web 桥接端口 34268）
+pnpm tauri build        # 生产打包（Web 桥接端口 34268；代码变动会自动递增 patch 版本）
 ```
 
 **检查**

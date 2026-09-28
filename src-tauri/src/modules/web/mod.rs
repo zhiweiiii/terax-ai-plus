@@ -1075,7 +1075,9 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         );
                     }
                 } else if let Some(id) = parsed.get("scheduleCancel").and_then(|v| v.as_u64()) {
-                    if app.state::<schedule::ScheduleState>().cancel(id) {
+                    let result = app.state::<schedule::ScheduleState>().cancel(id);
+                    if let Err(reason) = &result { let _ = send_error(&mut conn, reason); }
+                    if matches!(result, Ok(true)) {
                         let _ = app.emit(
                             schedule::SCHEDULE_EVENT,
                             app.state::<schedule::ScheduleState>().list(),

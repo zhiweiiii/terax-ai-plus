@@ -65,6 +65,7 @@ export type ShellEditorOptions = {
 export type ShellEditorHandle = {
   readonly view: EditorView;
   focus(): void;
+  blur(): void;
   getValue(): string;
   setValue(text: string): void;
   clear(): void;
@@ -450,6 +451,7 @@ export function createShellEditor(opts: ShellEditorOptions): ShellEditorHandle {
   return {
     view,
     focus: () => view.focus(),
+    blur: () => view.contentDOM.blur(),
     getValue: () => view.state.doc.toString(),
     setValue: (text) =>
       view.dispatch({

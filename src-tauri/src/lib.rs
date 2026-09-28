@@ -1,8 +1,8 @@
 pub mod modules;
 
 use modules::{
-    control, fs, gateway, git, history, lsp, pty, schedule, shell, usage, web,
-    workspace,
+    control, fs, gateway, git, history, lsp, pty, schedule, sessions, shell, usage,
+    web, workspace,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -284,8 +284,10 @@ pub fn run() {
             pty::pty_shell_name,
             pty::pty_list_shells,
             schedule::schedule_add,
+            schedule::schedule_add_at,
             schedule::schedule_list,
             schedule::schedule_cancel,
+            schedule::schedule_rebind,
             pty::web_sync_tabs,
             pty::web_sync_spaces,
             pty::web_sync_leaf_pty,
@@ -295,8 +297,11 @@ pub fn run() {
             web::web_set_password,
             web::web_has_custom_password,
             gateway::gateway_test_provider,
+            sessions::agent_sessions,
             usage::claude_usage,
             usage::claude_usage_cached,
+            usage::codex_usage,
+            usage::codex_usage_cached,
             gateway::gateway_status,
             gateway::gateway_set_config,
             fs::tree::list_subdirs,

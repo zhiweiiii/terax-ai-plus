@@ -8,6 +8,8 @@ import { LspStatusPill } from "@/modules/lsp";
 import type { WorkspaceEnv } from "@/modules/workspace";
 import { IncognitoIcon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { getVersion } from "@tauri-apps/api/app";
+import { useEffect, useState } from "react";
 import { CwdBreadcrumb } from "./CwdBreadcrumb";
 import { DiagnosticsBadge } from "./DiagnosticsBadge";
 import { ClaudeProviderButton } from "./ClaudeProviderButton";
@@ -38,6 +40,12 @@ export function StatusBar({
   privateActive,
   activeLeafId,
 }: Props) {
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getVersion().then(setVersion).catch(() => setVersion(null));
+  }, []);
+
   return (
     <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-border/60 bg-card/60 pl-3 pr-4 text-[11px]">
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -67,6 +75,12 @@ export function StatusBar({
         <ClaudeProviderButton leafId={activeLeafId ?? null} />
         <ScheduleButton leafId={activeLeafId ?? null} />
         <WebStatusBadge />
+        <span
+          className="select-text px-1 text-[10px] tabular-nums text-muted-foreground"
+          title="Terax 版本"
+        >
+          v{version ?? "—"}
+        </span>
         <Button
           variant="ghost"
           size="icon"

@@ -18,14 +18,22 @@ export type BlockController = {
 export function useBlockController(
   leafId: number | null,
 ): BlockController | null {
-  const [blockMode, setBlockMode] = useState<BlockMode>("prompt");
+  const [observed, setObserved] = useState<{
+    leafId: number | null;
+    mode: BlockMode;
+  }>({ leafId, mode: leafId === null ? "prompt" : getLeafBlockMode(leafId) });
+  const blockMode =
+    leafId === null
+      ? "prompt"
+      : observed.leafId === leafId
+        ? observed.mode
+        : getLeafBlockMode(leafId);
 
   useEffect(() => {
     if (leafId == null) return;
-    setBlockMode(getLeafBlockMode(leafId));
-    return subscribeLeafBlockMode(leafId, () =>
-      setBlockMode(getLeafBlockMode(leafId)),
-    );
+    const sync = () => setObserved({ leafId, mode: getLeafBlockMode(leafId) });
+    sync();
+    return subscribeLeafBlockMode(leafId, sync);
   }, [leafId]);
 
   return useMemo(() => {

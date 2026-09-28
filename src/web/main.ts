@@ -99,6 +99,11 @@ type TranscriptMsg = {
  *  tab that was closed, cannot be the thing counting down. */
 type ScheduledJob = {
   id: number;
+  target?: "terminal" | "codex" | "claude";
+  daily_time?: string | null;
+  running?: boolean;
+  finished?: boolean;
+  paused?: boolean;
   leaf_id: number;
   command: string;
   /** Epoch milliseconds. */
@@ -360,7 +365,9 @@ function proseNode(text: string): HTMLElement {
  *  Both halves come from the agent's own record — the call and its result are
  *  separate entries linked by an id — so nothing here is recognised off a
  *  screen or matched by text. */
-function toolNode(part: Extract<TranscriptPart, { kind: "tool" }>): HTMLElement {
+function toolNode(
+  part: Extract<TranscriptPart, { kind: "tool" }>,
+): HTMLElement {
   const box = document.createElement("div");
   box.className = part.failed ? "tool failed" : "tool";
 
@@ -409,8 +416,7 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
   // `transcript` marks prose the agent WROTE, as opposed to output a
   // program PAINTED. They are different kinds of text and get different
   // typography: one is a message, the other is a terminal.
-  node.className =
-    m.role === "user" ? "turn sent" : "turn output transcript";
+  node.className = m.role === "user" ? "turn sent" : "turn output transcript";
   node.replaceChildren();
 
   // A turn is prose, the tools that prose led to, then more prose. Drawing all
@@ -754,12 +760,24 @@ function paintSchedules() {
 
       const when = document.createElement("span");
       when.className = "sched-when";
-      when.textContent = untilText(job.fire_at - now);
+      when.textContent = job.paused
+        ? "待桌面绑定终端"
+        : job.running
+          ? "执行中"
+          : job.finished
+            ? "已结束"
+            : untilText(job.fire_at - now);
       row.appendChild(when);
 
       const cmd = document.createElement("span");
       cmd.className = "sched-cmd";
-      cmd.textContent = job.command;
+      const target =
+        job.target === "codex"
+          ? "Codex 后台"
+          : job.target === "claude"
+            ? "Claude Code 后台"
+            : `终端 #${job.leaf_id}`;
+      cmd.textContent = `${target}${job.daily_time ? ` · 每天 ${job.daily_time}` : ""}：${job.command}`;
       row.appendChild(cmd);
 
       const drop = document.createElement("button");
@@ -1379,7 +1397,9 @@ inputEl.addEventListener("keydown", (e) => {
   }
 });
 
-$("#btn-sched").addEventListener("click", () => setSchedOpen(schedEl.hidden !== false));
+$("#btn-sched").addEventListener("click", () =>
+  setSchedOpen(schedEl.hidden !== false),
+);
 $("#sched-go").addEventListener("click", () => {
   const command = inputEl.value.trim();
   if (command === "") {

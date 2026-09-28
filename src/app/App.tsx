@@ -28,7 +28,7 @@ import {
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
 import { FileHistoryDialog } from "@/modules/git-history";
 import type { GitHistoryPaneHandle } from "@/modules/git-history/GitHistoryPane";
-import { Header } from "@/modules/header";
+import { Header, SessionHistoryMenu } from "@/modules/header";
 import { setLspNavigator } from "@/modules/lsp";
 import type { MarkdownPreviewPaneHandle } from "@/modules/markdown/MarkdownPreviewPane";
 import type { PreviewPaneHandle } from "@/modules/preview";
@@ -81,6 +81,7 @@ import {
   type PaneBounds,
   pasteToLeaf,
   ptyIdForLeaf,
+  submitToLeaf,
   type TerminalPaneHandle,
   useAgentActivityStore,
   useTerminalFileDrop,
@@ -1504,6 +1505,19 @@ export default function App() {
     return () => setLspNavigator(null);
   }, [openContentHit]);
 
+  /** Runs a command in the terminal on screen. Resuming a past conversation is
+   *  a command the user picked, so it is submitted rather than just inserted. */
+  const runInActiveTerminal = useMemo(
+    () =>
+      isTerminalTab && activeLeafId !== null
+        ? (cmd: string) => {
+            submitToLeaf(activeLeafId, cmd);
+            terminalRefs.current.get(activeLeafId)?.focus();
+          }
+        : null,
+    [isTerminalTab, activeLeafId],
+  );
+
   const insertHistoryCommand = useMemo(
     () =>
       isTerminalTab && activeLeafId !== null
@@ -1536,6 +1550,12 @@ export default function App() {
               onRename={handleRenameTab}
               onReorder={reorderTabByGap}
               onOverrideLanguage={setOverrideLanguage}
+              headerRight={
+                <SessionHistoryMenu
+                  cwd={activeCwd}
+                  onRun={runInActiveTerminal}
+                />
+              }
               groupSwitcher={
                 <GroupSwitcher
                   spaces={spacesList}

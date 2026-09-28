@@ -15,12 +15,14 @@
 //! text is always kept: when Claude Code rewords something, the panel still has
 //! the authoritative answer to show.
 
-use std::process::Stdio;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use serde_json::{json, Value};
 use shared_child::SharedChild;
 
 use crate::modules::workspace::WorkspaceEnv;
@@ -252,6 +254,229 @@ pub fn claude_usage_cached() -> Option<Usage> {
     cache()
         .lock()
         .expect("usage cache")
+        .as_ref()
+        .map(|(usage, _)| usage.clone())
+}
+
+/// Codex's subscription rate-limit windows. Unlike Claude Code, Codex exposes
+/// these through its local app-server JSON-RPC protocol, including exact reset
+/// timestamps, so no transcript or auth file needs to be read.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUsageWindow {
+    pub used_percent: Option<u32>,
+    pub resets_at: Option<i64>,
+    pub window_duration_mins: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUsage {
+    pub primary: Option<CodexUsageWindow>,
+    pub secondary: Option<CodexUsageWindow>,
+    pub plan_type: Option<String>,
+    pub fetched_at: i64,
+    pub error: Option<String>,
+}
+
+fn codex_cache() -> &'static Mutex<Option<(CodexUsage, Instant)>> {
+    static CACHE: std::sync::OnceLock<Mutex<Option<(CodexUsage, Instant)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn codex_window(value: Option<&Value>) -> Option<CodexUsageWindow> {
+    let value = value?;
+    Some(CodexUsageWindow {
+        used_percent: value
+            .get("usedPercent")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok()),
+        resets_at: value.get("resetsAt").and_then(Value::as_i64),
+        window_duration_mins: value.get("windowDurationMins").and_then(Value::as_i64),
+    })
+}
+
+fn codex_usage_from_response(response: &Value) -> Result<CodexUsage, String> {
+    if let Some(error) = response.get("error") {
+        return Err(error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Codex 拒绝读取用量")
+            .to_string());
+    }
+    let result = response
+        .get("result")
+        .ok_or_else(|| "Codex 没有返回用量结果".to_string())?;
+    // Newer Codex versions may return several buckets. Prefer the canonical
+    // `codex` bucket and retain the single-bucket response as a compatibility
+    // fallback for older clients.
+    let limits = result
+        .pointer("/rateLimitsByLimitId/codex")
+        .or_else(|| result.get("rateLimits"))
+        .ok_or_else(|| "Codex 返回的用量结果缺少额度窗口".to_string())?;
+    Ok(CodexUsage {
+        primary: codex_window(limits.get("primary")),
+        secondary: codex_window(limits.get("secondary")),
+        plan_type: limits
+            .get("planType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        fetched_at: now_secs(),
+        error: None,
+    })
+}
+
+/// Ask one short-lived Codex app-server instance for its account rate limits.
+/// It is deliberately not reused: the terminal runs Codex independently, and
+/// this request must neither attach to nor alter that interactive session.
+fn fetch_codex() -> CodexUsage {
+    let mut command = if cfg!(windows) {
+        // npm installs Codex as `codex.cmd` on Windows. Executing that shim
+        // directly preserves stdin/stdout JSON-RPC pipes (unlike a shell).
+        Command::new("codex.cmd")
+    } else {
+        Command::new("codex")
+    };
+    command
+        .args(["app-server", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::modules::proc::hide_console(&mut command);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return CodexUsage {
+                fetched_at: now_secs(),
+                error: Some(format!("无法启动 codex app-server：{error}")),
+                ..CodexUsage::default()
+            }
+        }
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        return CodexUsage {
+            fetched_at: now_secs(),
+            error: Some("无法打开 codex app-server 的输入流".to_string()),
+            ..CodexUsage::default()
+        };
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return CodexUsage {
+            fetched_at: now_secs(),
+            error: Some("无法打开 codex app-server 的输出流".to_string()),
+            ..CodexUsage::default()
+        };
+    };
+    let stderr = child.stderr.take();
+
+    let initialize = json!({
+        "id": 1,
+        "method": "initialize",
+        "params": { "clientInfo": { "name": "terax", "version": env!("CARGO_PKG_VERSION") } }
+    });
+    let read_limits = json!({
+        "id": 2,
+        "method": "account/rateLimits/read",
+        "params": { "excludeResetCreditDetails": true, "supportsLunaReserve": false }
+    });
+    let write_result = (|| -> Result<(), String> {
+        serde_json::to_writer(&mut stdin, &initialize).map_err(|error| error.to_string())?;
+        stdin.write_all(b"\n").map_err(|error| error.to_string())?;
+        stdin.flush().map_err(|error| error.to_string())?;
+        serde_json::to_writer(&mut stdin, &read_limits).map_err(|error| error.to_string())?;
+        stdin.write_all(b"\n").map_err(|error| error.to_string())?;
+        stdin.flush().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = write_result {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return CodexUsage {
+            fetched_at: now_secs(),
+            error: Some(format!("无法向 codex app-server 发送查询：{error}")),
+            ..CodexUsage::default()
+        };
+    }
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if value.get("id").and_then(Value::as_i64) == Some(2) {
+                let _ = tx.send(codex_usage_from_response(&value));
+                break;
+            }
+        }
+    });
+    let stderr_reader = stderr.map(|stderr| thread::spawn(move || drain(&mut BufReader::new(stderr))));
+    let result = rx.recv_timeout(TIMEOUT);
+    // The app-server is only a read probe. End it immediately after the one
+    // response so it cannot outlive Terax or compete with an open Codex TUI.
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader.join();
+    let stderr = stderr_reader
+        .and_then(|reader| reader.join().ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+
+    match result {
+        Ok(Ok(usage)) => usage,
+        Ok(Err(error)) => CodexUsage {
+            fetched_at: now_secs(),
+            error: Some(error),
+            ..CodexUsage::default()
+        },
+        Err(_) => CodexUsage {
+            fetched_at: now_secs(),
+            error: Some(if stderr.trim().is_empty() {
+                "查询 Codex 用量超时或未返回结果".to_string()
+            } else {
+                stderr.chars().take(300).collect()
+            }),
+            ..CodexUsage::default()
+        },
+    }
+}
+
+/// Tauri command: current Codex subscription limit usage.
+#[tauri::command]
+pub async fn codex_usage(force: Option<bool>) -> CodexUsage {
+    let force = force.unwrap_or(false);
+    if !force {
+        if let Some((usage, at)) = codex_cache().lock().expect("codex usage cache").as_ref() {
+            if at.elapsed() < MIN_REFETCH {
+                return usage.clone();
+            }
+        }
+    }
+    let usage = tauri::async_runtime::spawn_blocking(fetch_codex)
+        .await
+        .unwrap_or_else(|error| CodexUsage {
+            fetched_at: now_secs(),
+            error: Some(format!("Codex 用量查询任务失败：{error}")),
+            ..CodexUsage::default()
+        });
+    if usage.error.is_none() {
+        *codex_cache().lock().expect("codex usage cache") = Some((usage.clone(), Instant::now()));
+    }
+    usage
+}
+
+/// The cached Codex answer without starting the app-server.
+#[tauri::command]
+pub fn codex_usage_cached() -> Option<CodexUsage> {
+    codex_cache()
+        .lock()
+        .expect("codex usage cache")
         .as_ref()
         .map(|(usage, _)| usage.clone())
 }

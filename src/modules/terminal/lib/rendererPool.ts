@@ -1,4 +1,5 @@
 import { resolveFontFamily } from "@/lib/fonts";
+import { stabilizeTerminalInput } from "@/modules/terminal/lib/terminalInputAnchor";
 import { openExternalUrl } from "@/lib/external-link";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { TerminalCursorStyle } from "@/modules/settings/store";
@@ -27,8 +28,10 @@ const SNAPSHOT_SCROLLBACK_CAP = 5_000;
 export type SlotAdapter = {
   resolveLeaf(leafId: number): LeafBridge | null;
   evictLeaf(leafId: number): void;
+  focusLeafInput(leafId: number): boolean;
   isLeafFocused(leafId: number): boolean;
   isLeafBlocks(leafId: number): boolean;
+  isLeafCodex(leafId: number): boolean;
   isLeafBusy(leafId: number): boolean;
   isLeafVisible(leafId: number): boolean;
   storeSnapshot(leafId: number, out: SerializeOutput): void;
@@ -50,6 +53,7 @@ export type Slot = {
   readonly fitAddon: FitAddon;
   readonly serializeAddon: SerializeAddon;
   readonly host: HTMLDivElement;
+  inputAnchor: ReturnType<typeof stabilizeTerminalInput>;
   webglAddon: WebglAddon | null;
   webglCanvases: HTMLCanvasElement[];
   currentLeafId: number | null;
@@ -89,6 +93,13 @@ let cursorBlinkEnabled = false;
 
 function focusInteractiveTerminal(term: Terminal): void {
   if (!term.options.disableStdin) term.focus();
+}
+
+function syncViewportChrome(slot: Slot): void {
+  const value = slot.term.buffer.active.type === "alternate" ? "true" : "false";
+  if (slot.host.dataset.teraxAltScreen !== value) {
+    slot.host.dataset.teraxAltScreen = value;
+  }
 }
 
 function bindWindowActivityListeners(): void {
@@ -221,7 +232,7 @@ function createSlot(): Slot {
   term.loadAddon(serializeAddon);
   term.loadAddon(
     new WebLinksAddon((_e, uri) => {
-    void openExternalUrl(uri, () => focusInteractiveTerminal(term));
+      void openExternalUrl(uri, () => focusInteractiveTerminal(term));
     }),
   );
 
@@ -318,6 +329,7 @@ function createSlot(): Slot {
     fitAddon,
     serializeAddon,
     host,
+    inputAnchor: { reset: () => {}, dispose: () => {} },
     webglAddon: null,
     webglCanvases: [],
     currentLeafId: null,
@@ -336,6 +348,12 @@ function createSlot(): Slot {
     lastH: 0,
     lastUsedAt: 0,
   };
+
+  slot.inputAnchor = stabilizeTerminalInput(term, () => {
+    const leafId = slot.currentLeafId ?? slot.retainedLeafId;
+    return leafId !== null && (adapter?.isLeafCodex(leafId) ?? false);
+  }, () => slot.currentLeafId !== null && !slot.parked);
+  term.onWriteParsed(() => syncViewportChrome(slot));
 
   term.attachCustomKeyEventHandler((event) => {
     // During IME composition the browser is assembling a multi-keystroke
@@ -380,7 +398,8 @@ function createSlot(): Slot {
           // An image on the clipboard becomes a file path; otherwise paste text.
           const attachment = await clipboardAttachmentText();
           const text = attachment ?? (await readTerminalClipboard());
-          if (text && slot.currentLeafId === targetLeafId) slot.term.paste(text);
+          if (text && slot.currentLeafId === targetLeafId)
+            slot.term.paste(text);
         })();
       }
       event.preventDefault();
@@ -515,6 +534,7 @@ function discardRetention(slot: Slot): void {
 
 function bindSlot(slot: Slot, p: AcquireParams): void {
   const fast = slot.retainedLeafId === p.leafId;
+  if (!fast) slot.inputAnchor.reset();
   const stale =
     !slot.webglAddon ||
     slot.parked ||
@@ -522,7 +542,9 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   const hadWebgl = !!slot.webglAddon;
   slot.retainedLeafId = null;
   slot.currentLeafId = p.leafId;
-  slot.host.dataset.teraxBlocks = adapter?.isLeafBlocks(p.leafId) ? "true" : "false";
+  slot.host.dataset.teraxBlocks = adapter?.isLeafBlocks(p.leafId)
+    ? "true"
+    : "false";
   slot.lastUsedAt = performance.now();
 
   cancelPendingUnhide(slot);
@@ -596,6 +618,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
   }
 
   applyCursorBlinkOnSlot(slot, adapter?.isLeafFocused(p.leafId) ?? false);
+  syncViewportChrome(slot);
 
   if (!fast && p.altScreen && !p.shellExited) {
     adapter?.resolveLeaf(p.leafId)?.kickPty(slot.term.cols, slot.term.rows);
@@ -608,7 +631,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
         slot.term.refresh(0, slot.term.rows - 1);
       } catch {}
     }
-    if (adapter?.isLeafFocused(p.leafId)) focusInteractiveTerminal(slot.term);
+    if (adapter?.isLeafFocused(p.leafId)) focusSlot(p.leafId);
   } else {
     scheduleUnhide(slot, stale || hadWebgl);
   }
@@ -627,7 +650,7 @@ function scheduleUnhide(slot: Slot, stale: boolean): void {
       }
       const leafId = slot.currentLeafId;
       if (leafId !== null && adapter?.isLeafFocused(leafId)) {
-        focusInteractiveTerminal(slot.term);
+        focusSlot(leafId);
       }
     });
   });
@@ -834,6 +857,7 @@ function reapIdleSlot(slot: Slot): void {
 }
 
 function disposeSlot(slot: Slot): void {
+  slot.inputAnchor.dispose();
   cancelSlotReap(slot);
   cancelWebglReap(slot);
   cancelPendingUnhide(slot);
@@ -1068,6 +1092,7 @@ export function applyTheme(): void {
 }
 
 export function focusSlot(leafId: number): void {
+  if (adapter?.focusLeafInput(leafId)) return;
   const slot = slots.find((s) => s.currentLeafId === leafId);
   if (slot) focusInteractiveTerminal(slot.term);
 }

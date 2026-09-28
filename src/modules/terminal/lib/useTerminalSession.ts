@@ -26,7 +26,7 @@ import {
 import { gatewayPin } from "./gatewayPins";
 import { openPty, type PtySession } from "./pty-bridge";
 import "../block/block.css";
-import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
+import { ensureAgentActivityListener, isAgentActivePty, useAgentActivityStore } from "./agentActivity";
 import {
   acquireSlot,
   applyBackgroundActive,
@@ -523,12 +523,28 @@ configureRendererPool({
     if (!s) return;
     unbindLeafFromSlot(leafId, s);
   },
+  focusLeafInput(leafId) {
+    const s = sessions.get(leafId);
+    if (!s?.blocks || s.blockMode !== "prompt") return false;
+    const slot = getSlotForLeaf(leafId);
+    if (slot) {
+      slot.term.options.disableStdin = true;
+      if (slot.term.textarea) slot.term.textarea.disabled = true;
+      slot.term.blur();
+    }
+    s.inputFocus?.();
+    return true;
+  },
   isLeafFocused(leafId) {
     const s = sessions.get(leafId);
     return !!s && s.visibleNow && s.focusedNow;
   },
   isLeafBlocks(leafId) {
     return sessions.get(leafId)?.blocks ?? false;
+  },
+  isLeafCodex(leafId) {
+    const pty = sessions.get(leafId)?.pty;
+    return !!pty && useAgentActivityStore.getState().agents[pty.id] === "codex";
   },
   isLeafBusy(leafId) {
     const s = sessions.get(leafId);
@@ -730,12 +746,11 @@ function applyBlockMode(leafId: number, mode: BlockMode, force = false): void {
     // Disable the helper textarea at the prompt so a grid click can't focus the
     // xterm (no flashing cursor) and can't steal focus from the shell input.
     if (slot.term.textarea) slot.term.textarea.disabled = prompt;
-    if (!prompt) {
-      slot.term.focus();
-    } else if (s.visibleNow && s.focusedNow) {
+    if (prompt) {
       slot.term.blur();
-      const inputFocus = s.inputFocus;
-      if (inputFocus) setTimeout(inputFocus, 0);
+    }
+    if (s.visibleNow && s.focusedNow) {
+      focusSlot(leafId);
     }
   }
   for (const l of s.blockListeners) l();

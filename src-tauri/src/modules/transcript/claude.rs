@@ -54,7 +54,7 @@ fn projects_root() -> Option<PathBuf> {
 /// collide) and non-ASCII paths do not come out the way a naive replacement
 /// predicts. When the guess does not exist, recently used directories are read
 /// and matched on the `cwd` each line actually carries.
-fn project_dir(cwd: &str) -> Option<PathBuf> {
+pub(super) fn project_dir(cwd: &str) -> Option<PathBuf> {
     if let Some(hit) = dir_cache().lock().ok().and_then(|c| c.get(cwd).cloned()) {
         if hit.is_dir() {
             return Some(hit);

@@ -12,6 +12,7 @@ export {
   ptyIdForLeaf,
   respawnSession,
   snapshotLeaf,
+  submitToLeaf,
   whenSessionReady,
   writeToSession,
 } from "./lib/useTerminalSession";

@@ -213,6 +213,13 @@ pub fn fingerprint(cwd: &str, agent: Option<&str>) -> Option<i64> {
 /// (the PTY reports backslashes, opencode stores forward slashes), and drive
 /// letters differ in case. Compared in a normal form so a directory matches
 /// itself.
+/// Where Claude Code keeps this directory's sessions. Exposed so the session
+/// picker can list them without duplicating the escaping rules, which are lossy
+/// enough that `claude.rs` has a fallback search for them.
+pub(crate) fn claude_project_dir(cwd: &str) -> Option<std::path::PathBuf> {
+    claude::project_dir(cwd)
+}
+
 pub(crate) fn same_dir(a: &str, b: &str) -> bool {
     normalize_dir(a) == normalize_dir(b)
 }

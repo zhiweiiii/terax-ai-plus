@@ -7,20 +7,21 @@
 //! keep the clock. Both clients do nothing but ask this module to remember
 //! something and read back what it remembers.
 //!
-//! Jobs are held in memory only. That is not a shortcut: a job names a
-//! terminal, and no terminal survives a restart of the app, so a job restored
-//! into a process with no session to run it in would be a promise this module
-//! could not keep.
+//! Jobs are persisted before background execution. Terminal bindings are session-scoped.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use chrono::{Local, TimeZone};
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
 use super::pty::PtyState;
+
+mod background;
+mod storage;
 
 /// Emitted whenever the list changes, so the desktop refreshes without polling.
 pub const SCHEDULE_EVENT: &str = "terax:schedules";
@@ -42,7 +43,15 @@ const RETRY_WINDOW: Duration = Duration::from_secs(60);
 /// where the terminal it names still exists.
 const MAX_DELAY: Duration = Duration::from_secs(48 * 60 * 60);
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+    Terminal,
+    Codex,
+    Claude,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Job {
     pub id: u64,
     /// The desktop leaf (terminal tab) this runs in.
@@ -55,6 +64,13 @@ pub struct Job {
     /// Epoch milliseconds.
     pub fire_at: i64,
     pub created_at: i64,
+    pub daily_time: Option<String>,
+    pub target: Target,
+    pub running: bool,
+    pub finished: bool,
+    pub last_result: Option<String>,
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Default)]
@@ -64,6 +80,9 @@ pub struct ScheduleState {
     /// Bumped on every change. A poller compares this instead of diffing the
     /// list, so an unchanged queue costs one atomic read.
     revision: AtomicU64,
+    active: AtomicUsize,
+    storage: OnceLock<Result<storage::Storage, String>>,
+    storage_error: Mutex<Option<String>>,
 }
 
 fn now_ms() -> i64 {
@@ -74,6 +93,30 @@ fn now_ms() -> i64 {
 }
 
 impl ScheduleState {
+    fn save(&self, jobs: &[Job]) -> Result<(), String> {
+        let result = match self.storage.get() {
+            Some(Ok(storage)) => storage.save(jobs),
+            Some(Err(error)) => Err(error.clone()),
+            None => Err("定时任务存储尚未初始化".into()),
+        };
+        *self.storage_error.lock().unwrap() = result.as_ref().err().cloned();
+        result
+    }
+
+    fn insert(&self, job: &Job) -> Result<(), String> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if jobs.len() >= 128 {
+            return Err("最多保留 128 个任务，请清理已完成任务".into());
+        }
+        jobs.push(job.clone());
+        if let Err(error) = self.save(&jobs) {
+            jobs.pop();
+            return Err(error);
+        }
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Relaxed)
     }
@@ -86,7 +129,7 @@ impl ScheduleState {
 
     pub fn add(&self, leaf_id: u32, command: String, delay: Duration) -> Result<Job, String> {
         let command = command.trim().to_string();
-        if command.is_empty() {
+        if command.is_empty() || command.len() > 65536 {
             return Err("empty command".into());
         }
         if delay > MAX_DELAY {
@@ -99,32 +142,46 @@ impl ScheduleState {
             command,
             fire_at: now + delay.as_millis() as i64,
             created_at: now,
+            daily_time: None,
+            target: Target::Terminal,
+            running: false,
+            finished: false,
+            last_result: None,
+            paused: false,
         };
-        self.jobs.lock().unwrap().push(job.clone());
-        self.revision.fetch_add(1, Ordering::Relaxed);
+        self.insert(&job)?;
         Ok(job)
     }
 
-    pub fn cancel(&self, id: u64) -> bool {
+    pub fn cancel(&self, id: u64) -> Result<bool, String> {
         let mut jobs = self.jobs.lock().unwrap();
-        let before = jobs.len();
-        jobs.retain(|j| j.id != id);
-        let removed = jobs.len() != before;
-        drop(jobs);
-        if removed {
-            self.revision.fetch_add(1, Ordering::Relaxed);
+        let Some(index) = jobs.iter().position(|j| j.id == id) else {
+            return Ok(false);
+        };
+        let removed = jobs.remove(index);
+        if let Err(error) = self.save(&jobs) {
+            jobs.insert(index, removed);
+            return Err(error);
         }
-        removed
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        Ok(true)
     }
 
-    /// Drop every job for a terminal that has gone away.
+    /// Never reuse an expired terminal binding for another session.
     pub fn forget_leaf(&self, leaf_id: u32) {
         let mut jobs = self.jobs.lock().unwrap();
-        let before = jobs.len();
-        jobs.retain(|j| j.leaf_id != leaf_id);
-        let removed = jobs.len() != before;
-        drop(jobs);
-        if removed {
+        let mut changed = false;
+        for job in jobs.iter_mut().filter(|j| {
+            j.target == Target::Terminal && j.leaf_id == leaf_id && !j.paused && !j.finished
+        }) {
+            job.paused = true;
+            job.last_result = Some("原终端已关闭，请重新绑定终端".into());
+            changed = true;
+        }
+        if changed {
+            if let Err(error) = self.save(&jobs) {
+                log::error!("schedule persistence: {error}");
+            }
             self.revision.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -133,18 +190,122 @@ impl ScheduleState {
     /// off the queue once it has actually been written to a terminal, or once
     /// it has spent its retry window failing to find one.
     fn due(&self, now: i64) -> Vec<Job> {
+        if self.storage_error.lock().unwrap().is_some() {
+            return Vec::new();
+        }
         self.jobs
             .lock()
             .unwrap()
             .iter()
-            .filter(|j| j.fire_at <= now)
+            .filter(|j| j.fire_at <= now && !j.running && !j.finished && !j.paused)
             .cloned()
             .collect()
     }
 
-    fn remove(&self, id: u64) {
-        self.cancel(id);
+    fn complete(&self, job: &Job) {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(current) = jobs.iter_mut().find(|j| j.id == job.id) else {
+            return;
+        };
+        current.running = false;
+        if let Some(time) = &job.daily_time {
+            match next_daily(time, now_ms()) {
+                Ok(next) => current.fire_at = next,
+                Err(_) => current.finished = true,
+            }
+        } else {
+            current.finished = true;
+        }
+        if let Err(error) = self.save(&jobs) {
+            log::error!("schedule persistence: {error}");
+        }
+        self.revision.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn finish_background(&self, job: &Job, result: Result<String, String>) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(current) = jobs.iter_mut().find(|j| j.id == job.id) {
+            current.running = false;
+            current.last_result = Some(match result {
+                Ok(text) => format!("已完成：{text}"),
+                Err(error) => format!("失败：{error}"),
+            });
+            match job.daily_time.as_ref().map(|t| next_daily(t, now_ms())) {
+                Some(Ok(next)) => current.fire_at = next,
+                _ => current.finished = true,
+            }
+            self.revision.fetch_add(1, Ordering::Relaxed);
+            if let Err(error) = self.save(&jobs) {
+                log::error!("schedule persistence: {error}");
+            }
+        }
+    }
+}
+
+fn next_daily(time: &str, after: i64) -> Result<i64, String> {
+    let (hour, minute) = time.split_once(':').ok_or("invalid time")?;
+    let hour: u32 = hour.parse().map_err(|_| "invalid hour")?;
+    let minute: u32 = minute.parse().map_err(|_| "invalid minute")?;
+    if hour > 23 || minute > 59 {
+        return Err("invalid time".into());
+    }
+    let now = Local
+        .timestamp_millis_opt(after)
+        .single()
+        .ok_or("invalid date")?;
+    let mut day = now.date_naive();
+    for _ in 0..4 {
+        let local = day.and_hms_opt(hour, minute, 0).ok_or("invalid time")?;
+        if let Some(candidate) = Local.from_local_datetime(&local).earliest() {
+            if candidate.timestamp_millis() > after {
+                return Ok(candidate.timestamp_millis());
+            }
+        }
+        day = day.succ_opt().ok_or("invalid date")?;
+    }
+    Err("could not resolve local time".into())
+}
+
+#[tauri::command]
+pub fn schedule_add_at(
+    state: tauri::State<ScheduleState>,
+    app: tauri::AppHandle,
+    leaf_id: Option<u32>,
+    command: String,
+    fire_at: Option<i64>,
+    daily_time: Option<String>,
+    target: Target,
+) -> Result<Job, String> {
+    let now = now_ms();
+    let fire_at = match &daily_time {
+        Some(time) => next_daily(time, now)?,
+        None => fire_at.filter(|t| *t > now).ok_or("请选择未来的发送时间")?,
+    };
+    let command = command.trim().to_string();
+    if command.is_empty() || command.len() > 65536 {
+        return Err("消息为空或过长".into());
+    }
+    let leaf_id = if target == Target::Terminal {
+        leaf_id.ok_or("请选择终端")?
+    } else {
+        0
+    };
+    let job = Job {
+        id: state.next_id.fetch_add(1, Ordering::Relaxed) + 1,
+        leaf_id,
+        command,
+        fire_at,
+        created_at: now,
+        daily_time,
+        target,
+        running: false,
+        finished: false,
+        last_result: None,
+        paused: false,
+    };
+    state.insert(&job)?;
+    let _ = app.emit(SCHEDULE_EVENT, state.list());
+    Ok(job)
 }
 
 /// Write a job's command into its terminal, as if it had been typed there.
@@ -159,11 +320,25 @@ fn deliver(app: &tauri::AppHandle, job: &Job) -> Result<(), String> {
         .writer
         .lock()
         .map_err(|_| "writer poisoned".to_string())?;
+    let schedule = app.state::<ScheduleState>();
+    let mut jobs = schedule.jobs.lock().unwrap();
+    let current = jobs
+        .iter_mut()
+        .find(|j| j.id == job.id && !j.paused && !j.finished)
+        .ok_or("任务已取消或暂停")?;
+    current.running = true;
+    if let Err(error) = schedule.save(&jobs) {
+        if let Some(current) = jobs.iter_mut().find(|j| j.id == job.id) {
+            current.running = false;
+        }
+        return Err(error);
+    }
     writer
         .write_all(job.command.as_bytes())
         .map_err(|e| e.to_string())?;
     writer.write_all(&[ENTER]).map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())?;
+    drop(jobs);
     Ok(())
 }
 
@@ -173,45 +348,102 @@ fn deliver(app: &tauri::AppHandle, job: &Job) -> Result<(), String> {
 /// the web connection loop is what forwards terminal output, and anything
 /// blocking in there stalls the stream for every viewer.
 pub fn start(app: tauri::AppHandle) {
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-            let state = app.state::<ScheduleState>();
-            let now = now_ms();
-            let due = state.due(now);
-            if due.is_empty() {
+    let state = app.state::<ScheduleState>();
+    let loaded = storage::Storage::load(&app);
+    let storage = loaded.map(|(storage, jobs)| {
+        state.next_id.store(
+            jobs.iter().map(|j| j.id).max().unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        *state.jobs.lock().unwrap() = jobs;
+        storage
+    });
+    if let Err(error) = &storage {
+        log::error!("schedule restore: {error}");
+        *state.storage_error.lock().unwrap() = Some(error.clone());
+    }
+    let _ = state.storage.set(storage);
+    if matches!(state.storage.get(), Some(Ok(_))) {
+        *state.storage_error.lock().unwrap() = None;
+    }
+    let _ = app.emit(SCHEDULE_EVENT, state.list());
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let state = app.state::<ScheduleState>();
+        let now = now_ms();
+        let due = state.due(now);
+        if due.is_empty() {
+            continue;
+        }
+        let mut changed = false;
+        for job in due {
+            if job.target != Target::Terminal {
+                if state.active.load(Ordering::Relaxed) >= 4 {
+                    continue;
+                }
+                {
+                    let mut jobs = state.jobs.lock().unwrap();
+                    let Some(current) = jobs.iter_mut().find(|j| j.id == job.id) else {
+                        continue;
+                    };
+                    current.running = true;
+                    if let Err(error) = state.save(&jobs) {
+                        if let Some(current) = jobs.iter_mut().find(|j| j.id == job.id) {
+                            current.running = false;
+                        }
+                        log::error!("schedule persistence: {error}");
+                        break;
+                    }
+                }
+                state.active.fetch_add(1, Ordering::Relaxed);
+                state.revision.fetch_add(1, Ordering::Relaxed);
+                let worker_app = app.clone();
+                std::thread::spawn(move || {
+                    let result = background::run(&worker_app, &job);
+                    let state = worker_app.state::<ScheduleState>();
+                    state.finish_background(&job, result);
+                    state.active.fetch_sub(1, Ordering::Relaxed);
+                    let _ = worker_app.emit(SCHEDULE_EVENT, state.list());
+                    let error = state.storage_error.lock().unwrap().clone();
+                    if let Some(error) = error {
+                        let _ = worker_app.emit("terax:schedule-error", error);
+                    }
+                });
+                changed = true;
                 continue;
             }
-            let mut changed = false;
-            for job in due {
-                match deliver(&app, &job) {
-                    Ok(()) => {
-                        log::info!(
-                            "schedule: ran job {} on leaf {}: {}",
+            match deliver(&app, &job) {
+                Ok(()) => {
+                    log::info!("schedule: ran job {} on leaf {}", job.id, job.leaf_id);
+                    state.complete(&job);
+                    changed = true;
+                }
+                Err(reason) => {
+                    let started = state
+                        .jobs
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|j| j.id == job.id && j.running);
+                    let waited = Duration::from_millis((now - job.fire_at).max(0) as u64);
+                    if started || waited > RETRY_WINDOW {
+                        log::warn!(
+                            "schedule: giving up on job {} for leaf {} ({reason})",
                             job.id,
-                            job.leaf_id,
-                            job.command
+                            job.leaf_id
                         );
-                        state.remove(job.id);
+                        state.complete(&job);
                         changed = true;
-                    }
-                    Err(reason) => {
-                        let waited = Duration::from_millis((now - job.fire_at).max(0) as u64);
-                        if waited > RETRY_WINDOW {
-                            log::warn!(
-                                "schedule: giving up on job {} for leaf {} ({reason})",
-                                job.id,
-                                job.leaf_id
-                            );
-                            state.remove(job.id);
-                            changed = true;
-                        }
                     }
                 }
             }
-            if changed {
-                let _ = app.emit(SCHEDULE_EVENT, state.list());
-            }
+        }
+        if changed {
+            let _ = app.emit(SCHEDULE_EVENT, state.list());
+        }
+        let error = state.storage_error.lock().unwrap().clone();
+        if let Some(error) = error {
+            let _ = app.emit("terax:schedule-error", error);
         }
     });
 }
@@ -230,8 +462,11 @@ pub fn schedule_add(
 }
 
 #[tauri::command]
-pub fn schedule_list(state: tauri::State<ScheduleState>) -> Vec<Job> {
-    state.list()
+pub fn schedule_list(state: tauri::State<ScheduleState>) -> Result<Vec<Job>, String> {
+    if let Some(error) = state.storage_error.lock().unwrap().clone() {
+        return Err(error);
+    }
+    Ok(state.list())
 }
 
 #[tauri::command]
@@ -239,10 +474,35 @@ pub fn schedule_cancel(
     state: tauri::State<ScheduleState>,
     app: tauri::AppHandle,
     id: u64,
-) -> bool {
-    let removed = state.cancel(id);
+) -> Result<bool, String> {
+    let removed = state.cancel(id)?;
     if removed {
         let _ = app.emit(SCHEDULE_EVENT, state.list());
     }
-    removed
+    Ok(removed)
+}
+
+#[tauri::command]
+pub fn schedule_rebind(
+    state: tauri::State<ScheduleState>,
+    app: tauri::AppHandle,
+    id: u64,
+    leaf_id: u32,
+) -> Result<(), String> {
+    let mut jobs = state.jobs.lock().unwrap();
+    let index = jobs
+        .iter()
+        .position(|j| j.id == id && j.target == Target::Terminal && j.paused)
+        .ok_or("任务不存在或无需绑定")?;
+    let previous = jobs[index].clone();
+    jobs[index].leaf_id = leaf_id;
+    jobs[index].paused = false;
+    if let Err(error) = state.save(&jobs) {
+        jobs[index] = previous;
+        return Err(error);
+    }
+    drop(jobs);
+    state.revision.fetch_add(1, Ordering::Relaxed);
+    let _ = app.emit(SCHEDULE_EVENT, state.list());
+    Ok(())
 }

@@ -49,6 +49,7 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - `workspace::*`：`workspace_authorize` / `workspace_current_dir`（启动与 git 的 cwd 授权表），外加 WSL 桥（`wsl_list_distros`、`wsl_default_distro`、`wsl_home`）。
 - `lsp::*`：语言服务器进程宿主。一根笨的 JSON-RPC 管道：Content-Length 分帧与进程生命周期在 Rust（`lsp/framing.rs`），协议智能在前端。启动 cwd 经授权表把关；服务器跑在自己的进程组里并整组杀掉，Windows 子进程带 `proc::job::ProcessJob`。`RunEvent::Exit` 时全部杀掉。
 - `gateway::gateway_status` / `gateway_set_config`：Claude Code 的本地供应商网关，见下。
+- `sessions::agent_sessions`：某个目录下 Claude Code 与 Codex 的历史会话列表，供顶栏的会话历史菜单一键恢复，见下。
 - `web::*`（`web::start`、`web::stop`、`web::web_status`、`web_set_password`、`web_has_custom_password`、`web_snapshot_reply`）：内嵌 HTTP + WebSocket 服务，见下。
 - `open_settings_window`：设置的独立 webview 窗口（可选 `tab` 参数深链到某一节）。
 
@@ -67,7 +68,7 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 
 ### Claude 网关（`src-tauri/src/modules/gateway/`）
 
-回环上的一个 Anthropic Messages 端点，让 Claude Code 用上只卖 OpenAI 格式接口的中转站。Claude Code 只会说 Anthropic Messages，而多数中转站（含 OpenCode Zen 的 `/zen/go/v1`）只提供 OpenAI Chat Completions，网关把请求转出去、把响应连同 SSE 转回来，于是换供应商变成菜单里点一下。要点：
+回环上的一个 Anthropic Messages 端点，让 Claude Code 用上只卖 OpenAI 格式接口的中转站。完整说明见 `docs/architecture/claude-gateway.md`。Claude Code 只会说 Anthropic Messages，而多数中转站（含 OpenCode Zen 的 `/zen/go/v1`）只提供 OpenAI Chat Completions，网关把请求转出去、把响应连同 SSE 转回来，于是换供应商变成菜单里点一下。要点：
 
 - **端口**：dev 绑 `34267`，release 绑 `34266`，与 web 桥接的 34268/34269 错开，两者可并存。
 - **只绑 `127.0.0.1`，绝不 `0.0.0.0`**。它转发的是用户付费的凭据，LAN 监听等于把订阅交给网内任何人。入站还要校验网关令牌（`x-api-key` 或 Bearer 都收），令牌存在 `%LOCALAPPDATA%/terax/gateway-token`，跨重启不变，否则每次重启都会悄悄弄坏所有已配置的命令行。
@@ -81,16 +82,31 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **供应商的怪癖按 host 判**：OpenCode Zen 的 Go 计划缺 `x-opencode-session` 会直接 400（"cannot be routed efficiently"），它靠这个把一轮对话固定在同一后端。会话 id 从 Claude Code 的 `metadata.user_id`（形如 `..._session_<uuid>`）里挖，取不到时回落到一个进程内固定值，每次请求换一个新的会正好毁掉这个头存在的意义。另外测试探针发 `max_tokens: 16` 而不是 1，有中转站校验 `max_tokens > 2`，用 1 会把好的供应商测成坏的。
 - **配置由前端持有**：`claudeGateway` 存在 tauri-plugin-store 里，`gateway_set_config` 把同一份推给 Rust，Rust 侧只有这一处状态。
 
-### Claude Code 用量（`src-tauri/src/modules/usage.rs`）
+### Claude Code 与 Codex 用量（`src-tauri/src/modules/usage.rs`）
 
-底栏显示订阅的 5 小时窗口与周窗口用量。数据靠跑 `claude -p "/usage"` 拿，因为**它不在磁盘上**：限额是 API 响应头带回来的，Claude Code 只把它转给 statusLine 命令，`~/.claude` 下没有任何文件存它。transcript 里记的是花掉的 token，那是另一个量，不是"占套餐窗口的百分之多少"。要点：
+底栏显示订阅的 5 小时窗口与周窗口用量。完整说明见 `docs/architecture/agent-sessions-and-usage.md`。数据靠跑 `claude -p "/usage"` 拿，因为**它不在磁盘上**：限额是 API 响应头带回来的，Claude Code 只把它转给 statusLine 命令，`~/.claude` 下没有任何文件存它。transcript 里记的是花掉的 token，那是另一个量，不是"占套餐窗口的百分之多少"。要点：
 
 - **绝不轮询**。查一次用量本身就要消耗一次请求，轮询等于用查询把额度烧掉。后端缓存 10 分钟（`MIN_REFETCH`），打开面板只是读缓存，只有点刷新才真的重查。首屏走 `claude_usage_cached`，不触发任何子进程。
 - **失败不进缓存**，否则一次网络抖动会让面板顶着同一条错误十分钟。
 - **输出是给人看的自然语言，不是 JSON**。解析只认 `Current session` / `Current week` 两个行首，宽松地抠 `N% used` 和 `resets ...`，其余一律不猜；完整原文始终保留在 `raw` 里，Claude Code 改文案时面板还能把权威答案原样显示出来。
 - 命令写成 `claude -p "/usage"`，`/usage` 必须带引号：Git Bash 会把裸的 `/usage` 当路径翻译成 `D:\program\Git\usage`，这个坑会让人误以为该功能不存在。
+- Codex 则启动一次短生命周期的本机 `codex app-server --stdio`，初始化后请求 `account/rateLimits/read`，读取它返回的短期/长期窗口、重置时间和套餐类型；不读 `~/.codex` 的凭据，也不连接或干预正在运行的 Codex TUI。它与 Claude 一样只在打开面板或手动刷新时查询，并缓存 10 分钟。
+
+### 会话历史（`src-tauri/src/modules/sessions.rs`）
+
+定时消息由 `schedule.rs` 管理，底栏 `ScheduleButton` 支持终端、Codex 后台、Claude Code 后台三种模式和多个单次/每日任务。后台模式不用 PTY 或用户工作目录，经 stdin 调用本机 CLI，限制并发、超时和输出大小。任务由 `schedule/storage.rs` 原子保存到 app-local-data 的 `schedules.json`（开发版隔离），后台任务重启恢复；终端任务重启后暂停等待重新绑定。中断且结果未知的请求不自动重发，存储异常暂停调度。详见 `docs/architecture/scheduled-messages.md`。
+
+完整说明见 `docs/architecture/agent-sessions-and-usage.md`。顶栏右侧的菜单顶部可直接新开 Claude Code 或 Codex；其下把当前目录下两者的历史会话合并为一个列表，按最后活动时间倒序，点一条就把 `claude --resume <id>` / `codex resume <id>` 送进当前命令行执行。要点：
+
+- **读文件，不驱动它们自己的 picker**。两个 agent 都自带 resume 选择器，但都是交互式 TUI，要拿列表就得起进程加抓屏；它们的列表本身也是读文件来的，所以直接读同样的文件。
+- **绝不整文件解析**。codex 的 rollout 实测有 **91 MB**，而列表只要标题和时间：codex 的第一行 `session_meta` 就带 `session_id` / `cwd` / 时间戳，Claude 的 `ai-title` 落在 19k~60k 字节处，所以每个文件只读 `HEAD_BYTES`（192 KB）且丢掉末尾半行。
+- **目录归属两边不一样**。Claude 按 `<escaped cwd>` 分目录，目录本身就完成了过滤（转义是有损的，所以复用 `transcript::claude_project_dir` 的兜底搜索，不要重写规则）；codex 按**日期**分目录，cwd 只能从每个文件的首行读出来再比。
+- **标题要过滤注入的前言**。两边都用一条 user 消息注入上下文（codex 是 `<environment_context>`，Claude 是 slash 命令包装与 reminder），还可能以 `# AGENTS.md` 开头。判据是"以 `<` 开头或是这两个标题"，用它们当标题比不给标题更糟。user 的 content 可能是字符串也可能是块数组（带附件时），两种都要认。
+- 菜单**打开时才加载**，不开就零开销。
 
 ### PTY shell 集成
+
+光标适配不得在输出/渲染回调内触发同步布局：使用 xterm 已缓存的字符尺寸，绘制状态和样式变化才写 DOM，后台标签跳过坐标更新；IME 组合文字宽度由 ResizeObserver 异步测量。该约束用于避免稳定光标的适配反过来拖慢正文刷新。
 
 PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pty-shell-integration.md`。
 
@@ -111,12 +127,12 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 
 每个模块自包含，通过 `index.ts` 导出一层薄 barrel，自己的 hook 放在 `lib/` 下。
 
-- **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。blocks 终端只在主缓冲区把 OSC 133 当作 shell 边界，alt-screen 内的序列属于全屏 TUI，不能让底部输入栏切换焦点或可编辑状态；即使 inline TUI 发出伪 prompt 标记，也要等 PTY 确认前台任务退出才移交输入焦点。底部 shell 输入框接管 prompt 时，xterm textarea 必须失焦，正文不能留下第二个光标。终端历史用 xterm viewport 的原生右侧拖拽条，绝不另存或镜像一份滚动状态。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，上限 5）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
+- **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。blocks 终端只在主缓冲区把 OSC 133 当作 shell 边界，alt-screen 内的序列属于全屏 TUI，不能让底部输入栏切换焦点或可编辑状态；即使 inline TUI 发出伪 prompt 标记，也要等 PTY 确认前台任务退出才移交输入焦点。终端输入由 `terminalInputAnchor.ts` 统一协调：shell 提示符的独立输入栏通过 `disableStdin` 接管光标，运行中把焦点交给终端。Codex 普通和 blocks 终端均按 agent 身份启用稳定定位：可见光标与输入法共享已确认的位置，只在 明确的 DEC ?25h 指令提交坐标；IME 组词期间固定 textarea 和 composition view 的位置，不执行 xterm 的逐帧定位。程序的 DEC ?25 状态单独保留，显示层临时抑制不覆盖原始请求。该适配依赖 xterm v6 内部接口，升级时必须核验；会话重绑定清理计时器和组合态，槽位销毁恢复原始属性与方法。终端历史用 xterm `xterm-scrollable-element` 的右侧 slider 拖动，不依赖会被 WebView 隐藏的浏览器原生滚动条，也绝不另存或镜像一份滚动状态；alternate buffer 没有终端历史，因此隐藏 slider，避免 Claude Code 的内层全屏界面占满整屏。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，上限 5）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
 - **editor/** - CodeMirror 6（`EditorStack` 与 `TerminalStack` 对称）。缓冲区活在 LF 空间，保存时还原原始 EOL（`lib/eol.ts` 多数投票检测）；缩进单位按文件检测（`lib/indent.ts`）。保存时用 `fs_read_file` / `fs_write_file` 返回的磁盘 mtime 做冲突检查（不一致时弹警告并要求显式覆盖，绝不静默 last-writer-wins）。超过 10 MB 的文件提供"仍然打开"（硬上限 50 MB），超过 4 MB 关掉语法高亮与 LSP。保存时格式化的实现在 `lib/externalFormat.ts`。编辑器字号单独存为 `editorFontSize`，不影响 `terminalFontSize`。
 - **explorer/** - 文件树，Material / Catppuccin 图标，键盘导航，行内重命名，右键操作。`basename` 认反斜杠。常驻搜索栏同时匹配**文件名**（模糊，`fs_search`）与**文件内容**（`fs_grep_interactive`）。两者都是模糊的：内容搜索把查询按空白拆成词，要求**每个词都出现在同一行里**（纯子串、不计顺序），而不是把整个查询当一个字面串，后者的效果是打个空格就什么都搜不到。**实现上刻意不用正则**：把词用 `.*?` 串成一个正则表达的是同一个意思，但会让 searcher 失去快路径：单个字面量能用 memchr 大步跳过文件，带空隙的模式则要让自动机逐字节爬完。所以只把**最长的那个词**当字面量交给 searcher 去筛候选行（最长 = 最稀有 = 跳得最多），其余词在活下来的少数行上用 `contains` 校验。大小写沿用 smart case，全小写查询即不区分大小写。两条搜索的 walk 都带 `hidden` + `git_ignore`，所以结果不会冒出隐藏文件或被 git 忽略的文件。工具栏的过滤按钮可开关"隐藏文件"与"git 忽略的文件"。定位按钮会展开当前文件的各级父目录并选中它，也能解析 git-diff / git-commit-file 标签（拼 `repoRoot` + 路径）。
 - **preview/** - 自动探测的开发服务器预览标签（状态栏发现 localhost URL 时提示打开）。
 - **tabs/** - `useTabs` 是标签列表与活动 id 的事实来源。`useWorkspaceCwd` 推导资源管理器根目录、新标签继承的 cwd，以及文件/版本/窗口三个侧栏跟随的当前终端标签。**文件标签归属某个命令行**：每个 editor / markdown 标签带 `ownerTabId` 指向它被打开时所在的终端标签，`capEditorTabs` **按归属**限流（每个终端标签 10 个，最老先驱逐，脏的/刚打开的/活动的保留）。归属信息在序列化和标签移动后仍然保留；关掉终端会让它的文件变成"未归属"。
-- **header/** - 顶栏与行内搜索。`WindowControls` 在 `USE_CUSTOM_WINDOW_CONTROLS` 为真时渲染（Windows 上恒真）。
+- **header/** - 顶栏与行内搜索。`WindowControls` 在 `USE_CUSTOM_WINDOW_CONTROLS` 为真时渲染（Windows 上恒真）。`headerRight` 插槽在窗口控件之前，目前放 `SessionHistoryMenu`（会话历史，见上）。
 - **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 用量（`ClaudeUsageButton`，见下）、Claude Code 供应商面板（`ClaudeProviderButton`：选中一个中转站，把 `$env:ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 临时写进当前命令行并指向本地网关的 `/p/<id>`）。按钮左侧的徽标显示**当前命令行**走的是哪个供应商，没走网关时不渲染，指向已删除的供应商时转为琥珀色告警。已知中转站有一键预设（`PRESETS`），填完只差 API Key。
 - **shortcuts/** - 快捷键注册表（`shortcuts.ts`）+ `useGlobalShortcuts`。处理函数在 `App.tsx` 里按 id 传入。平台修饰键用 `metaKey || ctrlKey`。
 - **settings/** - 设置 store（`store.ts`，基于 `tauri-plugin-store`）、偏好 hook、设置窗口打开器。**`usePreferencesStore.init()` 必须在每次启动时都跑**，不能只在首次创建空间时跑，否则几十项主窗口设置会被钉死在默认值、且没有变更监听。
@@ -163,6 +179,7 @@ Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: tru
 
 - `bundle.targets` 是 `["nsis"]`，**只出 exe 安装包**。MSI 会把任务栏图标指向 `C:\Windows\Installer\{ProductCode}\ProductIcon`，而 ProductCode 每次构建都变，覆盖安装后固定在任务栏的图标就没了。
 - NSIS 用 `perMachine` 模式（装到 `Program Files` 需要这个）。**默认目录不硬编码**：NSIS 的 `.onInit` 会调 `RestorePreviousInstallLocation`，安装时也写 `InstallLocation`，所以第一次选好目录以后就记住了。
+- 一律从 `pnpm tauri build` 打包。`scripts/tauri.mjs` 通过当前 Node 直接启动本地安装的 Tauri CLI，避免 Windows 上启动 `pnpm.cmd` 的兼容性错误；它会对受打包影响的源码和配置生成指纹。相对上一次**成功打包**有变动时，先把 `package.json`、`Cargo.toml`、`Cargo.lock` 与 `tauri.conf.json` 的 patch 版本同步加一，失败则恢复这四份清单。状态文件 `.terax-package-state.json` 仅供本机判断，已忽略。状态栏右下角显示最终由 Tauri 提供的版本号。
 - `installer-hooks.nsh` 注册文件夹 / 文件夹背景 / 驱动器的"Open in Terax"右键菜单。
 - 自动更新用公开的 minisign 公钥，产物在 GitHub releases。
 

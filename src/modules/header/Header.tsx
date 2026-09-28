@@ -24,6 +24,8 @@ type Props = {
   headerTabs?: ReactNode;
   /** Group (space) switcher rendered before the tab strip. */
   groupSwitcher?: ReactNode;
+  /** Sits at the far right, before the window controls. */
+  headerRight?: ReactNode;
 };
 
 export function Header({
@@ -44,6 +46,7 @@ export function Header({
   onOverrideLanguage,
   headerTabs,
   groupSwitcher,
+  headerRight,
 }: Props) {
 
   return (
@@ -81,6 +84,10 @@ export function Header({
         />
         <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
       </div>
+
+      {headerRight ? (
+        <div className="flex shrink-0 items-center gap-0.5">{headerRight}</div>
+      ) : null}
 
       {USE_CUSTOM_WINDOW_CONTROLS && (
         <>

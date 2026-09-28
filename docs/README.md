@@ -22,10 +22,14 @@
 
 ## 架构指南
 
+- [定时消息](architecture/scheduled-messages.md) - 终端与后台 CLI 三模式、多任务、每日重复和生命周期边界。
+
 - [双进程模型与 IPC 命令参考](architecture/two-process-model.md) - Rust 掌管所有系统访问，webview 通过 `invoke()` 沟通。命令目录，以及如何新增一个命令。
 - [PTY shell 集成](architecture/pty-shell-integration.md) - PTY 会话、shell 初始化脚本、OSC 7 / 133、ConPTY、`CONPTY_LIFECYCLE_LOCK`、Job Object、WSL。
 - [Web 终端桥接](architecture/web-terminal-bridge.md) - 内嵌的 HTTP + WebSocket 服务，把桌面 PTY 会话共享给手机浏览器；认证、协议、构建流程，以及 agent transcript。
 - [手机端对话视图](architecture/mobile-conversation-view.md) - 手机渲染的是对话而不是终端：对话来自 agent 自己的记录，屏幕只负责它不可能知道的部分（正在等你选什么）。
+- [Claude Code 本地网关](architecture/claude-gateway.md) - 回环上的 Anthropic 端点，把只卖 OpenAI 格式的中转站转给 Claude Code 用；按命令行隔离、spawn 时注入、协议转换与供应商怪癖。
+- [Agent 会话历史与用量](architecture/agent-sessions-and-usage.md) - Claude Code 与 Codex 历史合并、一键新开或恢复；订阅用量只在用户查询时从各自的本机接口读取。
 - [安全模型](architecture/security-model.md) - 工作区授权、IPC 白名单、OSC 信任边界，以及 Web 终端的认证边界。
 - [终端渲染器池](architecture/terminal-renderer-pool.md) - 槽位复用、DormantRing，以及"命令执行中绝不序列化"这条不变量。
 - [CLI 控制面](architecture/cli-control.md) - 随包分发的 CLI、带认证的本地协议、调用方定位、打包，以及当前的平台限制。

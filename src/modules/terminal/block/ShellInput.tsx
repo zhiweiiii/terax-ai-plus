@@ -2,7 +2,7 @@ import { resolveFontFamily } from "@/lib/fonts";
 import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/modules/theme";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import {
   clearLeafBlockSelection,
   getLeafDraft,
@@ -49,6 +49,9 @@ export default function ShellInput({
   const atPrompt = mode === "prompt";
   const focusableRef = useRef(false);
   focusableRef.current = focused && atPrompt;
+  const focusInput = useCallback(() => {
+    if (focusableRef.current) handleRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -97,7 +100,6 @@ export default function ShellInput({
       onEscape: () => clearLeafBlockSelection(leafIdRef.current),
     });
     handleRef.current = handle;
-    requestAnimationFrame(() => handleRef.current?.focus());
     return () => {
       handle.destroy();
       handleRef.current = null;
@@ -108,11 +110,11 @@ export default function ShellInput({
   // and swap drafts so each leaf keeps its own unsent command. New or switched
   // tabs land with the cursor already in the input.
   useEffect(() => {
-    setLeafInputFocus(leafId, () => handleRef.current?.focus());
+    setLeafInputFocus(leafId, focusInput);
     handleRef.current?.setValue(getLeafDraft(leafId));
     requestAnimationFrame(() => {
       if (focusableRef.current && leafIdRef.current === leafId) {
-        handleRef.current?.focus();
+        focusInput();
       }
     });
     return () => {
@@ -121,7 +123,7 @@ export default function ShellInput({
       setLeafInputActivity(leafId, value.length > 0);
       setLeafInputFocus(leafId, null);
     };
-  }, [leafId]);
+  }, [leafId, focusInput]);
 
   useEffect(() => {
     void activeTheme;
@@ -133,12 +135,13 @@ export default function ShellInput({
     const handle = handleRef.current;
     if (!handle) return;
     handle.setEditable(atPrompt);
-    if (atPrompt) handle.focus();
-  }, [atPrompt]);
+    if (atPrompt) focusInput();
+    else handle.blur();
+  }, [atPrompt, focusInput]);
 
   useEffect(() => {
-    if (focused && atPrompt) handleRef.current?.focus();
-  }, [focused, atPrompt]);
+    if (focused && atPrompt) focusInput();
+  }, [focused, atPrompt, focusInput]);
 
   // The editor holds focus at the prompt, so a Cmd+C over a grid selection lands
   // here, not on the xterm. Copy the grid selection unless the editor has its own.

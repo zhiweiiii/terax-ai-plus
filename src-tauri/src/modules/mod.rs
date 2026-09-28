@@ -7,6 +7,7 @@ pub mod lsp;
 pub mod proc;
 pub mod pty;
 pub mod schedule;
+pub mod sessions;
 pub mod shell;
 pub mod transcript;
 pub mod usage;
