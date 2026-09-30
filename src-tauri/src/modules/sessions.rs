@@ -5,8 +5,8 @@
 //! spawning a process and scraping a screen. They read files to build that
 //! list, so this reads the same files.
 //!
-//! - `claude` - `~/.claude/projects/<escaped cwd>/<session>.jsonl`. The
-//!   directory already scopes the list to one cwd.
+//! - `claude` - `~/.claude/projects/<escaped cwd>/<session>.jsonl`. The escaped
+//!   directory can contain sessions from different cwd values, so inspect each.
 //! - `codex` - `~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`. Laid out by
 //!   date rather than by directory, so the cwd comes out of each file.
 //!
@@ -129,8 +129,6 @@ fn claude_sessions(cwd: &str) -> Vec<Session> {
         .map(|path| (modified_secs(&path), path))
         .collect();
     files.sort_by(|a, b| b.0.cmp(&a.0));
-    files.truncate(MAX_PER_AGENT);
-
     files
         .into_iter()
         .filter_map(|(updated_at, path)| {
@@ -138,19 +136,21 @@ fn claude_sessions(cwd: &str) -> Vec<Session> {
             let head = read_head(&path)?;
             let mut title = None;
             let mut first_ask = None;
+            let mut session_cwd = None;
             for line in head.lines() {
                 let Ok(value) = serde_json::from_str::<Value>(line) else {
                     continue;
                 };
+                if session_cwd.is_none() {
+                    session_cwd = value.get("cwd").and_then(Value::as_str).map(str::to_owned);
+                }
                 match value.get("type").and_then(Value::as_str) {
-                    Some("ai-title") => {
+                    Some("ai-title") if title.is_none() => {
                         title = value
                             .get("aiTitle")
                             .and_then(Value::as_str)
                             .map(tidy)
                             .filter(|t| !t.is_empty());
-                        // The agent's own title beats anything derived.
-                        break;
                     }
                     Some("user") if first_ask.is_none() => {
                         first_ask = value
@@ -161,6 +161,15 @@ fn claude_sessions(cwd: &str) -> Vec<Session> {
                     }
                     _ => {}
                 }
+                if session_cwd.is_some() && title.is_some() {
+                    break;
+                }
+            }
+            if !session_cwd
+                .as_deref()
+                .is_some_and(|found| crate::modules::transcript::same_dir(found, cwd))
+            {
+                return None;
             }
             Some(Session {
                 agent: "claude",
@@ -171,6 +180,7 @@ fn claude_sessions(cwd: &str) -> Vec<Session> {
                 updated_at,
             })
         })
+        .take(MAX_PER_AGENT)
         .collect()
 }
 

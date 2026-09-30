@@ -26,7 +26,7 @@ import {
 import { gatewayPin } from "./gatewayPins";
 import { openPty, type PtySession } from "./pty-bridge";
 import "../block/block.css";
-import { ensureAgentActivityListener, isAgentActivePty, useAgentActivityStore } from "./agentActivity";
+import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
 import {
   acquireSlot,
   applyBackgroundActive,
@@ -541,10 +541,6 @@ configureRendererPool({
   },
   isLeafBlocks(leafId) {
     return sessions.get(leafId)?.blocks ?? false;
-  },
-  isLeafCodex(leafId) {
-    const pty = sessions.get(leafId)?.pty;
-    return !!pty && useAgentActivityStore.getState().agents[pty.id] === "codex";
   },
   isLeafBusy(leafId) {
     const s = sessions.get(leafId);

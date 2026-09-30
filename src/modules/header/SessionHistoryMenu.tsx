@@ -11,7 +11,7 @@ import { errorToast } from "@/lib/errorToast";
 import { Add01Icon, Clock01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type Session = {
   agent: "claude" | "codex";
@@ -61,24 +61,41 @@ type Props = {
  * nothing.
  */
 export function SessionHistoryMenu({ cwd, onRun }: Props) {
-  const [sessions, setSessions] = useState<Session[] | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [requestId, setRequestId] = useState(0);
+  const [result, setResult] = useState<{
+    cwd: string | null;
+    requestId: number;
+    sessions: Session[];
+  } | null>(null);
 
-  const load = async () => {
+  useEffect(() => {
+    if (!open) return;
     if (!cwd) {
-      setSessions([]);
+      setResult({ cwd, requestId, sessions: [] });
       return;
     }
-    setLoading(true);
-    try {
-      setSessions(await invoke<Session[]>("agent_sessions", { cwd }));
-    } catch (e) {
-      setSessions([]);
-      errorToast("读取会话历史失败", e);
-    } finally {
-      setLoading(false);
-    }
-  };
+    let cancelled = false;
+    void invoke<Session[]>("agent_sessions", { cwd }).then(
+      (sessions) => {
+        if (!cancelled) setResult({ cwd, requestId, sessions });
+      },
+      (error) => {
+        if (cancelled) return;
+        setResult({ cwd, requestId, sessions: [] });
+        errorToast("读取会话历史失败", error);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, open, requestId]);
+
+  const sessions =
+    result?.cwd === cwd && result.requestId === requestId
+      ? result.sessions
+      : null;
+  const loading = open && sessions === null;
 
   const resume = (session: Session) => {
     if (!onRun) return;
@@ -87,8 +104,9 @@ export function SessionHistoryMenu({ cwd, onRun }: Props) {
 
   return (
     <DropdownMenu
-      onOpenChange={(open) => {
-        if (open) void load();
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (nextOpen) setRequestId((id) => id + 1);
       }}
     >
       <DropdownMenuTrigger asChild>

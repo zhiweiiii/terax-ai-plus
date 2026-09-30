@@ -1,5 +1,4 @@
 import { resolveFontFamily } from "@/lib/fonts";
-import { stabilizeTerminalInput } from "@/modules/terminal/lib/terminalInputAnchor";
 import { openExternalUrl } from "@/lib/external-link";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { TerminalCursorStyle } from "@/modules/settings/store";
@@ -31,7 +30,6 @@ export type SlotAdapter = {
   focusLeafInput(leafId: number): boolean;
   isLeafFocused(leafId: number): boolean;
   isLeafBlocks(leafId: number): boolean;
-  isLeafCodex(leafId: number): boolean;
   isLeafBusy(leafId: number): boolean;
   isLeafVisible(leafId: number): boolean;
   storeSnapshot(leafId: number, out: SerializeOutput): void;
@@ -53,7 +51,6 @@ export type Slot = {
   readonly fitAddon: FitAddon;
   readonly serializeAddon: SerializeAddon;
   readonly host: HTMLDivElement;
-  inputAnchor: ReturnType<typeof stabilizeTerminalInput>;
   webglAddon: WebglAddon | null;
   webglCanvases: HTMLCanvasElement[];
   currentLeafId: number | null;
@@ -329,7 +326,6 @@ function createSlot(): Slot {
     fitAddon,
     serializeAddon,
     host,
-    inputAnchor: { reset: () => {}, dispose: () => {} },
     webglAddon: null,
     webglCanvases: [],
     currentLeafId: null,
@@ -349,10 +345,6 @@ function createSlot(): Slot {
     lastUsedAt: 0,
   };
 
-  slot.inputAnchor = stabilizeTerminalInput(term, () => {
-    const leafId = slot.currentLeafId ?? slot.retainedLeafId;
-    return leafId !== null && (adapter?.isLeafCodex(leafId) ?? false);
-  }, () => slot.currentLeafId !== null && !slot.parked);
   term.onWriteParsed(() => syncViewportChrome(slot));
 
   term.attachCustomKeyEventHandler((event) => {
@@ -534,7 +526,6 @@ function discardRetention(slot: Slot): void {
 
 function bindSlot(slot: Slot, p: AcquireParams): void {
   const fast = slot.retainedLeafId === p.leafId;
-  if (!fast) slot.inputAnchor.reset();
   const stale =
     !slot.webglAddon ||
     slot.parked ||
@@ -857,7 +848,6 @@ function reapIdleSlot(slot: Slot): void {
 }
 
 function disposeSlot(slot: Slot): void {
-  slot.inputAnchor.dispose();
   cancelSlotReap(slot);
   cancelWebglReap(slot);
   cancelPendingUnhide(slot);

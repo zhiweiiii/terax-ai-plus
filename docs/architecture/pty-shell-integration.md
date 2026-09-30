@@ -1,6 +1,6 @@
 # PTY shell 集成
 
-光标适配的性能约束：输出解析和渲染回调不能同步读取 DOM 几何尺寸。`terminalInputAnchor.ts` 使用 xterm 渲染服务缓存的字符尺寸，按位置、尺寸、样式及显隐状态去重，相同状态不写 DOM；后台标签不更新坐标。IME 组合态仍固定位置，文字宽度通过 ResizeObserver 异步更新，销毁时移除观察器。不得通过定时强制重绘正文来补偿光标层开销。
+Codex TUI 由 xterm 原生渲染和定位输入法。曾经的自定义输入锚点改写 xterm 私有接口，在用户环境出现输入卡顿和画面延迟刷新，现已移除。输出回调不额外计算输入光标位置，也不通过定时强制重绘正文。
 
 本文是 `TERAX.md` 的展开。与 `TERAX.md` 冲突时以 `TERAX.md` 为准。
 
@@ -52,7 +52,7 @@ profile 会在用户的 `$PROFILE` 跑完之后包住其 `prompt` 函数，让�
 
 blocks 终端只在主缓冲区消费 OSC 133 来切换底部 shell 输入栏。全屏 TUI 在 alternate screen 内也可能发出同类序列，但它们不代表 PowerShell 的提示符边界；`BlockDecorations` 会忽略它们。inline TUI 也可能发出伪 prompt 标记，因此 prompt 不会立即移交焦点，而是经 `pty_has_foreground_job` 确认前台任务已经退出。这样 Codex 等持续重绘的 TUI 不会在运行中让底部输入栏与终端 textarea 争抢焦点，IME 候选窗也不会在两处跳动。
 
-终端输入由 `terminalInputAnchor.ts` 统一协调：shell 提示符的独立输入栏通过 `disableStdin` 接管光标，运行中把焦点交给终端。Codex 普通和 blocks 终端均按 agent 身份启用稳定定位：可见光标与输入法共享已确认的位置，只在 明确的 DEC ?25h 指令提交坐标；IME 组词期间固定 textarea 和 composition view 的位置，不执行 xterm 的逐帧定位。程序的 DEC ?25 状态单独保留，显示层临时抑制不覆盖原始请求。该适配依赖 xterm v6 内部接口，升级时必须核验；会话重绑定清理计时器和组合态，槽位销毁恢复原始属性与方法。终端历史使用 xterm 的 slider，alternate buffer 隐藏外层历史滑块。
+shell 提示符的独立输入栏通过 `disableStdin` 接管光标；前台命令运行时把焦点交给 xterm。Codex 的可见光标、隐藏 textarea 和 IME composition view 均由 xterm 自身维护，Terax 不修改其私有接口。终端历史使用 xterm 的 slider，alternate buffer 隐藏外层历史滑块。
 
 ## Windows 上的并发与进程生命周期
 

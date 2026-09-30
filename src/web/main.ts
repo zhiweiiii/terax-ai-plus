@@ -1343,7 +1343,7 @@ function closeSheet() {
 
 // ── Input ────────────────────────────────────────────────────────────────
 /** Write raw bytes to the attached PTY (binary '0' + payload). */
-function writePty(data: string) {
+function writePty(data: string, command = 0x30) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   if (attachedId === null) {
     toast("没有已连接的终端");
@@ -1351,7 +1351,7 @@ function writePty(data: string) {
   }
   const bytes = new TextEncoder().encode(data);
   const frame = new Uint8Array(1 + bytes.length);
-  frame[0] = 0x30; // '0'
+  frame[0] = command;
   frame.set(bytes, 1);
   ws.send(frame);
   return true;
@@ -1367,9 +1367,7 @@ function submit() {
     followToBottom();
     return;
   }
-  // Whatever is on the other end — a shell, an agent, a REPL — the phone
-  // sends the same thing a keyboard would: the text, then Enter.
-  if (!writePty(`${text}\r`)) return;
+  if (!writePty(text, 0x32 /* submit */)) return;
   conv.noteSent(text);
   // The transcript will not know about this until the agent writes the turn
   // out, so the page holds it in the meantime — anchored to where the
@@ -1391,7 +1389,7 @@ inputEl.addEventListener("input", autoGrow);
 inputEl.addEventListener("keydown", (e) => {
   // Enter sends; Shift+Enter makes a new line. On phones the soft keyboard's
   // return key reports as Enter without a modifier, which is what we want.
-  if (e.key === "Enter" && !e.shiftKey) {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     submit();
   }

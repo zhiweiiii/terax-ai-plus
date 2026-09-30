@@ -13,6 +13,8 @@
 //!     '1' + JSON         → resize { "cols": N, "rows": N } (kept for
 //!                          completeness; the current page never sends it —
 //!                          the desktop owns the PTY size)
+//!     '2' + bytes        → submit text followed by Enter; bracket Codex input
+//!                          so its paste-burst detector cannot absorb Enter
 //!   Later (text):        { "attach": <id> }        → switch session
 //!                        { "scheduleAdd": { "command": …, "delaySeconds": N } }
 //!                        { "scheduleCancel": <job id> }
@@ -1095,7 +1097,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                 let cmd = payload[0];
                 let data = &payload[1..];
                 match cmd {
-                    b'0' => {
+                    b'0' | b'2' => {
                         // Typing on the phone claims the session back from the
                         // desktop, at the grid the phone last reported.
                         if web_grid.is_some() {
@@ -1107,8 +1109,20 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                                 );
                             }
                         }
+                        let codex_submit = cmd == b'2'
+                            && session.web_agent().as_deref() == Some("codex")
+                            && !data.windows(6).any(|part| part == b"\x1b[201~");
                         let mut w = session.writer.lock().unwrap();
+                        if codex_submit {
+                            let _ = w.write_all(b"\x1b[200~");
+                        }
                         let _ = w.write_all(data);
+                        if codex_submit {
+                            let _ = w.write_all(b"\x1b[201~");
+                        }
+                        if cmd == b'2' {
+                            let _ = w.write_all(b"\r");
+                        }
                         let _ = w.flush();
                     }
                     b'1' => {

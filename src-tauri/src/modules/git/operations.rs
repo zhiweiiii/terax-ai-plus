@@ -459,16 +459,33 @@ pub fn push(
         return Err(GitError::NoUpstream);
     }
 
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["push"],
-        NETWORK_TIMEOUT_SECS,
-    )?;
+    let upstream = upstream.expect("checked above");
+    let (remote, branch) = split_upstream(&upstream);
+
+    // Name the destination instead of letting `git push` infer it. Under the
+    // default `push.default = simple`, a bare push is fatal whenever the
+    // upstream branch is named differently from the local one ("The upstream
+    // branch of your current branch does not match the name of your current
+    // branch"), and nothing is pushed. The upstream is already resolved above,
+    // so the ambiguity git is complaining about does not exist here.
+    let output = match (remote.as_deref(), branch.as_deref()) {
+        (Some(remote), Some(branch)) => run_git(
+            &repo_root.workspace,
+            Some(&repo_root.git_path),
+            ["push", remote, &format!("HEAD:{branch}")],
+            NETWORK_TIMEOUT_SECS,
+        )?,
+        // An upstream without a remote is a local tracking branch; git's own
+        // inference is the only thing that can resolve it.
+        _ => run_git(
+            &repo_root.workspace,
+            Some(&repo_root.git_path),
+            ["push"],
+            NETWORK_TIMEOUT_SECS,
+        )?,
+    };
     ensure_success(&output, "git push failed")?;
 
-    let upstream = upstream.unwrap();
-    let (remote, branch) = split_upstream(&upstream);
     Ok(GitPushResult {
         remote,
         branch,
@@ -1595,22 +1612,34 @@ pub fn push_advanced(
             }
             r.to_string()
         }
-        None => match upstream_remote {
+        None => match upstream_remote.clone() {
             Some(r) => r,
             None => return Err(GitError::NoUpstream),
         },
     };
 
-    let branch = upstream_branch.or_else(|| {
-        git_stdout_line_opt(
-            &repo_root.workspace,
-            &repo_root.git_path,
-            ["rev-parse", "--abbrev-ref", "HEAD"],
-        )
-        .ok()
-        .flatten()
-        .filter(|b| b != "HEAD")
-    });
+    let local_branch = git_stdout_line_opt(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+    )
+    .ok()
+    .flatten()
+    .filter(|b| b != "HEAD");
+
+    // Which branch this lands on depends on whether the chosen remote is the
+    // one the upstream points at. Same remote means the configured upstream is
+    // the target even when it is named differently; a different remote was
+    // asked for explicitly, and there the same-named branch is the only sane
+    // reading. Either way the destination is spelled out, because a bare
+    // `git push <remote>` is still fatal under `push.default = simple` when the
+    // two names disagree.
+    let same_remote = upstream_remote.as_deref() == Some(remote.as_str());
+    let branch = if same_remote {
+        upstream_branch.or_else(|| local_branch.clone())
+    } else {
+        local_branch.clone().or(upstream_branch)
+    };
 
     let tags = options.tags.as_deref();
     if tags == Some("all") {
@@ -1634,6 +1663,9 @@ pub fn push_advanced(
         args.push("--follow-tags".into());
     }
     args.push(remote.clone().into());
+    if let Some(branch) = branch.as_deref() {
+        args.push(format!("HEAD:{branch}").into());
+    }
     let output = run_git(
         &repo_root.workspace,
         Some(&repo_root.git_path),

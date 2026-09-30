@@ -63,6 +63,7 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **状态指示**：状态栏右下角通过 `web_status` 显示监听状态、实时连接数、连续登录失败数（每 2 秒轮询同一批原子量）。
 - **共享 PTY**：web 观看者订阅与桌面相同的 `Arc<Session>`，两端输入输出一致。**Rust 侧不存储任何会话输出**：手机连上时看到的首屏是**桌面终端自己的缓冲区**，经 `terax:web-snapshot` / `web_snapshot_reply` 现向窗口索取。以前那个 256 KiB 历史环已删除，第二份副本必然和桌面显示的内容分叉。
 - **一个会话一个网格，谁在打字谁拥有它**（`SizeOwner` / `claim` / `request_grid`）。手机不声明网格所以永不 claim，从手机打字不会让桌面屏幕重排。桌面只在真实按键时收回所有权，xterm 的协议应答（焦点上报、OSC 4 回复）刻意不 claim。
+- **手机发送键是提交，不是换行**：输入区通过独立的 WebSocket `2` 指令提交整段文本，服务端对正在运行的 Codex 使用明确的 bracketed paste 边界，再发送回车，避开 Codex 把快速输入加回车识别为多行粘贴的时序窗口；其他终端保持普通文本加回车。空输入只发回车。
 - **Agent transcript**：附着的会话里跑着编码 agent 时，服务端推 `{type:"transcript"}`，内容读自 agent 自己的记录。手机据此渲染对话，屏幕解析只保留一件 transcript 不可能知道的事：**程序此刻在等你选什么**。三道闸门让空闲会话零开销：必须真有 agent 在跑（`Session::web_agent`，由 OSC 检测喂）、文件指纹必须变过、revision 必须变过。700ms 轮询而不是监听，因为 opencode 的提交落在 WAL 里，没有文件系统事件能描述它。
 - **标签同步**：`App.tsx` 的 `useWebTerminalSync` 把每个桌面终端标签同步给 Rust（`web_sync_tabs`），所以手机能列出全部命令行而不只是有活 PTY 的。手机连一个还没起 pty 的标签时，服务端发 `terax:web-activate`，前端激活该标签，手机收到 `opening` 后重试。
 
@@ -100,13 +101,13 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 
 - **读文件，不驱动它们自己的 picker**。两个 agent 都自带 resume 选择器，但都是交互式 TUI，要拿列表就得起进程加抓屏；它们的列表本身也是读文件来的，所以直接读同样的文件。
 - **绝不整文件解析**。codex 的 rollout 实测有 **91 MB**，而列表只要标题和时间：codex 的第一行 `session_meta` 就带 `session_id` / `cwd` / 时间戳，Claude 的 `ai-title` 落在 19k~60k 字节处，所以每个文件只读 `HEAD_BYTES`（192 KB）且丢掉末尾半行。
-- **目录归属两边不一样**。Claude 按 `<escaped cwd>` 分目录，目录本身就完成了过滤（转义是有损的，所以复用 `transcript::claude_project_dir` 的兜底搜索，不要重写规则）；codex 按**日期**分目录，cwd 只能从每个文件的首行读出来再比。
+- **目录归属两边不一样**。Claude 按 `<escaped cwd>` 分目录，但转义有损，目录内可能混有不同 cwd 的会话，必须逐文件核对记录中的 cwd（同时复用 `transcript::claude_project_dir` 定位目录）；Codex 按**日期**分目录，cwd 从每个文件的首行读出来再比。
 - **标题要过滤注入的前言**。两边都用一条 user 消息注入上下文（codex 是 `<environment_context>`，Claude 是 slash 命令包装与 reminder），还可能以 `# AGENTS.md` 开头。判据是"以 `<` 开头或是这两个标题"，用它们当标题比不给标题更糟。user 的 content 可能是字符串也可能是块数组（带附件时），两种都要认。
-- 菜单**打开时才加载**，不开就零开销。
+- 菜单**打开时才加载**，不开就零开销；异步结果必须和当前 cwd、打开代次一致，切换项目不能显示旧列表。
 
 ### PTY shell 集成
 
-光标适配不得在输出/渲染回调内触发同步布局：使用 xterm 已缓存的字符尺寸，绘制状态和样式变化才写 DOM，后台标签跳过坐标更新；IME 组合文字宽度由 ResizeObserver 异步测量。该约束用于避免稳定光标的适配反过来拖慢正文刷新。
+Codex 交互界面直接由 xterm 渲染。不要劫持 xterm 的光标可见状态、textarea 定位或输入法组合元素；之前的私有接口适配在用户环境出现输入卡顿和画面延迟刷新。终端仍通过 PTY 原样转发 Codex 的转义序列与键盘输入。
 
 PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pty-shell-integration.md`。
 
@@ -127,7 +128,7 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 
 每个模块自包含，通过 `index.ts` 导出一层薄 barrel，自己的 hook 放在 `lib/` 下。
 
-- **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。blocks 终端只在主缓冲区把 OSC 133 当作 shell 边界，alt-screen 内的序列属于全屏 TUI，不能让底部输入栏切换焦点或可编辑状态；即使 inline TUI 发出伪 prompt 标记，也要等 PTY 确认前台任务退出才移交输入焦点。终端输入由 `terminalInputAnchor.ts` 统一协调：shell 提示符的独立输入栏通过 `disableStdin` 接管光标，运行中把焦点交给终端。Codex 普通和 blocks 终端均按 agent 身份启用稳定定位：可见光标与输入法共享已确认的位置，只在 明确的 DEC ?25h 指令提交坐标；IME 组词期间固定 textarea 和 composition view 的位置，不执行 xterm 的逐帧定位。程序的 DEC ?25 状态单独保留，显示层临时抑制不覆盖原始请求。该适配依赖 xterm v6 内部接口，升级时必须核验；会话重绑定清理计时器和组合态，槽位销毁恢复原始属性与方法。终端历史用 xterm `xterm-scrollable-element` 的右侧 slider 拖动，不依赖会被 WebView 隐藏的浏览器原生滚动条，也绝不另存或镜像一份滚动状态；alternate buffer 没有终端历史，因此隐藏 slider，避免 Claude Code 的内层全屏界面占满整屏。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，上限 5）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
+- **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。blocks 终端只在主缓冲区把 OSC 133 当作 shell 边界，alt-screen 内的序列属于全屏 TUI，不能让底部输入栏切换焦点或可编辑状态；即使 inline TUI 发出伪 prompt 标记，也要等 PTY 确认前台任务退出才移交输入焦点。shell 提示符的独立输入栏通过 `disableStdin` 接管光标，运行中把焦点交给 xterm；Codex 的光标和输入法定位均交由 xterm 原生处理。终端历史用 xterm `xterm-scrollable-element` 的右侧 slider 拖动，不依赖会被 WebView 隐藏的浏览器原生滚动条，也绝不另存或镜像一份滚动状态；alternate buffer 没有终端历史，因此隐藏 slider，避免 Claude Code 的内层全屏界面占满整屏。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，上限 5）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
 - **editor/** - CodeMirror 6（`EditorStack` 与 `TerminalStack` 对称）。缓冲区活在 LF 空间，保存时还原原始 EOL（`lib/eol.ts` 多数投票检测）；缩进单位按文件检测（`lib/indent.ts`）。保存时用 `fs_read_file` / `fs_write_file` 返回的磁盘 mtime 做冲突检查（不一致时弹警告并要求显式覆盖，绝不静默 last-writer-wins）。超过 10 MB 的文件提供"仍然打开"（硬上限 50 MB），超过 4 MB 关掉语法高亮与 LSP。保存时格式化的实现在 `lib/externalFormat.ts`。编辑器字号单独存为 `editorFontSize`，不影响 `terminalFontSize`。
 - **explorer/** - 文件树，Material / Catppuccin 图标，键盘导航，行内重命名，右键操作。`basename` 认反斜杠。常驻搜索栏同时匹配**文件名**（模糊，`fs_search`）与**文件内容**（`fs_grep_interactive`）。两者都是模糊的：内容搜索把查询按空白拆成词，要求**每个词都出现在同一行里**（纯子串、不计顺序），而不是把整个查询当一个字面串，后者的效果是打个空格就什么都搜不到。**实现上刻意不用正则**：把词用 `.*?` 串成一个正则表达的是同一个意思，但会让 searcher 失去快路径：单个字面量能用 memchr 大步跳过文件，带空隙的模式则要让自动机逐字节爬完。所以只把**最长的那个词**当字面量交给 searcher 去筛候选行（最长 = 最稀有 = 跳得最多），其余词在活下来的少数行上用 `contains` 校验。大小写沿用 smart case，全小写查询即不区分大小写。两条搜索的 walk 都带 `hidden` + `git_ignore`，所以结果不会冒出隐藏文件或被 git 忽略的文件。工具栏的过滤按钮可开关"隐藏文件"与"git 忽略的文件"。定位按钮会展开当前文件的各级父目录并选中它，也能解析 git-diff / git-commit-file 标签（拼 `repoRoot` + 路径）。
 - **preview/** - 自动探测的开发服务器预览标签（状态栏发现 localhost URL 时提示打开）。
