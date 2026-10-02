@@ -11,6 +11,10 @@ import { type FontWeight, Terminal } from "@xterm/xterm";
 import { toast } from "sonner";
 import { shouldCursorBlink } from "./cursorBlink";
 import {
+  recordTerminalEvent,
+  terminalDiagnosticsEnabled,
+} from "@/modules/terminal/lib/terminalDiagnostics";
+import {
   readTerminalClipboard,
   writeTerminalClipboard,
 } from "./terminalClipboard";
@@ -345,7 +349,37 @@ function createSlot(): Slot {
     lastUsedAt: 0,
   };
 
-  term.onWriteParsed(() => syncViewportChrome(slot));
+  term.onWriteParsed(() => {
+    syncViewportChrome(slot);
+    if (slot.currentLeafId !== null && terminalDiagnosticsEnabled())
+      recordTerminalEvent(slot.currentLeafId, "parsed", {
+        x: term.buffer.active.cursorX,
+        y: term.buffer.active.cursorY,
+      });
+  });
+  term.onRender(({ start, end }) => {
+    if (slot.currentLeafId !== null && terminalDiagnosticsEnabled())
+      recordTerminalEvent(slot.currentLeafId, "render", {
+        start,
+        end,
+        cols: term.cols,
+        rows: term.rows,
+      });
+  });
+  term.textarea?.addEventListener("focus", () => {
+    if (slot.currentLeafId !== null && terminalDiagnosticsEnabled())
+      recordTerminalEvent(slot.currentLeafId, "focus", { target: "terminal" });
+  });
+  term.onResize(({ cols, rows }) => {
+    if (slot.currentLeafId !== null && terminalDiagnosticsEnabled())
+      recordTerminalEvent(slot.currentLeafId, "resize", { cols, rows });
+  });
+  for (const kind of ["compositionstart", "compositionend", "blur"]) {
+    term.textarea?.addEventListener(kind, () => {
+      if (slot.currentLeafId !== null && terminalDiagnosticsEnabled())
+        recordTerminalEvent(slot.currentLeafId, kind, {});
+    });
+  }
 
   term.attachCustomKeyEventHandler((event) => {
     // During IME composition the browser is assembling a multi-keystroke
@@ -362,7 +396,7 @@ function createSlot(): Slot {
     const bridge = adapter?.resolveLeaf(leafId);
     if (!bridge) return true;
     const readlineSequence = terminalReadlineSequence(event, {
-      isMac: IS_MAC,
+      isMac: false,
       isAlternateScreen: isAltScreen(slot),
     });
     if (readlineSequence) {
@@ -1186,8 +1220,6 @@ export function getLiveSlotForLeaf(leafId: number): Slot | null {
     ) ?? null
   );
 }
-
-const IS_MAC = false;
 
 function isTerminalCopy(e: KeyboardEvent): boolean {
   return (

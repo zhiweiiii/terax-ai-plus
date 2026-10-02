@@ -1,23 +1,19 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
-    "src/main.tsx",
     "src/settings/main.tsx",
     "scripts/*.mjs",
-    "vite.config.ts",
-    "src/styles/globals.css"
+    "src/styles/fonts.css",
+    "src/web/main.ts",
+    "src/modules/lsp/lib/protocolShim.ts"
   ],
-  "project": ["src/**/*.{ts,tsx}"],
-  "ignore": ["src/components/ui/**", "src/components/ai-elements/**"],
+  "project": ["src/**/*.{ts,tsx,css}"],
+  "ignore": ["src/components/ui/**"],
   "ignoreDependencies": [
-    "@size-limit/file",
+    "@tauri-apps/cli",
     "@tauri-apps/plugin-log",
     "@tauri-apps/plugin-window-state",
-    "tailwindcss",
-    "tw-animate-css",
-    "shadcn",
     "@fontsource-variable/inter",
-    "@codemirror/autocomplete",
-    "@uiw/codemirror-themes"
+    "@fontsource/jetbrains-mono"
   ]
 }

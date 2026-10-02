@@ -2,133 +2,17 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
-use super::{
-    clip_output, merge_assistant_steps, push_part, same_dir, Message, Part, Transcript, Working,
-};
-
-const SEARCH_MAX_AGE_SECS: u64 = 24 * 60 * 60;
-const REFRESH_SESSION_PATH: Duration = Duration::from_secs(2);
-
-struct CachedSession {
-    file: PathBuf,
-    checked_at: Instant,
-}
-
-pub fn read(cwd: &str) -> Option<Transcript> {
-    let file = newest_session(cwd)?;
-    let session_id = session_id(&file)?;
-    parse(&file, session_id)
-}
-
-pub fn changed_at(cwd: &str) -> Option<i64> {
-    let file = newest_session(cwd)?;
-    let modified = file.metadata().ok()?.modified().ok()?;
-    Some(
-        modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_millis() as i64,
-    )
-}
-
-fn sessions_root() -> Option<PathBuf> {
-    let root = dirs::home_dir()?.join(".codex").join("sessions");
-    root.is_dir().then_some(root)
-}
-
-fn session_cache() -> &'static Mutex<HashMap<String, CachedSession>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, CachedSession>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn newest_session(cwd: &str) -> Option<PathBuf> {
-    if let Some(file) = session_cache().lock().ok().and_then(|cache| {
-        cache.get(cwd).and_then(|cached| {
-            (cached.checked_at.elapsed() < REFRESH_SESSION_PATH && cached.file.is_file())
-                .then(|| cached.file.clone())
-        })
-    }) {
-        return Some(file);
-    }
-    let root = sessions_root()?;
-    let now = std::time::SystemTime::now();
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    visit_rollouts(&root, &mut |file, modified| {
-        if now
-            .duration_since(modified)
-            .map(|age| age.as_secs() > SEARCH_MAX_AGE_SECS)
-            .unwrap_or(false)
-            || !session_cwd(file).is_some_and(|found| same_dir(&found, cwd))
-        {
-            return;
-        }
-        if best.as_ref().is_none_or(|(at, _)| modified > *at) {
-            best = Some((modified, file.to_path_buf()));
-        }
-    });
-    let file = best.map(|(_, file)| file)?;
-    if let Ok(mut cache) = session_cache().lock() {
-        cache.insert(
-            cwd.to_string(),
-            CachedSession {
-                file: file.clone(),
-                checked_at: Instant::now(),
-            },
-        );
-    }
-    Some(file)
-}
-
-fn visit_rollouts(dir: &Path, visit: &mut impl FnMut(&Path, std::time::SystemTime)) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            visit_rollouts(&path, visit);
-            continue;
-        }
-        if !path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
-        {
-            continue;
-        }
-        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
-            continue;
-        };
-        visit(&path, modified);
-    }
-}
-
-fn session_cwd(file: &Path) -> Option<String> {
-    let reader = BufReader::new(fs::File::open(file).ok()?);
-    for line in reader.lines().take(8).flatten() {
-        let value = serde_json::from_str::<Value>(&line).ok()?;
-        if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-            continue;
-        }
-        return value
-            .get("payload")
-            .and_then(|payload| payload.get("cwd"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-    }
-    None
-}
+use super::{clip_output, merge_assistant_steps, push_part, Message, Part, Transcript, Working};
 
 fn session_id(file: &Path) -> Option<String> {
-    let reader = BufReader::new(fs::File::open(file).ok()?);
-    for line in reader.lines().take(8).flatten() {
+    let reader = BufReader::new(fs::File::open(file).ok()?.take(192 * 1024));
+    for line in reader.lines().take(8).map_while(Result::ok) {
         let value = serde_json::from_str::<Value>(&line).ok()?;
         if value.get("type").and_then(Value::as_str) != Some("session_meta") {
             continue;
@@ -146,64 +30,83 @@ fn session_id(file: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse(file: &Path, session_id: String) -> Option<Transcript> {
-    let text = fs::read_to_string(file).ok()?;
-    parse_text(&text, session_id)
+#[derive(Default)]
+struct ParseState {
+    sequence: usize,
+    steps: Vec<Message>,
+    pending_tools: HashMap<String, (usize, usize)>,
+    working: Option<Working>,
 }
 
-fn parse_text(text: &str, session_id: String) -> Option<Transcript> {
-    let mut steps = Vec::new();
-    let mut pending_tools: HashMap<String, (usize, usize)> = HashMap::new();
-    let mut revision = 0;
-    let mut working = None;
+pub(super) fn read_file(file: &Path) -> Option<std::sync::Arc<Transcript>> {
+    static CACHE: OnceLock<super::jsonl::ReaderCache<ParseState>> = OnceLock::new();
+    CACHE
+        .get_or_init(super::jsonl::ReaderCache::new)
+        .read(file, || session_id(file))
+}
 
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        revision = revision.max(timestamp(&value));
-        match value.get("type").and_then(Value::as_str) {
-            Some("response_item") => response_item(
-                value.get("payload").unwrap_or(&Value::Null),
-                timestamp(&value),
-                &mut steps,
-                &mut pending_tools,
-            ),
-            Some("event_msg") => match value
-                .get("payload")
-                .and_then(|payload| payload.get("type"))
-                .and_then(Value::as_str)
-            {
-                Some("task_started") => {
-                    working = value
-                        .get("payload")
-                        .and_then(|payload| payload.get("started_at"))
-                        .and_then(Value::as_i64)
-                        .map(|seconds| Working {
-                            since: seconds.saturating_mul(1000),
-                        });
-                }
-                Some("task_complete") | Some("turn_aborted") => working = None,
+impl super::jsonl::JsonlState for ParseState {
+    fn ingest(&mut self, text: &str) {
+        let mut steps = std::mem::take(&mut self.steps);
+        let mut pending_tools = std::mem::take(&mut self.pending_tools);
+        let mut working = self.working.take();
+
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            self.sequence += 1;
+            match value.get("type").and_then(Value::as_str) {
+                Some("response_item") => response_item(
+                    value.get("payload").unwrap_or(&Value::Null),
+                    timestamp(&value),
+                    &mut steps,
+                    &mut pending_tools,
+                    self.sequence,
+                ),
+                Some("event_msg") => match value
+                    .get("payload")
+                    .and_then(|payload| payload.get("type"))
+                    .and_then(Value::as_str)
+                {
+                    Some("task_started") => {
+                        let since = value
+                            .get("payload")
+                            .and_then(|payload| payload.get("started_at"))
+                            .and_then(Value::as_i64)
+                            .map(|seconds| seconds.saturating_mul(1000))
+                            .unwrap_or_else(|| timestamp(&value));
+                        working = Some(Working { since });
+                    }
+                    Some("task_complete") | Some("turn_aborted") => working = None,
+                    _ => {}
+                },
                 _ => {}
-            },
-            _ => {}
+            }
         }
+
+        super::jsonl::compact_steps(&mut steps, &mut pending_tools);
+        self.steps = steps;
+        self.pending_tools = pending_tools;
+        self.working = working;
     }
 
-    if steps.is_empty() {
-        return None;
-    }
+    fn snapshot(&self, session_id: String, revision: i64) -> Option<Transcript> {
+        if self.steps.is_empty() {
+            return None;
+        }
 
-    Some(Transcript {
-        source: "codex",
-        session_id,
-        title: None,
-        mode: None,
-        model: None,
-        messages: merge_assistant_steps(steps),
-        working,
-        revision,
-    })
+        Some(Transcript {
+            source: "codex",
+            session_id,
+            title: None,
+            mode: None,
+            model: None,
+            messages: merge_assistant_steps(self.steps.clone()),
+            working: self.working.clone(),
+            revision,
+        })
+    }
 }
 
 fn response_item(
@@ -211,11 +114,12 @@ fn response_item(
     at: i64,
     steps: &mut Vec<Message>,
     pending_tools: &mut HashMap<String, (usize, usize)>,
+    sequence: usize,
 ) {
     match item.get("type").and_then(Value::as_str) {
         Some("message") => match item.get("role").and_then(Value::as_str) {
-            Some("user") => push_message(steps, "user", item, at),
-            Some("assistant") => push_message(steps, "assistant", item, at),
+            Some("user") => push_message(steps, "user", item, at, sequence),
+            Some("assistant") => push_message(steps, "assistant", item, at, sequence),
             _ => {}
         },
         Some("reasoning") => {
@@ -227,7 +131,7 @@ fn response_item(
                 return;
             }
             steps.push(Message {
-                id: item_id(item, steps.len()),
+                id: item_id(item, sequence),
                 role: "assistant",
                 at,
                 text: String::new(),
@@ -246,7 +150,7 @@ fn response_item(
                 .and_then(subject);
             let step = steps.len();
             steps.push(Message {
-                id: item_id(item, step),
+                id: item_id(item, sequence),
                 role: "assistant",
                 at,
                 text: String::new(),
@@ -298,7 +202,13 @@ fn response_item(
     }
 }
 
-fn push_message(steps: &mut Vec<Message>, role: &'static str, item: &Value, at: i64) {
+fn push_message(
+    steps: &mut Vec<Message>,
+    role: &'static str,
+    item: &Value,
+    at: i64,
+    sequence: usize,
+) {
     let text = item
         .get("content")
         .and_then(message_text)
@@ -311,7 +221,7 @@ fn push_message(steps: &mut Vec<Message>, role: &'static str, item: &Value, at: 
         push_part(&mut parts, Part::Text { text: text.clone() });
     }
     steps.push(Message {
-        id: item_id(item, steps.len()),
+        id: item_id(item, sequence),
         role,
         at,
         text,

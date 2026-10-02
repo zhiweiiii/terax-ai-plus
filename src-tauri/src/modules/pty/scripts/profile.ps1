@@ -66,7 +66,8 @@ function global:__terax_install_readline {
                 $esc = [char]27
                 $cmd = $line -replace '[\x00-\x1F\x7F]', ' '
                 if ($cmd.Length -gt 256) { $cmd = $cmd.Substring(0, 256) }
-                [Console]::Write("$esc]133;C;$cmd$esc\")
+                $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                [Console]::Write("$esc]133;C;terax-start=$started;$cmd$esc\")
             }
         } catch {}
         $line

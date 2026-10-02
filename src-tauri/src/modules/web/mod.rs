@@ -13,6 +13,7 @@
 //!     '1' + JSON         → resize { "cols": N, "rows": N } (kept for
 //!                          completeness; the current page never sends it —
 //!                          the desktop owns the PTY size)
+//!     JSON submit {id, text, leafId} receives a writeAck after flushing.
 //!     '2' + bytes        → submit text followed by Enter; bracket Codex input
 //!                          so its paste-burst detector cannot absorb Enter
 //!   Later (text):        { "attach": <id> }        → switch session
@@ -33,11 +34,11 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::mpsc::SyncSender;
-use std::sync::{Mutex, OnceLock};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -88,10 +89,10 @@ const OBFUSCATION_KEY: [u8; 5] = [0x53, 0x2a, 0x7c, 0x91, 0x0d];
 /// their own. `auth::session_token` rotates a stored one on every change.
 pub(crate) fn legacy_token() -> String {
     const ENCODED: [u8; 48] = [
-        0x6b, 0x13, 0x4d, 0xa1, 0x69, 0x30, 0x4e, 0x4a, 0xa8, 0x38, 0x64, 0x4c,
-        0x19, 0xf3, 0x68, 0x63, 0x1c, 0x1d, 0xa4, 0x35, 0x61, 0x4e, 0x18, 0xf7,
-        0x3f, 0x32, 0x18, 0x4f, 0xf5, 0x6b, 0x60, 0x48, 0x19, 0xa3, 0x3e, 0x65,
-        0x1d, 0x1e, 0xf4, 0x35, 0x61, 0x4b, 0x1a, 0xa4, 0x3d, 0x62, 0x19, 0x4c,
+        0x6b, 0x13, 0x4d, 0xa1, 0x69, 0x30, 0x4e, 0x4a, 0xa8, 0x38, 0x64, 0x4c, 0x19, 0xf3, 0x68,
+        0x63, 0x1c, 0x1d, 0xa4, 0x35, 0x61, 0x4e, 0x18, 0xf7, 0x3f, 0x32, 0x18, 0x4f, 0xf5, 0x6b,
+        0x60, 0x48, 0x19, 0xa3, 0x3e, 0x65, 0x1d, 0x1e, 0xf4, 0x35, 0x61, 0x4b, 0x1a, 0xa4, 0x3d,
+        0x62, 0x19, 0x4c,
     ];
     String::from_utf8(deobfuscate(&ENCODED)).expect("web token is ascii")
 }
@@ -101,8 +102,8 @@ pub(crate) fn legacy_token() -> String {
 /// predates stored credentials is not locked out by an update.
 fn expected_digest() -> Vec<u8> {
     const ENCODED: [u8; 20] = [
-        0x1c, 0x0a, 0x53, 0x33, 0xdf, 0x92, 0x31, 0x77, 0x18, 0xc1,
-        0x32, 0xba, 0xab, 0x4d, 0xfc, 0xca, 0x2e, 0xc0, 0x92, 0xe0,
+        0x1c, 0x0a, 0x53, 0x33, 0xdf, 0x92, 0x31, 0x77, 0x18, 0xc1, 0x32, 0xba, 0xab, 0x4d, 0xfc,
+        0xca, 0x2e, 0xc0, 0x92, 0xe0,
     ];
     deobfuscate(&ENCODED)
 }
@@ -137,17 +138,14 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Live WebSocket connections; /ws is rejected once MAX_CONNECTIONS is hit so
 /// a runaway client can't pile up unbounded threads.
-static CONNECTIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const MAX_CONNECTIONS: usize = 8;
 
 /// Failed login attempts since boot (rate limit: >=5 consecutive fails = 5s
 /// delay before the next attempt is even evaluated).
-static FAILED_LOGINS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static FAILED_LOGINS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Timestamp (Instant millis) of the last failed login, for the lockout.
-static LAST_FAIL: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static LAST_FAIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Start the web terminal server on 0.0.0.0:34269 (dev) / 34268 (release).
 /// Returns an error only if the port cannot be bound; the accept loop runs on
@@ -160,9 +158,8 @@ pub fn start(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(state) = app.try_state::<PtyState>() {
         state.web_ensure_session(&app);
     }
-    let listener = TcpListener::bind((BIND_ADDR, PORT)).map_err(|e| {
-        format!("web terminal: failed to bind {BIND_ADDR}:{PORT}: {e}")
-    })?;
+    let listener = TcpListener::bind((BIND_ADDR, PORT))
+        .map_err(|e| format!("web terminal: failed to bind {BIND_ADDR}:{PORT}: {e}"))?;
     log::info!("web terminal server listening on http://{BIND_ADDR}:{PORT}");
     RUNNING.store(true, Ordering::Release);
     thread::Builder::new()
@@ -342,9 +339,7 @@ impl WsConn {
         // draining session output between polls. Partial frames stay in
         // `buffer` until they are complete — a fragmented frame is never
         // lost, so quiet phones no longer get disconnected (issue #41).
-        stream
-            .set_nonblocking(true)
-            .map_err(|e| e.to_string())?;
+        stream.set_nonblocking(true).map_err(|e| e.to_string())?;
 
         let terminator = head
             .windows(4)
@@ -538,9 +533,7 @@ impl WsConn {
 // ──────────────────────────────────────────────────────────────────────────
 
 fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     // Read the complete request head (up to \r\n\r\n). Any bytes past the
     // terminator belong to the WebSocket stream and are kept in `head`.
     let mut head = Vec::with_capacity(2048);
@@ -648,8 +641,7 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
         let ok = auth::verify(&pwd);
         if ok {
             FAILED_LOGINS.store(0, Ordering::Release);
-            let body =
-                "<html><body><p>OK</p><script>location.href='/'</script></body></html>";
+            let body = "<html><body><p>OK</p><script>location.href='/'</script></body></html>";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
                  Set-Cookie: terax_web={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800\r\n\
@@ -669,7 +661,8 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
                     .unwrap_or(0),
                 Ordering::Release,
             );
-            let body = "<html><body><p>wrong password</p><script>history.back()</script></body></html>";
+            let body =
+                "<html><body><p>wrong password</p><script>history.back()</script></body></html>";
             let response = format!(
                 "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/html; charset=utf-8\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n",
@@ -822,8 +815,9 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
     // cached: a shell can cd, and a transcript read against where the terminal
     // used to be is a conversation from another project.
     let mut transcript_mark: Option<i64> = None;
-    let mut transcript_rev: i64 = -1;
+    let mut transcript_rev: Option<(String, i64)> = None;
     let mut last_transcript = std::time::Instant::now();
+    let mut last_web_agent: Option<String> = None;
     // Queued commands. The clock runs in the schedule module, not here; this
     // connection only mirrors the list, and compares a revision counter so an
     // untouched queue costs one atomic read per tick.
@@ -855,8 +849,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         // before the next bytes, which are laid out against it.
                         let _ = send_text(
                             &mut conn,
-                            &json!({ "type": "resized", "cols": cols, "rows": rows })
-                                .to_string(),
+                            &json!({ "type": "resized", "cols": cols, "rows": rows }).to_string(),
                         );
                     }
                     Ok(WebMsg::Exited(code)) => {
@@ -864,8 +857,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         // subscription so the stale viewer table stays clean.
                         let _ = send_text(
                             &mut conn,
-                            &json!({ "type": "exit", "id": attached_id, "code": code })
-                                .to_string(),
+                            &json!({ "type": "exit", "id": attached_id, "code": code }).to_string(),
                         );
                         session.web_unsubscribe(tx);
                         attached_id = None;
@@ -887,16 +879,29 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
         }
 
         // Follow the agent's transcript. Polled rather than watched: one of
-        // the two backends is a SQLite database whose commits land in a
+        // the backends is a SQLite database whose commits land in a
         // write-ahead log, which no filesystem event describes usefully.
         if last_transcript.elapsed() >= TRANSCRIPT_POLL {
             last_transcript = std::time::Instant::now();
-            let agent = attached.as_ref().and_then(|(s, _, _)| s.web_agent());
+            let agent = attached
+                .as_ref()
+                .and_then(|(session, _, _)| session.web_agent());
+            if agent != last_web_agent {
+                last_web_agent = agent;
+                if send_text(
+                    &mut conn,
+                    &json!({ "type": "agent", "agent": last_web_agent }).to_string(),
+                )
+                .is_err()
+                {
+                    break;
+                }
+            }
             let cwd = attached_id.and_then(|id| state.web_leaf_cwd(id));
             push_transcript(
                 &mut conn,
                 cwd.as_deref(),
-                agent.as_deref(),
+                attached.as_ref().map(|(session, _, _)| session),
                 &mut transcript_mark,
                 &mut transcript_rev,
             );
@@ -1017,6 +1022,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     // for the case where no seed came back.
                     let seed = request_snapshot(&app, leaf_id);
                     let (cols, rows) = session.size();
+                    last_web_agent = session.web_agent();
                     let _ = send_text(
                         &mut conn,
                         &json!({
@@ -1025,6 +1031,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                             "cols": cols,
                             "rows": rows,
                             "alt": session.web_in_alt(),
+                            "agent": last_web_agent,
                             // Whether a seed frame follows this message.
                             "seed": seed.is_some(),
                         })
@@ -1042,8 +1049,29 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     attached_id = Some(leaf_id);
                     attached = Some((session, tx, rx));
                     transcript_mark = None;
-                    transcript_rev = -1;
+                    transcript_rev = None;
                     last_transcript = std::time::Instant::now();
+                } else if let Some(req) = parsed.get("submit") {
+                    let id = req.get("id").and_then(Value::as_str).unwrap_or_default();
+                    let target = req.get("leafId").and_then(Value::as_u64);
+                    let result = match attached.as_ref() {
+                        Some((session, _, _)) if target == attached_id.map(u64::from) => {
+                            if web_grid.is_some() {
+                                if let Some((cols, rows)) = session.claim(SizeOwner::Web) {
+                                    let _ = app.emit(
+                                        pty::PTY_RESIZED_EVENT,
+                                        json!({ "leafId": attached_id, "cols": cols, "rows": rows }),
+                                    );
+                                }
+                            }
+                            match req.get("text").and_then(Value::as_str) {
+                                Some(text) => session.web_submit(id, text),
+                                None => Err("missing submission text".to_string()),
+                            }
+                        }
+                        _ => Err("terminal attachment changed".to_string()),
+                    };
+                    let _ = send_text(&mut conn, &json!({ "type": "writeAck", "requestId": id, "accepted": result.is_ok(), "message": result.err() }).to_string());
                 } else if parsed.get("list").and_then(|v| v.as_bool()) == Some(true) {
                     send_sessions(&mut conn, &state);
                 } else if let Some(req) = parsed.get("scheduleAdd") {
@@ -1058,16 +1086,25 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string();
-                            let secs =
-                                req.get("delaySeconds").and_then(|v| v.as_u64()).unwrap_or(0);
-                            app.state::<schedule::ScheduleState>().add(
-                                leaf,
-                                command,
-                                Duration::from_secs(secs),
-                            )
-                            .map(|_| ())
+                            let secs = req
+                                .get("delaySeconds")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            app.state::<schedule::ScheduleState>()
+                                .add(leaf, command, Duration::from_secs(secs))
+                                .map(|_| ())
                         }
                     };
+                    if let Some(id) = req
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| id.len() <= 128)
+                    {
+                        let _ = send_text(
+                            &mut conn,
+                            &json!({ "type": "scheduleAck", "requestId": id, "accepted": outcome.is_ok(), "message": outcome.as_ref().err() }).to_string(),
+                        );
+                    }
                     if let Err(reason) = outcome {
                         let _ = send_error(&mut conn, &reason);
                     } else {
@@ -1078,7 +1115,9 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     }
                 } else if let Some(id) = parsed.get("scheduleCancel").and_then(|v| v.as_u64()) {
                     let result = app.state::<schedule::ScheduleState>().cancel(id);
-                    if let Err(reason) = &result { let _ = send_error(&mut conn, reason); }
+                    if let Err(reason) = &result {
+                        let _ = send_error(&mut conn, reason);
+                    }
                     if matches!(result, Ok(true)) {
                         let _ = app.emit(
                             schedule::SCHEDULE_EVENT,
@@ -1112,18 +1151,27 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         let codex_submit = cmd == b'2'
                             && session.web_agent().as_deref() == Some("codex")
                             && !data.windows(6).any(|part| part == b"\x1b[201~");
-                        let mut w = session.writer.lock().unwrap();
-                        if codex_submit {
-                            let _ = w.write_all(b"\x1b[200~");
+                        let result = (|| -> std::io::Result<()> {
+                            let mut w = session
+                                .writer
+                                .lock()
+                                .map_err(|_| std::io::Error::other("terminal input unavailable"))?;
+                            if codex_submit {
+                                w.write_all(b"\x1b[200~")?;
+                            }
+                            w.write_all(data)?;
+                            if codex_submit {
+                                w.write_all(b"\x1b[201~")?;
+                            }
+                            if cmd == b'2' {
+                                w.write_all(b"\r")?;
+                            }
+                            w.flush()
+                        })();
+                        if let Err(error) = result {
+                            let _ =
+                                send_error(&mut conn, &format!("terminal write failed: {error}"));
                         }
-                        let _ = w.write_all(data);
-                        if codex_submit {
-                            let _ = w.write_all(b"\x1b[201~");
-                        }
-                        if cmd == b'2' {
-                            let _ = w.write_all(b"\r");
-                        }
-                        let _ = w.flush();
                     }
                     b'1' => {
                         if let Ok(v) = serde_json::from_slice::<Value>(data) {
@@ -1180,29 +1228,43 @@ const TRANSCRIPT_POLL: Duration = Duration::from_millis(700);
 fn push_transcript(
     conn: &mut WsConn,
     cwd: Option<&str>,
-    agent: Option<&str>,
+    session: Option<&Arc<Session>>,
     mark: &mut Option<i64>,
-    revision: &mut i64,
+    revision: &mut Option<(String, i64)>,
 ) {
     // No agent running means no transcript, whatever this directory has on
     // disk from an earlier session: showing yesterday's conversation over
     // today's shell prompt would be a lie about what is in front of you.
-    let (Some(cwd), Some(agent)) = (cwd, agent) else {
+    let agent = session.and_then(|session| session.web_agent());
+    let (Some(cwd), Some(agent), Some(session)) = (cwd, agent.as_deref(), session) else {
+        if revision.take().is_some() {
+            let _ = send_text(conn, &json!({ "type": "transcriptClear" }).to_string());
+        }
+        *mark = None;
         return;
     };
-    let found = transcript::fingerprint(cwd, Some(agent));
-    if found.is_some() && found == *mark {
-        return;
-    }
-    *mark = found;
-    let Some(t) = transcript::read(cwd, Some(agent)) else {
+    let t = if agent == "opencode" {
+        let found = transcript::opencode_fingerprint();
+        if found.is_some() && found == *mark {
+            return;
+        }
+        *mark = found;
+        transcript::read_opencode(cwd)
+    } else {
+        session.web_transcript(cwd, agent)
+    };
+    let Some(t) = t else {
+        if revision.take().is_some() {
+            let _ = send_text(conn, &json!({ "type": "transcriptClear" }).to_string());
+        }
         return;
     };
-    if t.revision == *revision {
+    let token = (format!("{}:{}", t.source, t.session_id), t.revision);
+    if revision.as_ref() == Some(&token) {
         return;
     }
-    *revision = t.revision;
-    let Ok(mut payload) = serde_json::to_value(&t) else {
+    *revision = Some(token);
+    let Ok(mut payload) = serde_json::to_value(t.as_ref()) else {
         return;
     };
     if let Some(obj) = payload.as_object_mut() {
@@ -1237,5 +1299,8 @@ fn send_text(conn: &mut WsConn, text: &str) -> Result<(), ()> {
 }
 
 fn send_error(conn: &mut WsConn, message: &str) -> Result<(), ()> {
-    send_text(conn, &json!({ "type": "error", "message": message }).to_string())
+    send_text(
+        conn,
+        &json!({ "type": "error", "message": message }).to_string(),
+    )
 }

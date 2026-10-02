@@ -3,22 +3,26 @@ import {
   Conversation,
   sameMessage,
   type Turn,
-} from "./conversation";
-import { renderMarkdown } from "./markdown";
-import "./style.css";
+} from "@/web/conversation";
+import { copyButton } from "@/web/clipboard";
+import { patchChildren } from "@/web/dom";
+import { renderMarkdown } from "@/web/markdown";
+import "@/web/style.css";
 
 // ── WebSocket wire protocol (see src-tauri/src/modules/web/mod.rs) ──────
 // client → server:
 //   first text: { "attach": <id> } or { "list": true }
 //   binary:     '0' + bytes        → write input
-//   text:       { "scheduleAdd": { command, delaySeconds } } → queue a command
+//   text:       { "scheduleAdd": { id, command, delaySeconds } } → queue a command
 //               { "scheduleCancel": <job id> }
 //               '1' + JSON         → resize { "cols": N, "rows": N }
 // server → client:
 //   binary '0' + bytes             → terminal output (seed frame first)
 //   text: { "type": "sessions", "sessions": [...], "spaces": [...] }
 //         { "type": "attached", "id": N, "cols": C, "rows": R, "alt": bool,
-//                               "seed": bool }
+//                               "seed": bool, "agent": string | null }
+//         { "type": "agent", "agent": string | null }
+//         { "type": "scheduleAck", "requestId": string, "accepted": bool }
 //         { "type": "opening", "id": N }
 //         { "type": "resized", "cols": C, "rows": R }
 //         { "type": "exit", "id": N, "code": C }
@@ -134,6 +138,9 @@ type ServerMsg = {
   alt?: boolean;
   seed?: boolean;
   message?: string;
+  requestId?: string;
+  accepted?: boolean;
+  agent?: string | null;
   sessions?: SessionInfo[];
   spaces?: SpaceInfo[];
 };
@@ -159,9 +166,72 @@ let transcript: TranscriptMsg | null = null;
  *  against what arrived AFTER the send. See `transcriptRecorded`. */
 type Awaiting = { text: string; afterId: string | null };
 let awaitingTranscript: Awaiting[] = [];
+type Submission = {
+  id: string;
+  text: string;
+  leafId: number;
+  afterId: string | null;
+};
+let pendingSubmission: Submission | null = null;
+let uncertainSubmission: Submission | null = null;
+let submissionTimer: number | null = null;
+
+function finishSubmission(accepted: boolean, message?: string): void {
+  const pending = pendingSubmission;
+  if (!pending) return;
+  pendingSubmission = null;
+  if (submissionTimer !== null) window.clearTimeout(submissionTimer);
+  submissionTimer = null;
+  $("#btn-send").removeAttribute("disabled");
+  if (!accepted) {
+    uncertainSubmission = pending;
+    toast(message || "发送未确认，内容已保留，请先检查终端");
+    return;
+  }
+  uncertainSubmission = null;
+  if (attachedId === pending.leafId) {
+    conv.noteSent(pending.text);
+    if (
+      transcript &&
+      !transcriptRecorded(transcript, {
+        text: pending.text,
+        afterId: pending.afterId,
+      })
+    ) {
+      awaitingTranscript.push({ text: pending.text, afterId: pending.afterId });
+    }
+    followToBottom();
+  }
+  if (attachedId === pending.leafId && inputEl.value === pending.text) {
+    inputEl.value = "";
+    autoGrow();
+  }
+  toast("已写入终端");
+}
 
 /** Commands queued to run later, as the server last reported them. */
 let schedules: ScheduledJob[] = [];
+let knownSessions: SessionInfo[] = [];
+let pendingSchedule: { id: string; text: string; leafId: number } | null = null;
+let scheduleTimer: number | null = null;
+
+function finishSchedule(accepted: boolean, message?: string) {
+  const pending = pendingSchedule;
+  if (!pending) return;
+  pendingSchedule = null;
+  if (scheduleTimer !== null) window.clearTimeout(scheduleTimer);
+  scheduleTimer = null;
+  $("#sched-go").removeAttribute("disabled");
+  if (!accepted) {
+    toast(message || "定时任务结果未确认，内容已保留，请检查任务列表");
+    return;
+  }
+  if (attachedId === pending.leafId && inputEl.value === pending.text) {
+    inputEl.value = "";
+    autoGrow();
+  }
+  toast("定时任务已保存");
+}
 
 /** The grid the parser falls back to if the server ever omits one. The phone
  *  does not have a grid of its own to want: it renders no terminal, so any
@@ -198,6 +268,7 @@ app.innerHTML = `
   </div>
   <div class="composer">
     <button id="to-bottom" class="to-bottom" hidden>回到最新 ↓</button>
+    <div class="composer-panels">
     <div id="thinking" class="thinking" hidden></div>
     <div id="choices" class="choices" hidden></div>
     <div id="sched" class="sched" hidden>
@@ -213,6 +284,8 @@ app.innerHTML = `
       <div id="sched-list" class="sched-list"></div>
     </div>
     <div id="progstatus" class="progstatus" hidden></div>
+    </div>
+    <div class="composer-actions">
     <div class="keyrow">
       <button class="key-btn" data-ctrl="3">Ctrl+C</button>
       <button class="key-btn" data-ctrl="4">Ctrl+D</button>
@@ -222,12 +295,14 @@ app.innerHTML = `
       <button class="key-btn" data-seq="up">↑</button>
       <button class="key-btn" data-seq="down">↓</button>
       <button class="key-btn" data-ctrl="13">↵</button>
-      <button id="btn-sched" class="key-btn" title="定时发送">⏱</button>
     </div>
+      <button id="btn-sched" class="key-btn" type="button" aria-expanded="false">定时发送</button>
+    </div>
+    <div class="composer-hint">回车换行 · 按键可横滑 · Ctrl+Enter 发送</div>
     <div class="inputrow">
       <textarea id="input" class="input" rows="1" placeholder="输入命令或消息…"
-        autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
-      <button id="btn-send" class="send-btn" title="发送">↑</button>
+        aria-label="命令或消息" enterkeyhint="enter" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
+      <button id="btn-send" class="send-btn" type="button" aria-label="发送消息">发送</button>
     </div>
   </div>
   <div id="sheet" class="sheet" hidden>
@@ -287,8 +362,34 @@ const conv = new Conversation(() => {
  *  updated in place instead of rebuilding the whole thread on every chunk. */
 const nodes = new Map<number, HTMLElement>();
 
+function readingAnchor(): { node: Element; top: number } | null {
+  if (pinnedToBottom) return null;
+  const top = threadEl.getBoundingClientRect().top;
+  for (const group of [turnsEl, pendingEl, liveBlocksEl]) {
+    for (const node of group.children) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom > top) return { node, top: rect.top };
+    }
+  }
+  return null;
+}
+
 function render() {
+  const session = knownSessions.find((item) => item.id === attachedId);
+  const program = transcript?.source ?? conv.program;
+  const name =
+    program === "codex"
+      ? "Codex"
+      : program === "claude"
+        ? "Claude Code"
+        : program;
+  const path = session?.cwd?.split(/[\\/]/).filter(Boolean).pop();
+  const label = session?.title || path;
+  $("#title").textContent =
+    [name, label].filter(Boolean).join(" · ") || "Terax";
+  $("#title").title = session?.cwd ?? label ?? "Terax";
   const stick = pinnedToBottom;
+  const anchor = readingAnchor();
   if (transcript) {
     renderTranscript(transcript);
   } else {
@@ -306,6 +407,8 @@ function render() {
   streamEl.dataset.order = transcript ? "transcript" : "screen";
   paintLiveScreen();
   if (stick) scrollToBottom();
+  else if (anchor?.node.isConnected)
+    threadEl.scrollTop += anchor.node.getBoundingClientRect().top - anchor.top;
 }
 
 /** Rendered transcript turns, keyed by message id. */
@@ -383,41 +486,56 @@ function toolNode(
     subject.textContent = part.subject;
     head.appendChild(subject);
   }
+  const state = document.createElement("span");
+  state.className = "tool-state";
+  state.textContent = part.failed
+    ? "失败"
+    : part.output == null
+      ? "等待结果"
+      : "完成";
+  head.appendChild(state);
   box.appendChild(head);
 
-  if (part.output) {
+  if (part.output != null) {
+    const details = document.createElement("details");
+    details.className = "tool-result";
+    const summary = document.createElement("summary");
+    const lines = part.output === "" ? 0 : part.output.split("\n").length;
+    summary.textContent = `输出预览 · ${lines} 行${part.failed ? " · 执行失败" : ""}`;
     const out = document.createElement("pre");
     out.className = "tool-out";
     out.textContent = part.output;
-    box.appendChild(out);
+    const actions = document.createElement("div");
+    actions.className = "tool-actions";
+    actions.appendChild(
+      copyButton(() => box.querySelector(".tool-out")?.textContent ?? ""),
+    );
+    details.append(summary, actions, out);
+    box.appendChild(details);
   }
   // Say what is missing rather than quietly showing less than there was.
   if (part.elided) {
     const more = document.createElement("div");
     more.className = "tool-more";
-    more.textContent = `+${part.elided} 行`;
+    more.textContent = `另有 ${part.elided} 行未传输，请在桌面查看完整输出`;
     box.appendChild(more);
   }
   return box;
 }
 
 function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
+  if (sameTranscriptMessage(transcriptPainted.get(node), m)) return;
+  transcriptPainted.set(node, m);
   const parts = m.parts ?? [];
-  const shape = parts
-    .map((p) =>
-      p.kind === "text"
-        ? `t${p.text.length}`
-        : `x${p.name}:${p.subject ?? ""}:${p.output?.length ?? -1}`,
-    )
-    .join("|");
-  const sig = `${m.role}:${m.text.length}:${m.reasoning?.length ?? 0}:${shape}`;
-  if (painted.get(node) === sig) return;
-  painted.set(node, sig);
   // `transcript` marks prose the agent WROTE, as opposed to output a
   // program PAINTED. They are different kinds of text and get different
   // typography: one is a message, the other is a terminal.
   node.className = m.role === "user" ? "turn sent" : "turn output transcript";
-  node.replaceChildren();
+  if (m.role === "user") {
+    if (node.textContent !== m.text) node.textContent = m.text;
+    return;
+  }
+  const content = document.createDocumentFragment();
 
   // A turn is prose, the tools that prose led to, then more prose. Drawing all
   // of the text and then all of the chips was the same turn in the wrong
@@ -428,13 +546,13 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
   // A user turn carries no parts — its whole content is `text` — and the
   // fallback also covers a transcript from a server that predates `parts`.
   if (parts.length > 0) {
-    for (const part of parts) {
-      node.appendChild(
-        part.kind === "text" ? proseNode(part.text) : toolNode(part),
-      );
+    for (const [index, part] of parts.entries()) {
+      const item = part.kind === "text" ? proseNode(part.text) : toolNode(part);
+      item.dataset.key = `part-${index}`;
+      content.appendChild(item);
     }
   } else if (m.text) {
-    node.appendChild(proseNode(m.text));
+    content.appendChild(proseNode(m.text));
   }
   // What the agent worked through before answering. Set apart rather than
   // hidden: it is the most useful thing on the screen when an answer looks
@@ -442,13 +560,48 @@ function paintTranscriptMessage(node: HTMLElement, m: TranscriptMessage) {
   if (m.reasoning) {
     const think = document.createElement("details");
     think.className = "turn-think";
+    think.dataset.key = "reasoning";
     const summary = document.createElement("summary");
     summary.textContent = "思考过程";
     const text = document.createElement("div");
     renderMarkdown(text, m.reasoning);
     think.append(summary, text);
-    node.appendChild(think);
+    content.appendChild(think);
   }
+  patchChildren(node, Array.from(content.childNodes));
+}
+
+const transcriptPainted = new WeakMap<HTMLElement, TranscriptMessage>();
+
+function sameTranscriptMessage(
+  a: TranscriptMessage | undefined,
+  b: TranscriptMessage,
+): boolean {
+  if (
+    !a ||
+    a.role !== b.role ||
+    a.text !== b.text ||
+    a.reasoning !== b.reasoning
+  )
+    return false;
+  const left = a.parts ?? [];
+  const right = b.parts ?? [];
+  return (
+    left.length === right.length &&
+    left.every((part, index) => {
+      const other = right[index];
+      if (part.kind === "text")
+        return other.kind === "text" && part.text === other.text;
+      return (
+        other.kind === "tool" &&
+        part.name === other.name &&
+        part.subject === other.subject &&
+        part.output === other.output &&
+        part.failed === other.failed &&
+        part.elided === other.elided
+      );
+    })
+  );
 }
 
 function renderScreenTurns() {
@@ -501,13 +654,14 @@ function paintLiveScreen() {
       : isTurnInFlight()
         ? unsettledBlocks(transcript)
         : [];
-  const sig = blocks.map((b) => `${b.role}:${b.lines.join("\n")}`).join(" ");
+  const sig = JSON.stringify(blocks);
   if (liveBlocksEl.dataset.sig !== sig) {
     liveBlocksEl.dataset.sig = sig;
-    liveBlocksEl.replaceChildren(
-      ...blocks.map((b) => {
+    patchChildren(
+      liveBlocksEl,
+      blocks.map((b) => {
         const node = document.createElement("div");
-        node.className = b.role === "user" ? "turn sent" : "turn output";
+        node.className = b.role === "user" ? "turn sent" : outputClass(b.lines);
         node.textContent = b.lines.join("\n");
         return node;
       }),
@@ -519,7 +673,7 @@ function paintLiveScreen() {
   const pending = transcript
     ? awaitingTranscript.map((a) => a.text)
     : conv.pending;
-  const psig = pending.join(" ");
+  const psig = JSON.stringify(pending);
   if (pendingEl.dataset.sig !== psig) {
     pendingEl.dataset.sig = psig;
     pendingEl.replaceChildren(
@@ -541,9 +695,7 @@ function paintLiveScreen() {
   // The transcript states these; the screen only ever guessed them off a
   // status bar it had to find first, so its half is what needs holding.
   const mode = transcript?.mode ?? held("mode", conv.mode);
-  const status = transcript
-    ? (transcript.model ?? null)
-    : held("status", conv.status);
+  const status = transcript?.model ?? held("status", conv.status);
   const label = mode && status ? `${mode} · ${status}` : (mode ?? status);
   if (label) {
     if (progStatusEl.dataset.sig !== label) {
@@ -606,6 +758,7 @@ function paintLiveScreen() {
 const SCREEN_STATE_GRACE_MS = 2000;
 
 const lastSeen = new Map<string, { value: string; at: number }>();
+let heldTimer: number | null = null;
 
 /** Carry the last observed value through a short gap in observation. */
 function held(key: string, value: string | null): string | null {
@@ -615,6 +768,15 @@ function held(key: string, value: string | null): string | null {
   }
   const previous = lastSeen.get(key);
   if (previous && Date.now() - previous.at < SCREEN_STATE_GRACE_MS) {
+    if (heldTimer === null) {
+      heldTimer = window.setTimeout(
+        () => {
+          heldTimer = null;
+          render();
+        },
+        SCREEN_STATE_GRACE_MS - (Date.now() - previous.at),
+      );
+    }
     return previous.value;
   }
   lastSeen.delete(key);
@@ -696,7 +858,7 @@ function formatElapsed(seconds: number): string {
  *  answers twice reads as the program having said everything twice. */
 function paintChoices() {
   const choices = conv.choices;
-  const sig = choices.map((c) => `${c.key}:${c.label}:${c.selected}`).join("|");
+  const sig = JSON.stringify(choices);
   if (choicesEl.dataset.sig === sig) {
     choicesEl.hidden = choices.length === 0;
     return;
@@ -708,11 +870,13 @@ function paintChoices() {
     return;
   }
   choicesEl.hidden = false;
-  choicesEl.replaceChildren(
-    ...choices.map((c) => {
+  patchChildren(
+    choicesEl,
+    choices.map((c) => {
       const btn = document.createElement("button");
       btn.className = c.selected ? "choice-btn selected" : "choice-btn";
       btn.type = "button";
+      btn.dataset.key = c.key;
       const key = document.createElement("span");
       key.className = "choice-key";
       key.textContent = c.key;
@@ -731,8 +895,9 @@ function paintChoices() {
       btn.addEventListener("click", () => {
         // The menu is answered with the digit alone; these tools act on the
         // keypress and do not wait for Enter.
-        if (!writePty(c.key)) return;
-        conv.noteSent(c.key);
+        const key = btn.dataset.key;
+        if (!key || !writePty(key)) return;
+        conv.noteSent(key);
         followToBottom();
       });
       return btn;
@@ -753,10 +918,12 @@ function untilText(ms: number): string {
 
 function paintSchedules() {
   const now = Date.now();
-  schedListEl.replaceChildren(
-    ...schedules.map((job) => {
+  patchChildren(
+    schedListEl,
+    schedules.map((job) => {
       const row = document.createElement("div");
       row.className = "sched-item";
+      row.dataset.key = String(job.id);
 
       const when = document.createElement("span");
       when.className = "sched-when";
@@ -785,7 +952,13 @@ function paintSchedules() {
       drop.className = "sched-drop";
       drop.textContent = "✕";
       drop.setAttribute("aria-label", "取消");
-      drop.addEventListener("click", () => send({ scheduleCancel: job.id }));
+      drop.addEventListener("click", () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          toast("连接已断开，任务未取消");
+          return;
+        }
+        send({ scheduleCancel: job.id });
+      });
       row.appendChild(drop);
       return row;
     }),
@@ -803,10 +976,11 @@ function paintSchedules() {
 let schedTimer = 0;
 function setSchedOpen(open: boolean) {
   schedEl.hidden = !open;
+  $("#btn-sched").setAttribute("aria-expanded", String(open));
   if (open) {
     paintSchedules();
     if (!schedTimer) schedTimer = window.setInterval(paintSchedules, 1000);
-    followToBottom();
+    if (pinnedToBottom) scrollToBottom();
   } else if (schedTimer) {
     window.clearInterval(schedTimer);
     schedTimer = 0;
@@ -936,7 +1110,7 @@ function paint(node: HTMLElement, turn: Turn) {
   const sig =
     turn.kind === "sent" || turn.kind === "note"
       ? `${turn.kind}:${turn.text}`
-      : `output:${turn.lines.length}:${turn.lines[turn.lines.length - 1] ?? ""}:${turn.open}`;
+      : `output:${JSON.stringify(turn.lines)}:${turn.open}`;
   if (painted.get(node) === sig) return;
   painted.set(node, sig);
 
@@ -950,8 +1124,17 @@ function paint(node: HTMLElement, turn: Turn) {
     node.textContent = turn.text;
     return;
   }
-  node.className = `turn output${turn.open ? " live" : ""}`;
+  node.className = `${outputClass(turn.lines)}${turn.open ? " live" : ""}`;
   node.textContent = turn.lines.join("\n");
+}
+
+function outputClass(lines: string[]): string {
+  const grid = lines.some((line) =>
+    /^\s*(?:diff --git|@@|[+-]{3} [ab]\/|[├└│])|\S[ \t]{3,}\S|\|.+\|/.test(
+      line,
+    ),
+  );
+  return grid ? "turn output grid" : "turn output";
 }
 
 /** Advance the working indicator between transcript polls.
@@ -1033,18 +1216,33 @@ function followToBottom() {
 // visual viewport instead.
 const viewport = window.visualViewport;
 if (viewport) {
-  let lastHeight = 0;
+  let viewportQueued = false;
   const applyViewport = () => {
+    viewportQueued = false;
     if ((viewport.scale ?? 1) > 1.01) return;
     const height = Math.round(viewport.height);
-    if (Math.abs(height - lastHeight) < 2) return;
-    lastHeight = height;
-    app.style.height = `${height}px`;
+    app.style.setProperty("--app-height", `${height}px`);
+    app.style.setProperty("--app-width", `${Math.round(viewport.width)}px`);
+    app.style.setProperty("--app-top", `${Math.round(viewport.offsetTop)}px`);
+    app.style.setProperty("--app-left", `${Math.round(viewport.offsetLeft)}px`);
+    app.dataset.keyboard = String(window.innerHeight - height > 100);
+    app.dataset.compact = String(height < 500);
     if (pinnedToBottom) scrollToBottom();
   };
-  viewport.addEventListener("resize", applyViewport);
+  const queueViewport = () => {
+    if (viewportQueued) return;
+    viewportQueued = true;
+    requestAnimationFrame(applyViewport);
+  };
+  viewport.addEventListener("resize", queueViewport);
+  viewport.addEventListener("scroll", queueViewport);
+  window.addEventListener("resize", queueViewport);
   applyViewport();
 }
+
+new ResizeObserver(() => {
+  if (pinnedToBottom) scrollToBottom();
+}).observe(threadEl);
 
 // ── WebSocket ────────────────────────────────────────────────────────────
 const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -1064,10 +1262,12 @@ function setStatus(text: string, tone: "ok" | "err" | "warn" = "ok") {
   statusEl.dataset.tone = tone;
 }
 
+let toastTimer: number | null = null;
 function toast(text: string) {
+  if (toastTimer !== null) window.clearTimeout(toastTimer);
   toastEl.textContent = text;
   toastEl.hidden = false;
-  window.setTimeout(() => {
+  toastTimer = window.setTimeout(() => {
     toastEl.hidden = true;
   }, 2500);
 }
@@ -1097,6 +1297,7 @@ function connect() {
       return;
     }
     const bytes = new Uint8Array(ev.data as ArrayBuffer);
+    if (attachedId === null) return;
     if (bytes.length === 0) return;
     if (bytes[0] !== 0x30 /* '0' */) return;
     const payload = bytes.subarray(1);
@@ -1112,6 +1313,8 @@ function connect() {
   ws.onclose = () => {
     if (mySeq !== wsSeq) return;
     setStatus("已断开", "err");
+    finishSubmission(false, "连接中断，发送结果未确认，内容已保留");
+    finishSchedule(false, "连接中断，定时任务结果未确认，内容已保留");
     attachedId = null;
     pendingAttachId = null;
     scheduleReconnect();
@@ -1125,6 +1328,29 @@ function connect() {
 function handleText(raw: unknown) {
   const msg = raw as ServerMsg;
   switch (msg.type) {
+    case "scheduleAck":
+      if (msg.requestId === pendingSchedule?.id)
+        finishSchedule(msg.accepted === true, msg.message);
+      break;
+    case "agent":
+      if (attachedId === null || pendingAttachId !== null) break;
+      conv.setAgent(typeof msg.agent === "string" ? msg.agent : null);
+      if (!msg.agent) {
+        transcript = null;
+        awaitingTranscript = [];
+        lastSeen.clear();
+      }
+      render();
+      break;
+    case "writeAck":
+      if (msg.requestId === pendingSubmission?.id)
+        finishSubmission(msg.accepted === true, msg.message);
+      break;
+    case "transcriptClear":
+      transcript = null;
+      awaitingTranscript = [];
+      render();
+      break;
     case "sessions": {
       renderSessions(msg as SessionsMsg);
       const sessions = (msg as SessionsMsg).sessions;
@@ -1150,6 +1376,7 @@ function handleText(raw: unknown) {
       if (typeof msg.id !== "number") break;
       attachedId = msg.id;
       lastAttachedId = msg.id;
+      conv.setAgent(typeof msg.agent === "string" ? msg.agent : null);
       // Parse at the grid the stream is actually laid out against (the
       // owner's), not the phone's preference: the server reports it before
       // the seed, and any other grid makes the TUI layout parse wrong.
@@ -1168,9 +1395,11 @@ function handleText(raw: unknown) {
       send({ list: true });
       break;
     case "transcript": {
+      if (attachedId === null || pendingAttachId !== null) break;
       const next = raw as TranscriptMsg;
       if (!Array.isArray(next.messages)) break;
       transcript = next;
+      conv.setAgent(next.source);
       awaitingTranscript = awaitingTranscript.filter(
         (a) => !transcriptRecorded(next, a),
       );
@@ -1195,6 +1424,8 @@ function handleText(raw: unknown) {
       }
       break;
     case "exit":
+      finishSubmission(false, "终端已退出，内容已保留");
+      finishSchedule(false, "终端已退出，定时任务结果未确认，内容已保留");
       // The agent went with the shell; its transcript is no longer what this
       // session shows.
       if (attachedId === msg.id) transcript = null;
@@ -1242,6 +1473,8 @@ function scheduleOpeningRetry(id: number) {
 function renderSessions(msg: SessionsMsg) {
   sessionListEl.innerHTML = "";
   const sessions = msg.sessions;
+  knownSessions = sessions;
+  render();
   const spaces = msg.spaces ?? [];
   if (sessions.length === 0 && spaces.length === 0) {
     const li = document.createElement("li");
@@ -1284,8 +1517,11 @@ function appendGroupRow(name: string, list: SessionInfo[]) {
   }
   for (const s of list) {
     const li = document.createElement("li");
-    li.className = "session-item" + (s.id === attachedId ? " active" : "");
+    li.className = `session-item${s.id === attachedId ? " active" : ""}`;
     li.dataset.leaf = String(s.id);
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    li.title = s.cwd ?? s.title ?? `会话 #${s.id}`;
     const label = s.title || s.cwd || `会话 #${s.id}`;
     const cwd = s.cwd
       ? s.cwd.split(/[\\/]/).filter(Boolean).slice(-2).join("/") || s.cwd
@@ -1295,6 +1531,12 @@ function appendGroupRow(name: string, list: SessionInfo[]) {
     }</span>
       <span class="session-viewers">${s.active ? "当前" : s.live ? "" : "未打开"}</span>`;
     li.addEventListener("click", () => {
+      attachTo(s.id);
+      closeSheet();
+    });
+    li.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
       attachTo(s.id);
       closeSheet();
     });
@@ -1308,10 +1550,14 @@ function attachTo(id: number) {
     send({ list: true });
     return;
   }
+  finishSubmission(false, "已切换终端，原消息结果未确认，内容已保留");
+  finishSchedule(false, "已切换终端，定时任务结果未确认，内容已保留");
   pendingAttachId = id;
   seedPending = false;
   transcript = null;
   awaitingTranscript = [];
+  lastSeen.clear();
+  setPinned(true);
   // The server seeds from a different terminal's buffer: start the
   // conversation over rather than splicing it onto the old one.
   conv.reset();
@@ -1324,13 +1570,14 @@ function attachTo(id: number) {
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(
-    /[&<>"']/g,
-    (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
-        c
-      ]!,
-  );
+  const entities: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  };
+  return s.replace(/[&<>"']/g, (c) => entities[c] ?? c);
 }
 
 function openSheet() {
@@ -1343,7 +1590,7 @@ function closeSheet() {
 
 // ── Input ────────────────────────────────────────────────────────────────
 /** Write raw bytes to the attached PTY (binary '0' + payload). */
-function writePty(data: string, command = 0x30) {
+function writePty(data: string) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   if (attachedId === null) {
     toast("没有已连接的终端");
@@ -1351,13 +1598,14 @@ function writePty(data: string, command = 0x30) {
   }
   const bytes = new TextEncoder().encode(data);
   const frame = new Uint8Array(1 + bytes.length);
-  frame[0] = command;
+  frame[0] = 0x30;
   frame.set(bytes, 1);
   ws.send(frame);
   return true;
 }
 
 function submit() {
+  if (pendingSubmission !== null) return;
   const text = inputEl.value;
   // An empty Enter is not an empty message. It accepts a default, confirms
   // a prompt, steps past a pager. Send the newline on its own and record
@@ -1367,16 +1615,35 @@ function submit() {
     followToBottom();
     return;
   }
-  if (!writePty(text, 0x32 /* submit */)) return;
-  conv.noteSent(text);
-  // The transcript will not know about this until the agent writes the turn
-  // out, so the page holds it in the meantime — anchored to where the
-  // transcript stood now, so only a turn recorded after this one can retire it.
-  if (transcript)
-    awaitingTranscript.push({ text, afterId: lastUserId(transcript) });
-  inputEl.value = "";
-  autoGrow();
-  followToBottom();
+  if (!ws || ws.readyState !== WebSocket.OPEN || attachedId === null) {
+    toast("没有已连接的终端，内容已保留");
+    return;
+  }
+  if (new TextEncoder().encode(text).length > 64 * 1024) {
+    toast("消息超过 64 KB，请缩短后发送");
+    return;
+  }
+  const previous = uncertainSubmission;
+  const id =
+    previous?.leafId === attachedId && previous.text === text
+      ? previous.id
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  pendingSubmission = {
+    id,
+    text,
+    leafId: attachedId,
+    afterId: transcript ? lastUserId(transcript) : null,
+  };
+  $("#btn-send").setAttribute("disabled", "");
+  submissionTimer = window.setTimeout(
+    () => finishSubmission(false, "发送结果未确认，内容已保留，请先检查终端"),
+    15_000,
+  );
+  try {
+    ws.send(JSON.stringify({ submit: { id, text, leafId: attachedId } }));
+  } catch {
+    finishSubmission(false, "发送失败，内容已保留");
+  }
 }
 
 /** Grow the composer with its content, up to a few lines. */
@@ -1387,9 +1654,12 @@ function autoGrow() {
 
 inputEl.addEventListener("input", autoGrow);
 inputEl.addEventListener("keydown", (e) => {
-  // Enter sends; Shift+Enter makes a new line. On phones the soft keyboard's
-  // return key reports as Enter without a modifier, which is what we want.
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+  if (
+    e.key === "Enter" &&
+    (e.ctrlKey || e.metaKey) &&
+    !e.isComposing &&
+    e.keyCode !== 229
+  ) {
     e.preventDefault();
     submit();
   }
@@ -1399,6 +1669,11 @@ $("#btn-sched").addEventListener("click", () =>
   setSchedOpen(schedEl.hidden !== false),
 );
 $("#sched-go").addEventListener("click", () => {
+  if (pendingSchedule) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN || attachedId === null) {
+    toast("没有已连接的终端，内容已保留");
+    return;
+  }
   const command = inputEl.value.trim();
   if (command === "") {
     toast("先输入要执行的命令");
@@ -1408,16 +1683,27 @@ $("#sched-go").addEventListener("click", () => {
   const hours = Number(schedHoursEl.value) || 0;
   const minutes = Number(schedMinsEl.value) || 0;
   const delaySeconds = hours * 3600 + minutes * 60;
-  if (delaySeconds <= 0) {
-    toast("请填写多久之后执行");
+  if (
+    !Number.isInteger(hours) ||
+    hours < 0 ||
+    hours > 48 ||
+    !Number.isInteger(minutes) ||
+    minutes < 0 ||
+    minutes > 59 ||
+    delaySeconds <= 0
+  ) {
+    toast("小时应为 0 至 48，分钟应为 0 至 59，且延时不能为零");
     return;
   }
-  send({ scheduleAdd: { command, delaySeconds } });
-  // Cleared the way sending clears it: the command has left the composer, and
-  // leaving it there invites sending it twice.
-  inputEl.value = "";
-  autoGrow();
-  toast(`已排队：${untilText(delaySeconds * 1000)}`);
+  const id = `schedule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  pendingSchedule = { id, text: inputEl.value, leafId: attachedId };
+  $("#sched-go").setAttribute("disabled", "");
+  scheduleTimer = window.setTimeout(() => finishSchedule(false), 15_000);
+  try {
+    ws.send(JSON.stringify({ scheduleAdd: { id, command, delaySeconds } }));
+  } catch {
+    finishSchedule(false, "定时任务发送失败，内容已保留");
+  }
 });
 
 toBottomEl.addEventListener("click", followToBottom);
@@ -1427,6 +1713,8 @@ $("#btn-close-sheet").addEventListener("click", closeSheet);
 
 // Control keys: the things a shell needs that a soft keyboard has no key for.
 for (const btn of document.querySelectorAll<HTMLButtonElement>(".key-btn")) {
+  if (!btn.dataset.ctrl && !btn.dataset.seq) continue;
+  btn.addEventListener("pointerdown", (event) => event.preventDefault());
   btn.addEventListener("click", () => {
     const ctrl = btn.dataset.ctrl;
     const seq = btn.dataset.seq;

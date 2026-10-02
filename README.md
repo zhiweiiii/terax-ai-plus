@@ -48,11 +48,12 @@ terax-ai-plus 是一个终端优先的轻量开发环境，基于 Tauri 2 + Rust
 | Agent | 数据源 |
 |---|---|
 | Claude Code | `~/.claude/projects/<转义cwd>/<session>.jsonl` |
+| Codex | `~/.codex/sessions/<year>/<month>/<day>/rollout-*.jsonl` |
 | opencode | `~/.local/share/opencode/opencode.db`（SQLite，只读） |
 
-两者归一成同一结构：用户/助手轮次、agent 的思考、调用的工具、模式、模型、当前轮是否在进行。谁说了什么是**被声明的**，不是猜出来的。
+三者归一成同一结构：用户/助手轮次、agent 的思考、调用的工具、模式、模型、当前轮是否在进行。Claude/Codex 按会话绑定文件并增量读取，歧义时回到屏幕视图。手机提交等待写入确认，失败保留草稿。细节见 [可靠性与发布](docs/architecture/reliability-and-releases.md)。
 
-屏幕只保留一件 transcript 不可能知道的事：**程序此刻在等你选什么**。权限提示和选项菜单是实时 UI 状态，两个工具都不会持久化它，所以那部分仍由屏幕解析，并渲染成可点击的按钮：手机上点一下比调出键盘敲一个数字好。
+屏幕保留 transcript 不知道的实时 UI 状态：**程序此刻在等你选什么**。权限提示和选项菜单仍由屏幕解析，渲染成可点击的按钮；无法绑定结构化记录时也以屏幕作为回退。
 
 配套的改动：
 
@@ -68,7 +69,7 @@ terax-ai-plus 是一个终端优先的轻量开发环境，基于 Tauri 2 + Rust
 - **文件树**：工具栏新增过滤菜单，可切换隐藏文件与 git 忽略的文件。
 - **终端右键**：不再弹出 webview 的默认菜单；按终端惯例，有选中就复制，没选中就粘贴。
 - **手机访问密码可以修改**了。原本是编译期常量，改不了；现在用 Argon2id 加盐存储，改密码同时轮换会话令牌，已登录的手机会被登出。
-- **Claude Code 参数面板**（状态栏左侧）：把 endpoint、token、模型写进当前命令行，并记住用过的配置一键复用。token 用 Windows DPAPI 加密后才落盘。
+- **Claude Code 供应商面板**：通过本地网关转换中转站接口，每个终端独立选择供应商，不改变其他终端的配置。
 
 ### 修掉的一些根因
 
@@ -81,7 +82,7 @@ terax-ai-plus 是一个终端优先的轻量开发环境，基于 Tauri 2 + Rust
 
 ## 安装
 
-从本仓库的 Releases 页面下载 `.exe` 安装包。
+从 [本仓库 Releases](https://github.com/zhiweiiii/terax-ai-plus/releases) 下载 `.exe` 安装包。默认应用内检查更新会打开对应下载页；签名自动安装需要维护者配置自己的密钥，见 [发布配置](docs/architecture/reliability-and-releases.md)。
 
 > 只提供 NSIS（`.exe`）安装包，不提供 MSI，原因见上文。首次安装时选择的目录会被记住，之后升级不会再问。
 
@@ -94,7 +95,7 @@ terax-ai-plus 是一个终端优先的轻量开发环境，基于 Tauri 2 + Rust
 
 **依赖**
 - Rust（stable），https://rustup.rs
-- Node 20+ 与 [pnpm](https://pnpm.io)
+- Node 22+ 与 [pnpm](https://pnpm.io)
 - Windows 下的 Tauri 前置依赖，https://tauri.app/start/prerequisites/
 
 **运行**

@@ -96,7 +96,8 @@ pub struct Session {
     /// announced it. Both the gate for reading an agent transcript - a
     /// directory that once ran one must not show that conversation over an
     /// idle prompt - and the choice of which transcript to read.
-    agent: Arc<Mutex<Option<String>>>,
+    agent: Arc<Mutex<Option<AgentRun>>>,
+    web_submissions: Mutex<std::collections::VecDeque<(String, Result<(), String>)>>,
     /// Web viewers attached to this session (bounded queues).
     web_subs: Mutex<Vec<SyncSender<WebMsg>>>,
     /// Whether the PTY is currently on the alternate screen (opencode / claude
@@ -113,6 +114,14 @@ pub struct Session {
     /// dimensions of its own, so it restores the claimer's remembered grid.
     desktop_grid: Mutex<Option<(u16, u16)>>,
     web_grid: Mutex<Option<(u16, u16)>>,
+}
+
+#[derive(Clone)]
+struct AgentRun {
+    name: String,
+    session_id: Option<String>,
+    started_at: std::time::SystemTime,
+    file: Option<std::path::PathBuf>,
 }
 
 impl Drop for Session {
@@ -146,7 +155,95 @@ impl Session {
 
     /// The coding agent running in this shell right now, if any.
     pub fn web_agent(&self) -> Option<String> {
-        self.agent.lock().unwrap().clone()
+        self.agent.lock().ok()?.as_ref().map(|run| run.name.clone())
+    }
+
+    pub fn web_transcript(
+        &self,
+        cwd: &str,
+        agent: &str,
+    ) -> Option<Arc<crate::modules::transcript::Transcript>> {
+        let generation = self.agent.lock().ok()?.as_ref()?.started_at;
+        let file = self.web_transcript_file(cwd)?;
+        let transcript = crate::modules::transcript::read_file(&file, agent)?;
+        let current = self.agent.lock().ok()?;
+        current.as_ref().filter(|run| {
+            run.started_at == generation
+                && run.name == agent
+                && run.file.as_deref() == Some(file.as_path())
+        })?;
+        Some(transcript)
+    }
+
+    fn web_transcript_file(&self, cwd: &str) -> Option<std::path::PathBuf> {
+        let run = self.agent.lock().ok()?.as_ref()?.clone();
+        if run.file.is_some() {
+            return run.file;
+        }
+        let file = crate::modules::sessions::resolve_session_file(
+            cwd,
+            &run.name,
+            run.session_id.as_deref(),
+            run.started_at,
+        )?;
+        let mut agent = self.agent.lock().ok()?;
+        let current = agent.as_mut()?;
+        if current.started_at != run.started_at
+            || current.name != run.name
+            || current.session_id != run.session_id
+        {
+            return None;
+        }
+        current.file = Some(file.clone());
+        Some(file)
+    }
+
+    pub fn web_submit(&self, id: &str, text: &str) -> Result<(), String> {
+        if id.is_empty()
+            || id.len() > 64
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || text.len() > 64 * 1024
+        {
+            return Err("invalid submission".to_string());
+        }
+        let mut submissions = self
+            .web_submissions
+            .lock()
+            .map_err(|_| "submission state unavailable")?;
+        if let Some((_, result)) = submissions.iter().find(|(key, _)| key == id) {
+            return result.clone();
+        }
+        let result = (|| {
+            if self.exited.load(Ordering::Acquire) {
+                return Err("terminal exited".to_string());
+            }
+            let bracketed = self.web_agent().as_deref() == Some("codex");
+            if text.contains("\x1b[201~") || text.contains("\x1b[200~") {
+                return Err("paste boundary in input".to_string());
+            }
+            let mut writer = self
+                .writer
+                .lock()
+                .map_err(|_| "terminal input unavailable")?;
+            if bracketed {
+                writer.write_all(b"\x1b[200~").map_err(|e| e.to_string())?;
+            }
+            writer
+                .write_all(text.as_bytes())
+                .map_err(|e| e.to_string())?;
+            if bracketed {
+                writer.write_all(b"\x1b[201~").map_err(|e| e.to_string())?;
+            }
+            writer
+                .write_all(b"\r")
+                .and_then(|_| writer.flush())
+                .map_err(|e| e.to_string())
+        })();
+        if submissions.len() == 128 {
+            submissions.pop_front();
+        }
+        submissions.push_back((id.to_string(), result.clone()));
+        result
     }
 
     /// Attach a Web viewer: returns the sender handle used to cancel this exact
@@ -294,7 +391,10 @@ impl Session {
     /// Remove one specific subscriber (not the whole table, so other viewers
     /// of the same session are never affected).
     pub fn web_unsubscribe(&self, tx: &SyncSender<WebMsg>) {
-        self.web_subs.lock().unwrap().retain(|s| !std::ptr::eq(s, tx));
+        self.web_subs
+            .lock()
+            .unwrap()
+            .retain(|s| !std::ptr::eq(s, tx));
     }
 
     /// Fan out one output chunk to every attached Web viewer. A viewer whose
@@ -323,7 +423,9 @@ struct ChildKillGuard {
 
 impl ChildKillGuard {
     fn new(killer: Box<dyn ChildKiller + Send + Sync>) -> Self {
-        Self { killer: Some(killer) }
+        Self {
+            killer: Some(killer),
+        }
     }
 
     fn disarm(&mut self) {
@@ -368,8 +470,14 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let cmd =
-        shell_init::build_command(cwd.clone(), workspace, blocks, shell, control, gateway_provider)?;
+    let cmd = shell_init::build_command(
+        cwd.clone(),
+        workspace,
+        blocks,
+        shell,
+        control,
+        gateway_provider,
+    )?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 
@@ -400,7 +508,7 @@ pub fn spawn(
     let exited = Arc::new(AtomicBool::new(false));
     // Shared rather than read off the session: the reader thread that learns
     // the agent's name is spawned after this value is built.
-    let agent_name: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let agent_name: Arc<Mutex<Option<AgentRun>>> = Arc::new(Mutex::new(None));
 
     let session = Arc::new(Session {
         #[cfg(windows)]
@@ -412,6 +520,7 @@ pub fn spawn(
         exited: exited.clone(),
         cwd,
         agent: agent_name.clone(),
+        web_submissions: Mutex::new(std::collections::VecDeque::new()),
         web_subs: Mutex::new(Vec::new()),
         in_alt: AtomicBool::new(false),
         owner: Mutex::new((SizeOwner::Desktop, Instant::now())),
@@ -420,10 +529,8 @@ pub fn spawn(
         web_grid: Mutex::new(None),
     });
 
-    let pending: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((
-        Mutex::new(Vec::with_capacity(READ_BUF)),
-        Condvar::new(),
-    ));
+    let pending: Arc<(Mutex<Vec<u8>>, Condvar)> =
+        Arc::new((Mutex::new(Vec::with_capacity(READ_BUF)), Condvar::new()));
     let done = Arc::new(AtomicBool::new(false));
     let spawn_at = Instant::now();
 
@@ -448,12 +555,37 @@ pub fn spawn(
                     Ok(n) => {
                         if !first_byte_r.load(Ordering::Relaxed) {
                             first_byte_r.store(true, Ordering::Release);
-                            log::debug!("pty first byte after {}ms", spawn_at.elapsed().as_millis());
+                            log::debug!(
+                                "pty first byte after {}ms",
+                                spawn_at.elapsed().as_millis()
+                            );
                         }
                         agent_detect.process(&buf[..n], |t| {
                             match &t {
-                                Transition::Started { agent } => {
-                                    *agent_name_r.lock().unwrap() = Some(agent.clone());
+                                Transition::Started {
+                                    agent,
+                                    session_id,
+                                    started_at_ms,
+                                } => {
+                                    let now = std::time::SystemTime::now();
+                                    let started_at = started_at_ms
+                                        .and_then(|ms| {
+                                            std::time::UNIX_EPOCH
+                                                .checked_add(Duration::from_millis(ms))
+                                        })
+                                        .filter(|at| {
+                                            *at <= now
+                                                && now
+                                                    .duration_since(*at)
+                                                    .is_ok_and(|age| age < Duration::from_secs(60))
+                                        })
+                                        .unwrap_or(now);
+                                    *agent_name_r.lock().unwrap() = Some(AgentRun {
+                                        name: agent.clone(),
+                                        session_id: session_id.clone(),
+                                        started_at,
+                                        file: None,
+                                    });
                                 }
                                 Transition::Exited => {
                                     *agent_name_r.lock().unwrap() = None;
@@ -534,8 +666,7 @@ pub fn spawn(
                 // in the window wins.
                 let mut mode: Option<bool> = None;
                 {
-                    let mut window: Vec<u8> =
-                        Vec::with_capacity(mode_carry.len() + chunk.len());
+                    let mut window: Vec<u8> = Vec::with_capacity(mode_carry.len() + chunk.len());
                     window.extend_from_slice(&mode_carry);
                     window.extend_from_slice(&chunk);
                     for w in window.windows(ENTER_ALT.len()) {
@@ -549,8 +680,7 @@ pub fn spawn(
                 if let Some(m) = mode {
                     session_f.in_alt.store(m, Ordering::Release);
                 }
-                mode_carry =
-                    chunk[chunk.len().saturating_sub(ENTER_ALT.len() - 1)..].to_vec();
+                mode_carry = chunk[chunk.len().saturating_sub(ENTER_ALT.len() - 1)..].to_vec();
                 if let Some(cb) = &on_data_ref {
                     cb(chunk.clone());
                 }
@@ -624,4 +754,3 @@ pub fn spawn(
 
     Ok((session, size))
 }
-

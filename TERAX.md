@@ -63,9 +63,10 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **状态指示**：状态栏右下角通过 `web_status` 显示监听状态、实时连接数、连续登录失败数（每 2 秒轮询同一批原子量）。
 - **共享 PTY**：web 观看者订阅与桌面相同的 `Arc<Session>`，两端输入输出一致。**Rust 侧不存储任何会话输出**：手机连上时看到的首屏是**桌面终端自己的缓冲区**，经 `terax:web-snapshot` / `web_snapshot_reply` 现向窗口索取。以前那个 256 KiB 历史环已删除，第二份副本必然和桌面显示的内容分叉。
 - **一个会话一个网格，谁在打字谁拥有它**（`SizeOwner` / `claim` / `request_grid`）。手机不声明网格所以永不 claim，从手机打字不会让桌面屏幕重排。桌面只在真实按键时收回所有权，xterm 的协议应答（焦点上报、OSC 4 回复）刻意不 claim。
-- **手机发送键是提交，不是换行**：输入区通过独立的 WebSocket `2` 指令提交整段文本，服务端对正在运行的 Codex 使用明确的 bracketed paste 边界，再发送回车，避开 Codex 把快速输入加回车识别为多行粘贴的时序窗口；其他终端保持普通文本加回车。空输入只发回车。
-- **Agent transcript**：附着的会话里跑着编码 agent 时，服务端推 `{type:"transcript"}`，内容读自 agent 自己的记录。手机据此渲染对话，屏幕解析只保留一件 transcript 不可能知道的事：**程序此刻在等你选什么**。三道闸门让空闲会话零开销：必须真有 agent 在跑（`Session::web_agent`，由 OSC 检测喂）、文件指纹必须变过、revision 必须变过。700ms 轮询而不是监听，因为 opencode 的提交落在 WAL 里，没有文件系统事件能描述它。
+- **手机发送键是提交，不是换行**：输入区通过带请求编号的 WebSocket JSON `submit` 指令提交整段文本，服务端对正在运行的 Codex 使用明确的 bracketed paste 边界，再发送回车，避开 Codex 把快速输入加回车识别为多行粘贴的时序窗口；其他终端保持普通文本加回车。空输入只发回车。非空消息等待 `writeAck` 后才清空；失败、断线和超时保留内容，相同消息重试复用编号，服务端在同一 PTY 内缓存最近 128 个提交结果。
+- **Agent transcript**：附着的会话里跑着编码 agent 时，服务端推 `{type:"transcript"}`，内容读自 agent 自己的记录。手机据此渲染对话，屏幕解析只保留一件 transcript 不可能知道的事：**程序此刻在等你选什么**。三道闸门让空闲会话零开销：必须真有 agent 在跑（`Session::web_agent`，由 OSC 检测喂）、绑定文件的状态必须变过、revision 必须变过。Claude/Codex 的恢复命令优先按会话 ID 固定文件，新会话只绑定启动后唯一候选且逐文件核对 cwd，多候选时不猜，退回屏幕视图。JSONL 以偏移量增量解析，每种读取器缓存 8 个文件、最多保留最近 600 个原始步骤，多个手机连接复用解析结果；revision 使用读取代次，工具结果不依赖时间戳去重。700ms 轮询而不是监听，因为 opencode 的提交落在 WAL 里，没有文件系统事件能描述它。
 - **标签同步**：`App.tsx` 的 `useWebTerminalSync` 把每个桌面终端标签同步给 Rust（`web_sync_tabs`），所以手机能列出全部命令行而不只是有活 PTY 的。手机连一个还没起 pty 的标签时，服务端发 `terax:web-activate`，前端激活该标签，手机收到 `opening` 后重试。
+- **手机布局与更新**：主缓冲区中的 Codex 与全屏缓冲区中的 Claude Code 都解析实时菜单、状态和正在输出的正文；桥接在附着时及运行程序变化时声明 `agent`。消息按完整内容比较并就地更新 DOM，保留思考/工具展开和内部滚动；用户消息原样显示，助手 Markdown 使用已有依赖链中的 mdast/GFM 解析后安全构造 DOM，不执行 HTML、不加载远程图片。输入区面板可独立滚动，应用跟随 visual viewport 的尺寸和偏移，发送按钮提交、键盘回车换行、Ctrl/Cmd+Enter 提交。工具预览最多 40 行/4096 字节，可展开和复制，超限明确说明；定时任务等待保存确认后才清空草稿。
 
 ### Claude 网关（`src-tauri/src/modules/gateway/`）
 
@@ -103,11 +104,11 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **绝不整文件解析**。codex 的 rollout 实测有 **91 MB**，而列表只要标题和时间：codex 的第一行 `session_meta` 就带 `session_id` / `cwd` / 时间戳，Claude 的 `ai-title` 落在 19k~60k 字节处，所以每个文件只读 `HEAD_BYTES`（192 KB）且丢掉末尾半行。
 - **目录归属两边不一样**。Claude 按 `<escaped cwd>` 分目录，但转义有损，目录内可能混有不同 cwd 的会话，必须逐文件核对记录中的 cwd（同时复用 `transcript::claude_project_dir` 定位目录）；Codex 按**日期**分目录，cwd 从每个文件的首行读出来再比。
 - **标题要过滤注入的前言**。两边都用一条 user 消息注入上下文（codex 是 `<environment_context>`，Claude 是 slash 命令包装与 reminder），还可能以 `# AGENTS.md` 开头。判据是"以 `<` 开头或是这两个标题"，用它们当标题比不给标题更糟。user 的 content 可能是字符串也可能是块数组（带附件时），两种都要认。
-- 菜单**打开时才加载**，不开就零开销；异步结果必须和当前 cwd、打开代次一致，切换项目不能显示旧列表。
+- 历史目录扫描缓存 2 秒（最多 32 个目录），头部缓存最多 512 个文件，文件状态变化才刷新；菜单**打开时才加载**，不开就零开销；异步结果必须和当前 cwd、打开代次一致，切换项目不能显示旧列表。
 
 ### PTY shell 集成
 
-Codex 交互界面直接由 xterm 渲染。不要劫持 xterm 的光标可见状态、textarea 定位或输入法组合元素；之前的私有接口适配在用户环境出现输入卡顿和画面延迟刷新。终端仍通过 PTY 原样转发 Codex 的转义序列与键盘输入。
+Codex 交互界面直接由 xterm 渲染。不要劫持 xterm 的光标可见状态、textarea 定位或输入法组合元素；之前的私有接口适配在用户环境出现输入卡顿和画面延迟刷新。终端仍通过 PTY 原样转发 Codex 的转义序列与键盘输入。`inputPolicy.ts` 统一决定 shell 输入栏、终端或无输入三种归属；前台任务异步检查绑定命令代次，新命令会作废旧结果。可选诊断默认关闭，只记录输出字节数、公开光标坐标、渲染、尺寸、焦点与输入法事件，最多 256 项，不记录正文或输入内容。详见 `docs/architecture/reliability-and-releases.md`。
 
 PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pty-shell-integration.md`。
 
@@ -144,7 +145,7 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 - **markdown/** - Markdown 预览渲染器（支撑 `markdown` 标签）。
 - **workspace/** - 工作区环境切换（Local + WSL 发行版）。
 - **theme/** - 自研主题引擎（不用 `next-themes`）。`ThemeProvider` + `applyTheme` 写 CSS 变量；内置预设在 `themes/`，可各自声明配套的 `editorTheme`。用户主题走 `customThemes.ts` + `validateTheme.ts`，可选背景图走 `bgImageStore.ts` + `SurfaceLayer`。
-- **updater/** - 基于 `tauri-plugin-updater` 的自动更新 UI。
+- **updater/** - 默认检查 `zhiweiiii/terax-ai-plus` 的已发布 NSIS 版本并打开手动下载页。只有构建时启用本仓库自己的签名配置才使用 `tauri-plugin-updater`，签名端点不可用时退回手动检查。
 - **command-palette/** - 命令面板。
 - **spaces/** - 工作区空间/项目（名称、根目录、环境、颜色、按空间持久化标签），走 `useSpaces` 与 `GroupSwitcher`。
 
@@ -180,13 +181,13 @@ Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: tru
 
 ### 打包配置
 
-没有更新签名密钥时，可用 `pnpm tauri build --config src-tauri/tauri.manual-release.json` 生成仅供手动安装的 NSIS 包；该配置不生成自动更新产物，不改变默认签名/更新设置。手动 Release 使用 `build-v<version>` 标签，与正式签名流水线的 `v*` 区分。
+默认 `pnpm tauri build` 生成手动安装 NSIS 包，不要求签名密钥；`tauri.manual-release.json` 保留为旧命令兼容配置。发布工作流手动触发时使用 `build-v<version>`，`v*` 标签也可触发。默认不生成自动更新产物，不能继续使用上游的公钥或 SignPath 账户。
 
 - `bundle.targets` 是 `["nsis"]`，**只出 exe 安装包**。MSI 会把任务栏图标指向 `C:\Windows\Installer\{ProductCode}\ProductIcon`，而 ProductCode 每次构建都变，覆盖安装后固定在任务栏的图标就没了。
 - NSIS 用 `perMachine` 模式（装到 `Program Files` 需要这个）。**默认目录不硬编码**：NSIS 的 `.onInit` 会调 `RestorePreviousInstallLocation`，安装时也写 `InstallLocation`，所以第一次选好目录以后就记住了。
 - 一律从 `pnpm tauri build` 打包。`scripts/tauri.mjs` 通过当前 Node 直接启动本地安装的 Tauri CLI，避免 Windows 上启动 `pnpm.cmd` 的兼容性错误；它会对受打包影响的源码和配置生成指纹。相对上一次**成功打包**有变动时，先把 `package.json`、`Cargo.toml`、`Cargo.lock` 与 `tauri.conf.json` 的 patch 版本同步加一，失败则恢复这四份清单。状态文件 `.terax-package-state.json` 仅供本机判断，已忽略。状态栏右下角显示最终由 Tauri 提供的版本号。
 - `installer-hooks.nsh` 注册文件夹 / 文件夹背景 / 驱动器的"Open in Terax"右键菜单。
-- 自动更新用公开的 minisign 公钥，产物在 GitHub releases。
+- 签名发布需同时配置仓库变量 `TERAX_UPDATER_PUBLIC_KEY`、secret `TAURI_SIGNING_PRIVATE_KEY`，密码 secret 可选；工作流生成临时配置，启用 updater artifacts 和 `VITE_TERAX_SIGNED_UPDATES=true`，只上传 NSIS 与对应 updater 产物，发布仍为 draft，需维护者确认发布。
 
 ### 已知坑
 
@@ -209,4 +210,5 @@ Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: tru
 - `docs/architecture/security-model.md` - 安全模型与各道边界
 - `docs/architecture/terminal-renderer-pool.md` - 渲染器池与 DormantRing 不变量
 - `docs/architecture/cli-control.md` - 随包 CLI 与本地控制面
+- `docs/architecture/reliability-and-releases.md` - 输入归属、诊断、增量缓存、发送确认和更新签名配置
 - `docs/issues.md` - 已知问题、架构债与风险

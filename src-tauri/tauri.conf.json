@@ -28,7 +28,9 @@
       "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost blob:; media-src 'self' asset: https://asset.localhost blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https: http://localhost:* http://127.0.0.1:*; frame-src 'self' http: https: asset: https://asset.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       }
     }
   },
@@ -37,8 +39,10 @@
     "externalBin": [
       "binaries/terax-cli"
     ],
-    "targets": ["nsis"],
-    "createUpdaterArtifacts": true,
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": false,
     "copyright": "Copyright 2026 Crynta",
     "license": "Apache-2.0",
     "publisher": "Crynta",
@@ -46,31 +50,8 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "macOS": {
-      "minimumSystemVersion": "13.0",
-      "entitlements": "./entitlements.plist"
-    },
-    "linux": {
-      "deb": {
-        "section": "utils",
-        "depends": [
-          "libwebkit2gtk-4.1-0",
-          "libgtk-3-0"
-        ]
-      },
-      "rpm": {
-        "depends": [
-          "webkit2gtk4.1",
-          "gtk3"
-        ]
-      },
-      "appimage": {
-        "bundleMediaFramework": true
-      }
-    },
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
@@ -87,31 +68,80 @@
     },
     "category": "DeveloperTool",
     "shortDescription": "AI-native terminal emulator",
-    "longDescription": "Terax — an open-source AI-native terminal emulator with multi-tab, file explorer, code editor, web preview, voice input, and AI agents.",
+    "longDescription": "Terax, an open-source terminal workspace with multi-tab, file explorer, code editor, web preview, and coding agent integration.",
     "fileAssociations": [
       {
         "name": "Terax Document",
         "role": "Editor",
         "mimeType": "text/plain",
         "ext": [
-          "json", "jsonc", "txt", "log", "csv", "tsv",
-          "md", "markdown", "mdx",
-          "js", "mjs", "cjs", "jsx", "ts", "tsx", "mts", "cts",
-          "java", "kt", "kts", "gradle",
-          "py", "rb", "php", "go", "rs", "swift", "dart", "lua",
-          "c", "h", "cpp", "cc", "hpp", "hh", "cs",
-          "html", "htm", "css", "scss", "sass", "less", "vue", "svelte",
-          "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "properties",
-          "sh", "bash", "zsh", "sql", "graphql", "proto"
+          "json",
+          "jsonc",
+          "txt",
+          "log",
+          "csv",
+          "tsv",
+          "md",
+          "markdown",
+          "mdx",
+          "js",
+          "mjs",
+          "cjs",
+          "jsx",
+          "ts",
+          "tsx",
+          "mts",
+          "cts",
+          "java",
+          "kt",
+          "kts",
+          "gradle",
+          "py",
+          "rb",
+          "php",
+          "go",
+          "rs",
+          "swift",
+          "dart",
+          "lua",
+          "c",
+          "h",
+          "cpp",
+          "cc",
+          "hpp",
+          "hh",
+          "cs",
+          "html",
+          "htm",
+          "css",
+          "scss",
+          "sass",
+          "less",
+          "vue",
+          "svelte",
+          "xml",
+          "yaml",
+          "yml",
+          "toml",
+          "ini",
+          "cfg",
+          "conf",
+          "properties",
+          "sh",
+          "bash",
+          "zsh",
+          "sql",
+          "graphql",
+          "proto"
         ]
       }
     ]
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNCQUJGRDhBQjYwRTM0NjkKUldScE5BNjJpdjJyT3dIN0dqbUpHaDA4QW1GaDVmTTllRXdZVk96dFNTRUZ3Y2hiVGszYjFqRloK",
+      "pubkey": "",
       "endpoints": [
-        "https://github.com/crynta/terax-ai/releases/latest/download/latest.json"
+        "https://github.com/zhiweiiii/terax-ai-plus/releases/latest/download/latest.json"
       ]
     }
   }

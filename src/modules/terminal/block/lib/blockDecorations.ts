@@ -443,9 +443,9 @@ export class BlockDecorations {
     };
   }
 
-  private emitMode(): void {
+  private emitMode(force = false): void {
     const m = modeOf(this.mode);
-    if (m === this.lastMode) return;
+    if (m === this.lastMode && !force) return;
     this.lastMode = m;
     this.onMode?.(m);
   }
@@ -455,7 +455,10 @@ export class BlockDecorations {
     // active. Its OSC 133 sequences are not shell prompt boundaries.
     if (this.term.buffer.active.type === "alternate") return;
     const marker = data[0];
-    const rest = data.length > 2 && data[1] === ";" ? data.slice(2) : "";
+    const rest =
+      data.length > 2 && data[1] === ";"
+        ? data.slice(2).replace(/^terax-start=\d+;/, "")
+        : "";
     switch (marker) {
       case "A":
         this.shellState.inCommand = false;
@@ -476,7 +479,7 @@ export class BlockDecorations {
         this.mode = reduceMode(this.mode, { type: "osc133", marker: "D" });
         break;
     }
-    this.emitMode();
+    this.emitMode(marker === "C");
     if (marker === "A" || marker === "D") this.onMode?.("prompt");
   }
 

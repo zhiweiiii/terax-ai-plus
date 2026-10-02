@@ -22,6 +22,8 @@
 
 ## 架构指南
 
+- [可靠性与发布](architecture/reliability-and-releases.md) - 输入归属与诊断、会话绑定、增量缓存、手机确认与本仓库更新渠道。
+
 - [定时消息](architecture/scheduled-messages.md) - 终端与后台 CLI 三模式、多任务、每日重复和生命周期边界。
 
 - [双进程模型与 IPC 命令参考](architecture/two-process-model.md) - Rust 掌管所有系统访问，webview 通过 `invoke()` 沟通。命令目录，以及如何新增一个命令。

@@ -8,7 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
-import { useUpdater } from "./useUpdater";
+import { isManualUpdate, useUpdater } from "@/modules/updater/useUpdater";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -29,6 +29,7 @@ export function UpdaterDialog() {
   const update = status.kind === "available" ? status.update : null;
   const downloading = status.kind === "downloading";
   const ready = status.kind === "ready";
+  const manual = update !== null && isManualUpdate(update);
 
   const progress =
     downloading && status.contentLength
@@ -56,9 +57,11 @@ export function UpdaterDialog() {
               ? "Restart Terax to finish installing."
               : downloading
                 ? progress !== null
-                  ? `${progress.toFixed(0)}% — ${formatBytes(status.downloaded)}`
+                  ? `${progress.toFixed(0)}% - ${formatBytes(status.downloaded)}`
                   : formatBytes(status.downloaded)
-                : update?.body || "A new version is ready to install."}
+                : manual
+                  ? "新版本已发布。打开下载页面安装后，重新启动 Terax。"
+                  : update?.body || "A new version is ready to install."}
           </DialogDescription>
         </DialogHeader>
 
@@ -76,7 +79,7 @@ export function UpdaterDialog() {
                 Later
               </Button>
               <Button size="sm" onClick={() => void install()}>
-                Install &amp; restart
+                {manual ? "打开下载页面" : "安装并重启"}
               </Button>
             </>
           )}

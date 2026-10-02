@@ -40,5 +40,8 @@ src-tauri/binaries/
 # Last successful package input fingerprint; used for local auto-versioning.
 .terax-package-state.json
 
-# Test harness bundle (scripts/web-replay.mjs)
+# Git Bash crash dump.
+bash.exe.stackdump
+
+# Legacy local generated bundles, not repository source.
 scripts/convo-bundle/

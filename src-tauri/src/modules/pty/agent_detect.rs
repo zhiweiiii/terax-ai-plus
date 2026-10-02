@@ -27,7 +27,11 @@ enum Status {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Transition {
-    Started { agent: String },
+    Started {
+        agent: String,
+        session_id: Option<String>,
+        started_at_ms: Option<u64>,
+    },
     Working,
     Attention,
     Finished,
@@ -44,13 +48,31 @@ pub struct AgentSignal {
 impl Transition {
     pub fn into_signal(self, id: u32) -> AgentSignal {
         match self {
-            Transition::Started { agent } => {
-                AgentSignal { id, kind: "started", agent: Some(agent) }
-            }
-            Transition::Working => AgentSignal { id, kind: "working", agent: None },
-            Transition::Attention => AgentSignal { id, kind: "attention", agent: None },
-            Transition::Finished => AgentSignal { id, kind: "finished", agent: None },
-            Transition::Exited => AgentSignal { id, kind: "exited", agent: None },
+            Transition::Started { agent, .. } => AgentSignal {
+                id,
+                kind: "started",
+                agent: Some(agent),
+            },
+            Transition::Working => AgentSignal {
+                id,
+                kind: "working",
+                agent: None,
+            },
+            Transition::Attention => AgentSignal {
+                id,
+                kind: "attention",
+                agent: None,
+            },
+            Transition::Finished => AgentSignal {
+                id,
+                kind: "finished",
+                agent: None,
+            },
+            Transition::Exited => AgentSignal {
+                id,
+                kind: "exited",
+                agent: None,
+            },
         }
     }
 }
@@ -205,10 +227,15 @@ impl AgentDetector {
                     return;
                 }
                 let cmd = pt.strip_prefix(b"C;").unwrap_or(b"");
+                let (started_at_ms, cmd) = command_start(cmd);
                 if let Some(agent) = self.match_agent(cmd) {
                     self.armed = true;
                     self.status = Status::Working;
-                    emit(Transition::Started { agent });
+                    emit(Transition::Started {
+                        session_id: resume_id(cmd),
+                        agent,
+                        started_at_ms,
+                    });
                 }
             }
             Some(b'D') if self.armed => {
@@ -223,7 +250,11 @@ impl AgentDetector {
         if !self.armed {
             self.armed = true;
             self.status = Status::Working;
-            emit(Transition::Started { agent: agent.to_string() });
+            emit(Transition::Started {
+                agent: agent.to_string(),
+                session_id: None,
+                started_at_ms: None,
+            });
         }
     }
 
@@ -259,4 +290,27 @@ impl AgentDetector {
     }
 }
 
+fn resume_id(cmd: &[u8]) -> Option<String> {
+    let tokens: Vec<&str> = std::str::from_utf8(cmd).ok()?.split_whitespace().collect();
+    tokens.windows(2).find_map(|pair| {
+        if !matches!(pair[0], "resume" | "--resume" | "--session-id") {
+            return None;
+        }
+        let id = pair[1].trim_matches(['\'', '"']);
+        (id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+            .then(|| id.to_string())
+    })
+}
 
+fn command_start(cmd: &[u8]) -> (Option<u64>, &[u8]) {
+    let Some(rest) = cmd.strip_prefix(b"terax-start=") else {
+        return (None, cmd);
+    };
+    let Some(separator) = rest.iter().position(|b| *b == b';') else {
+        return (None, cmd);
+    };
+    let at = std::str::from_utf8(&rest[..separator])
+        .ok()
+        .and_then(|s| s.parse().ok());
+    (at, &rest[separator + 1..])
+}

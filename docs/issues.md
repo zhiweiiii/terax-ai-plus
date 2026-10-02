@@ -6,6 +6,35 @@
 
 状态分三种：**已修**（解决了）、**已接受**（有意为之，登记在案）、**未决**（仍然存在）。
 
+## 手机显示与实时交互整理（2026-10-01）
+
+**已修，使用隔离手机尺寸浏览器和 ANSI 输入进行复核；真实 iOS Safari 和实际 agent 负载仍需验收。**
+
+- Codex 主缓冲区此前按普通 shell 收集，权限菜单和 Working 状态未解析，transcript 模式还会隐藏其普通输出。现在桥接声明运行中的 agent，主缓冲区从当前屏幕解析实时正文/菜单，只把滚出屏幕的行加入历史；全屏缓冲区保持原有解析。补充 Codex 的 `›` 标记和无省略号的 Working 计时行。
+- 修复仅比较文字长度、末行和行数造成的漏刷新，工具失败/省略状态和选项说明也参与更新判断。消息子树就地协调，保留 details、工具/代码横向滚动和阅读锚点；定时倒计时更新复用原有任务节点。
+- 用户消息不再解析 Markdown。助手支持 GFM 表格、安全链接、嵌套列表、任务列表、引用、代码和基础格式，直接构造 DOM；原始 HTML 仅作文字，链接仅允许 http/https/mailto，图片显示为需用户点击的链接，避免自动向外部服务器请求。
+- 单块超过 256 Ki 字符、解析异常或渲染嵌套超过 64 层时退回原始文字，保留内容和换行，避免巨型消息或异常嵌套让整个页面崩溃。
+- 输入区最多占应用高度的 64%，权限选项和定时列表在内部滚动，输入与发送固定保留。跟随 visual viewport 的 resize/scroll 及偏移，切换窗口面板也限制在可见视口内，输入法组词不提交，软键盘回车用于换行。操作按钮增大、定时入口独立可见，横向按键条提供滚动提示。
+- 工具输出保持列对齐、可展开/复制；服务端有限预览调整为 40 行/4096 字节，UTF-8 长行被裁剪时也显示未传输提示。仍不是完整档案下载，超限需桌面查看，避免单条巨型工具输出拖垮手机。
+- 切换终端忽略旧连接的未附着帧，异步 seed 检查解析器实例，清理旧定时器和临时状态。定时发送新增保存确认，失败/断线/超时保留草稿，不自动重试；状态保持期限到期后主动刷新，避免静止画面长期残留“思考中”。
+- 修复单个增长中的输出块绕过 4000 行上限的问题；屏幕路径额外限制 1000 条消息，只有用户消息或提示时也不无限增长。主缓冲区清空/回收时同步读游标，避免首次回收后遗漏可见屏幕滚出的新行。
+
+## 可靠性与更新渠道整理（2026-09-30）
+
+**已实现并完成静态与临时运行验证，桌面/手机实际交互待复核。**
+
+- 终端输入归属集中到纯策略函数与统一同步入口，前台任务确认绑定代次，每个新 C 标记作废旧确认，避免晚到结果抢走新命令焦点。保留 xterm 原生渲染，不新增定时强制刷新或私有光标劫持。
+- 默认关闭的有界诊断记录公开光标、解析、渲染、尺寸、焦点和输入法事件，不记录正文、输入或密码。日志供开发者定位断流，不等于证明真实 Codex 光标问题永不复现。
+- 更新渠道改为实际 fork，默认检查已发布且安装包版本匹配的 NSIS release，手动下载不要求签名。删除失效 MSI/原仓库 SignPath 流程及独立的旧 SignPath 测签工作流；签名更新必须配置自己的密钥与公钥。公开 release API 已实际确认返回本仓库 0.9.5/0.9.3 NSIS 包。
+- Claude/Codex 记录固定来源，不因其他终端 mtime 变化跳转；明确 resume ID 精确匹配，新会话多个候选或无法核对 cwd 时回到屏幕视图。命令中无 ID 的交互式旧会话恢复也可能只显示屏幕，不猜测记录。
+- JSONL 共享增量缓存，处理半行和 UTF-8 分段、截断与创建时间变化；单调代次解决同时间戳工具结果未推送。最近 600 个原始步骤上限，约 16 MiB 以上记录跳过，首次读取仍线性扫描。
+- 修复无 origin 的 Claude 用户消息被漏掉的问题，工具结果和系统上下文继续排除。
+- 手机发送等待 PTY flush 确认；失败、断线、超时保留输入，重试复用请求编号，最近 128 个结果在同一 PTY 内去重。不自动重发，不承诺跨应用重启的 exactly-once。
+- 清理 6 项未使用直接依赖、Rust notification 插件/权限、Linux clipboard capability、3 项死代码、旧 AI SDK 分块及非 Windows 打包配置；保持既有锁定版本，未升级依赖。
+- 修正手机入口、字体及动态 LSP shim 的 Knip 扫描边界；包装脚本使用普通解析，避免本机 raw transfer 内存分配失败。不保留测试用例。结构扫描通过，完整 exports/types 扫描仍报告现有 barrel/API 导出，不据此删除业务实现或生成的 UI 原语。
+
+临时验证覆盖输入归属 16 种状态、旧异步确认作废、确认清空与草稿保护、重试编号、更新过滤、缓存/工具结果/截断等。详情见 [可靠性与发布](architecture/reliability-and-releases.md)。此前记录保留为历史，更新渠道旧描述不再代表当前配置。
+
 ## Codex 终端恢复原生光标与输入法定位（2026-09-28）
 
 用户在 0.9.3 继续遇到 Codex 底部输入卡顿和画面延迟刷新，要求无法可靠修复时回到官方支持的命令行显示方式。先前 `terminalInputAnchor.ts` 劫持 xterm v6 私有的 `isCursorHidden`、`_syncTextArea` 与 composition helper，并在输出解析/渲染时维护另一套光标层；即使降低布局读取，真实 Windows 环境仍出现回归。现删除整层适配，Codex 和其他 TUI 都使用 xterm 原生光标、textarea 和输入法定位，PTY 字节流与 Codex 的默认 TUI 画面模式不变。blocks 的 shell 提示符输入栏和前台任务焦点交接保留。
@@ -478,17 +507,17 @@ Terax 在启动失败时不会退到另一个 shell：一个存在但起不来�
 | `web/mod.rs` | `handle_ws` 里够不到的 `OP_CONT` 分支 | 已删 |
 | `lib/platform.ts` | `IS_MAC`、`IS_LINUX` | 已删 |
 | `src/web/main.tsx` | `main.ts` 的重复副本 | 已删 |
-| `rendererPool.ts` | 第二个本地 `IS_MAC` 常量（恒为 `false`） | 未决 |
-| `editor/lib/extensions.ts` | `readOnlyCompartment`，无引用 | 未决 |
-| `editor/lib/languageResolver.ts` | `preloadLanguages()`，无调用方 | 未决 |
-| `source-control/worktreeOps.ts` | `gitWorktreePrune()`，无调用方 | 未决 |
+| `rendererPool.ts` | 第二个本地 `IS_MAC` 常量（恒为 `false`） | 已删 |
+| `editor/lib/extensions.ts` | `readOnlyCompartment`，无引用 | 已删 |
+| `editor/lib/languageResolver.ts` | `preloadLanguages()`，无调用方 | 已删 |
+| `source-control/worktreeOps.ts` | `gitWorktreePrune()`，无调用方 | 已删 |
 
-`knip` 报告这些前端依赖未使用：`@fontsource/jetbrains-mono`、`@radix-ui/react-use-controllable-state`、`@tauri-apps/plugin-clipboard-manager`、`use-stick-to-bottom`、`zod`。删之前逐个确认，有些可能在 Rust 侧或构建步骤里用到。
+`@fontsource/jetbrains-mono` 是 CSS 字体引用，保留；确认无调用的 `@radix-ui/react-use-controllable-state`、`@tauri-apps/plugin-clipboard-manager`、`@tauri-apps/plugin-notification`、`use-stick-to-bottom`、`zod` 和 `react-compiler-healthcheck` 已删除。字体与动态 CLI 的扫描例外留在 Knip 配置。
 
 ## 仓库卫生
 
 - `terax-awei.exe`、`flake.nix` / `nix/` / Linux 与 macOS CI 任务 - 已删除，workflow 现在只有 Windows。
-- `bash.exe.stackdump` **仍然被跟踪**（本文早先记为"已删除"，是错的）。它是 Git Bash 的崩溃转储，在这台机器上会被反复重新生成，所以每次都出现在 `git status` 里。应该 `git rm --cached` 并加进 `.gitignore`。- **未决**。
+- `bash.exe.stackdump` 在 2026-09-30 通过 `git ls-files` 核对已不被跟踪，现加入 ignore，之前“仍然被跟踪”的描述过期；旧 bundle ignore 保留以免已有本地生成物进入仓库，不恢复测试源码或依赖。
 - `docs/history/` 下的三份移植文档已合并成 `git-移植档案.md`，引用已删除代码的部分去掉了。
 - `热部署.ps1` 把 `pnpm tauri dev` 作为后台进程启动（隐藏窗口，日志到 `dev.log`，PID 在 `.terax-dev.pid`，已 gitignore），脚本立即返回。重跑会先杀掉记录在案的进程树（`taskkill /T`），`-Stop` 只停不启。
 - `.github/workflows/` 在砍掉多平台之后只剩 Windows，动发布工具链之前重新确认。

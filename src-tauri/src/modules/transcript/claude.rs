@@ -19,21 +19,6 @@ use super::{
 /// session running in front of us.
 const SEARCH_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
-pub fn read(cwd: &str) -> Option<Transcript> {
-    let dir = project_dir(cwd)?;
-    let file = newest_transcript(&dir)?;
-    parse(&file)
-}
-
-/// Cheap change signal: when this session's transcript was last appended to.
-/// A poll compares it and only re-reads the file when it moved, so watching an
-/// idle agent costs a stat rather than a parse of the whole conversation.
-pub fn changed_at(cwd: &str) -> Option<i64> {
-    let file = newest_transcript(&project_dir(cwd)?)?;
-    let modified = file.metadata().ok()?.modified().ok()?;
-    Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64)
-}
-
 /// Resolved project directories, keyed by cwd. The fallback search reads a
 /// line out of every recently used project, which is far too much work to
 /// repeat on a poll.
@@ -72,6 +57,9 @@ pub(super) fn project_dir(cwd: &str) -> Option<PathBuf> {
         search_project_dir(&root, cwd)?
     };
     if let Ok(mut cache) = dir_cache().lock() {
+        if cache.len() >= 64 && !cache.contains_key(cwd) {
+            cache.clear();
+        }
         cache.insert(cwd.to_string(), found.clone());
     }
     Some(found)
@@ -110,9 +98,10 @@ fn search_project_dir(root: &Path, cwd: &str) -> Option<PathBuf> {
 
 /// The cwd a transcript belongs to, from the first line that names one.
 fn transcript_cwd(file: &Path) -> Option<String> {
-    let text = fs::read_to_string(file).ok()?;
-    for line in text.lines().take(64) {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+    use std::io::{BufRead, BufReader, Read};
+    let reader = BufReader::new(fs::File::open(file).ok()?.take(192 * 1024));
+    for line in reader.lines().take(64).map_while(Result::ok) {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
@@ -139,123 +128,159 @@ fn newest_transcript(dir: &Path) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
-fn parse(file: &Path) -> Option<Transcript> {
-    let text = fs::read_to_string(file).ok()?;
-    let session_id = file.file_stem()?.to_string_lossy().into_owned();
+#[derive(Default)]
+struct ParseState {
+    sequence: usize,
+    mode: Option<String>,
+    permission: Option<String>,
+    steps: Vec<Message>,
+    turn_started: Option<i64>,
+    turn_open: bool,
+    pending_tools: i32,
+    awaiting_result: HashMap<String, (usize, usize)>,
+}
 
-    let mut mode: Option<String> = None;
-    let mut permission: Option<String> = None;
-    let mut steps: Vec<Message> = Vec::new();
-    let mut revision = 0i64;
-    // When the current turn started, and whether it is still running.
-    //
-    // "An assistant entry arrived" is NOT the end of a turn: Claude writes one
-    // per model round trip, so a turn that calls three tools writes four of
-    // them. Treating the first as the end made the working indicator vanish a
-    // second after it appeared, for the whole of a long turn.
-    //
-    // What actually says "still going" is a tool call with no result yet. Tool
-    // results come back as user entries (the ones not typed by a person), so
-    // counting calls out and results in tracks the turn exactly.
-    let mut turn_started: Option<i64> = None;
-    let mut turn_open = false;
-    let mut pending_tools: i32 = 0;
-    // tool_use id -> where its Part sits, so the result can be written back.
-    let mut awaiting_result: HashMap<String, (usize, usize)> = HashMap::new();
+pub(super) fn read_file(file: &Path) -> Option<std::sync::Arc<Transcript>> {
+    static CACHE: OnceLock<super::jsonl::ReaderCache<ParseState>> = OnceLock::new();
+    CACHE
+        .get_or_init(super::jsonl::ReaderCache::new)
+        .read(file, || {
+            Some(file.file_stem()?.to_string_lossy().into_owned())
+        })
+}
 
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        match value.get("type").and_then(Value::as_str) {
-            Some("mode") => {
-                mode = value
-                    .get("mode")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
-            Some("permission-mode") => {
-                permission = value
-                    .get("permissionMode")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
-            Some("user") => {
-                // Tool results are recorded as user messages too. Only what a
-                // person typed is part of the conversation, and the transcript
-                // says which is which.
-                if value.get("origin").and_then(|o| o.get("kind")).and_then(Value::as_str)
-                    != Some("human")
-                {
-                    pending_tools = (pending_tools - count_blocks(&value, "tool_result")).max(0);
-                    // Not conversation, but it carries what the calls printed.
-                    // This is the whole reason the phone can show a command and
-                    // its output where it ran without reading the screen.
-                    fill_tool_results(&value, &mut steps, &awaiting_result);
-                    continue;
+impl super::jsonl::JsonlState for ParseState {
+    fn ingest(&mut self, text: &str) {
+        let mut mode = self.mode.take();
+        let mut permission = self.permission.take();
+        let mut steps = std::mem::take(&mut self.steps);
+        // When the current turn started, and whether it is still running.
+        //
+        // "An assistant entry arrived" is NOT the end of a turn: Claude writes one
+        // per model round trip, so a turn that calls three tools writes four of
+        // them. Treating the first as the end made the working indicator vanish a
+        // second after it appeared, for the whole of a long turn.
+        //
+        // What actually says "still going" is a tool call with no result yet. Tool
+        // results come back as user entries (the ones not typed by a person), so
+        // counting calls out and results in tracks the turn exactly.
+        let mut turn_started = self.turn_started;
+        let mut turn_open = self.turn_open;
+        let mut pending_tools = self.pending_tools;
+        // tool_use id -> where its Part sits, so the result can be written back.
+        let mut awaiting_result = std::mem::take(&mut self.awaiting_result);
+
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            self.sequence += 1;
+            match value.get("type").and_then(Value::as_str) {
+                Some("mode") => {
+                    mode = value
+                        .get("mode")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                 }
-                let at = timestamp(&value);
-                revision = revision.max(at);
-                turn_started = Some(at);
-                turn_open = true;
-                steps.push(Message {
-                    id: entry_id(&value, steps.len()),
-                    role: "user",
-                    at,
-                    text: user_text(&value),
-                    reasoning: None,
-                    parts: Vec::new(),
-                });
-            }
-            Some("assistant") => {
-                let at = timestamp(&value);
-                revision = revision.max(at);
-                let (text, reasoning, parts) = assistant_blocks(&value);
-                // Remember where each call landed so the result, which arrives
-                // on a later line, can be written back into it.
-                let mut call_ids = tool_use_ids(&value).into_iter();
-                for (index, part) in parts.iter().enumerate() {
-                    if let Part::Tool { .. } = part {
-                        if let Some(id) = call_ids.next() {
-                            awaiting_result.insert(id, (steps.len(), index));
+                Some("permission-mode") => {
+                    permission = value
+                        .get("permissionMode")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                Some("user") => {
+                    let results = count_blocks(&value, "tool_result");
+                    if results > 0 {
+                        pending_tools = (pending_tools - results).max(0);
+                        // Not conversation, but it carries what the calls printed.
+                        // This is the whole reason the phone can show a command and
+                        // its output where it ran without reading the screen.
+                        fill_tool_results(&value, &mut steps, &awaiting_result);
+                        continue;
+                    }
+                    let origin = value
+                        .get("origin")
+                        .and_then(|o| o.get("kind"))
+                        .and_then(Value::as_str);
+                    if origin.is_some_and(|kind| kind != "human")
+                        || value.get("isMeta").and_then(Value::as_bool) == Some(true)
+                        || value.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
+                    {
+                        continue;
+                    }
+                    let at = timestamp(&value);
+                    turn_started = Some(at);
+                    turn_open = true;
+                    steps.push(Message {
+                        id: entry_id(&value, self.sequence),
+                        role: "user",
+                        at,
+                        text: user_text(&value),
+                        reasoning: None,
+                        parts: Vec::new(),
+                    });
+                }
+                Some("assistant") => {
+                    let at = timestamp(&value);
+                    let (text, reasoning, parts) = assistant_blocks(&value);
+                    // Remember where each call landed so the result, which arrives
+                    // on a later line, can be written back into it.
+                    let mut call_ids = tool_use_ids(&value).into_iter();
+                    for (index, part) in parts.iter().enumerate() {
+                        if let Part::Tool { .. } = part {
+                            if let Some(id) = call_ids.next() {
+                                awaiting_result.insert(id, (steps.len(), index));
+                            }
                         }
                     }
+                    pending_tools += count_blocks(&value, "tool_use");
+                    // Still going while a call it just made has not come back.
+                    turn_open = pending_tools > 0;
+                    steps.push(Message {
+                        id: entry_id(&value, self.sequence),
+                        role: "assistant",
+                        at,
+                        text,
+                        reasoning,
+                        parts,
+                    });
                 }
-                pending_tools += count_blocks(&value, "tool_use");
-                // Still going while a call it just made has not come back.
-                turn_open = pending_tools > 0;
-                steps.push(Message {
-                    id: entry_id(&value, steps.len()),
-                    role: "assistant",
-                    at,
-                    text,
-                    reasoning,
-                    parts,
-                });
+                _ => {}
             }
-            _ => {}
         }
+
+        super::jsonl::compact_steps(&mut steps, &mut awaiting_result);
+        self.mode = mode;
+        self.permission = permission;
+        self.steps = steps;
+        self.turn_started = turn_started;
+        self.turn_open = turn_open;
+        self.pending_tools = pending_tools;
+        self.awaiting_result = awaiting_result;
     }
 
-    if steps.is_empty() {
-        return None;
-    }
+    fn snapshot(&self, session_id: String, revision: i64) -> Option<Transcript> {
+        if self.steps.is_empty() {
+            return None;
+        }
 
-    Some(Transcript {
-        source: "claude",
-        session_id,
-        title: None,
-        // Claude states the permission mode and the conversation mode
-        // separately; the permission mode is the one that changes what
-        // sending a message does, so it leads.
-        mode: permission.or(mode),
-        model: None,
-        messages: merge_assistant_steps(steps),
-        working: turn_open
-            .then(|| turn_started.map(|since| Working { since }))
-            .flatten(),
-        revision,
-    })
+        Some(Transcript {
+            source: "claude",
+            session_id,
+            title: None,
+            // Claude states the permission mode and the conversation mode
+            // separately; the permission mode is the one that changes what
+            // sending a message does, so it leads.
+            mode: self.permission.clone().or_else(|| self.mode.clone()),
+            model: None,
+            messages: merge_assistant_steps(self.steps.clone()),
+            working: self
+                .turn_open
+                .then(|| self.turn_started.map(|since| Working { since }))
+                .flatten(),
+            revision,
+        })
+    }
 }
 
 /// How many content blocks of a kind an entry carries.

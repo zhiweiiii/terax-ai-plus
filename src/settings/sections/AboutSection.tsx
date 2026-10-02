@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { useUpdater } from "@/modules/updater";
+import { isManualUpdate } from "@/modules/updater/useUpdater";
 import { GithubIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getName, getVersion } from "@tauri-apps/api/app";
@@ -44,7 +45,7 @@ export function AboutSection() {
             : ready
               ? "重启以完成安装"
               : available
-                ? `安装 v${status.update.version}`
+                ? `${isManualUpdate(status.update) ? "下载" : "安装"} v${status.update.version}`
                 : "检查更新";
   const onUpdateClick = () => {
     if (available) void install();
@@ -75,7 +76,7 @@ export function AboutSection() {
             {name}
           </span>
           <span className="text-[11px] text-muted-foreground">
-开源的 AI 原生终端模拟器
+            开源的 AI 原生终端模拟器
           </span>
           <span className="mt-1 font-mono text-[11px] text-muted-foreground">
             v{version || "—"}
@@ -134,8 +135,8 @@ export function AboutSection() {
             onClick={() => void openUrl(REPO_URL)}
             className="gap-1.5"
           >
-            <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
-            在 GitHub 查看
+            <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />在
+            GitHub 查看
           </Button>
           <Button
             variant="ghost"

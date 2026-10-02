@@ -1,137 +1,197 @@
-// Just enough Markdown for what an agent actually writes.
-//
-// This builds DOM nodes directly and never touches innerHTML. That is not a
-// style preference: the phone page holds the auth cookie and drives a live
-// PTY, so turning agent output into HTML would let a line like
-// `<img onerror=...>` run in that context. Text goes in through textContent,
-// always, and anything this does not recognise stays literal text.
-//
-// Only the transcript path uses this. The screen path shows what a TUI already
-// rendered (it drew the Markdown itself, in ANSI and box characters), so
-// parsing that as Markdown would be reading the same source twice.
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { gfmFromMarkdown } from "mdast-util-gfm";
+import { gfm } from "micromark-extension-gfm";
+import { copyButton } from "@/web/clipboard";
+import { patchChildren } from "@/web/dom";
 
-/** ```lang fenced block``` */
-const FENCE = /^\s*```(\S*)\s*$/;
-/** `# ` through `###### ` */
-const HEADING = /^(#{1,6})\s+(.*)$/;
-/** `- `, `* `, `+ ` */
-const BULLET = /^\s*[-*+]\s+(.*)$/;
-/** `1. `, `2) ` */
-const ORDERED = /^\s*(\d{1,3})[.)]\s+(.*)$/;
+type MarkdownNode = ReturnType<typeof fromMarkdown>["children"][number];
+type Definition = Extract<MarkdownNode, { type: "definition" }>;
 
-/** Render Markdown into `parent`, replacing whatever was there. */
 export function renderMarkdown(parent: HTMLElement, source: string): void {
-  parent.replaceChildren();
-  const lines = source.split("\n");
-  let i = 0;
+  if (source.length > 256 * 1024) {
+    parent.dataset.plain = "true";
+    parent.textContent = source;
+    return;
+  }
+  try {
+    delete parent.dataset.plain;
+    renderParsed(parent, source);
+  } catch {
+    parent.dataset.plain = "true";
+    parent.textContent = source;
+  }
+}
 
-  while (i < lines.length) {
-    const fence = FENCE.exec(lines[i]);
-    if (fence) {
-      const lang = fence[1];
-      const body: string[] = [];
-      i++;
-      while (i < lines.length && !FENCE.test(lines[i])) {
-        body.push(lines[i]);
-        i++;
+function renderParsed(parent: HTMLElement, source: string): void {
+  const tree = fromMarkdown(source, {
+    extensions: [gfm()],
+    mdastExtensions: [gfmFromMarkdown()],
+  });
+  const definitions = new Map<string, Definition>();
+  const pending: MarkdownNode[] = [...tree.children].reverse();
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node) continue;
+    if (node.type === "definition" && !definitions.has(node.identifier))
+      definitions.set(node.identifier, node);
+    if ("children" in node) {
+      for (let index = node.children.length - 1; index >= 0; index--)
+        pending.push(node.children[index]);
+    }
+  }
+  const fragment = document.createDocumentFragment();
+  for (const node of tree.children) fragment.appendChild(renderNode(node));
+  patchChildren(parent, Array.from(fragment.childNodes));
+
+  function renderNode(node: MarkdownNode, depth = 0): Node {
+    if (depth >= 64)
+      return document.createTextNode(
+        source.slice(
+          node.position?.start.offset ?? 0,
+          node.position?.end.offset ?? source.length,
+        ),
+      );
+    const appendChildren = (
+      container: HTMLElement,
+      children: MarkdownNode[],
+    ) => {
+      for (const child of children)
+        container.appendChild(renderNode(child, depth + 1));
+    };
+    if (node.type === "text" || node.type === "html")
+      return document.createTextNode(node.value);
+    if (node.type === "code") return codeBlock(node.value, node.lang ?? "");
+    if (node.type === "definition") return document.createDocumentFragment();
+    if (node.type === "footnoteDefinition") {
+      const note = document.createElement("div");
+      note.className = "md-footnote";
+      const label = document.createElement("span");
+      label.textContent = `[${node.label ?? node.identifier}] `;
+      note.appendChild(label);
+      appendChildren(note, node.children);
+      return note;
+    }
+    if (node.type === "link" || node.type === "linkReference") {
+      const definition =
+        node.type === "linkReference" ? definitions.get(node.identifier) : node;
+      const href = safeHref(definition?.url ?? "");
+      const link = document.createElement(href ? "a" : "span");
+      if (href && link instanceof HTMLAnchorElement) {
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        if (definition?.title) link.title = definition.title;
       }
-      i++; // closing fence, or the end of the text
-      parent.appendChild(codeBlock(body.join("\n"), lang));
-      continue;
+      appendChildren(link, node.children);
+      return link;
     }
-
-    const heading = HEADING.exec(lines[i]);
-    if (heading) {
-      const el = document.createElement("div");
-      el.className = `md-h md-h${heading[1].length}`;
-      inline(el, heading[2]);
-      parent.appendChild(el);
-      i++;
-      continue;
-    }
-
-    if (BULLET.test(lines[i]) || ORDERED.test(lines[i])) {
-      const list = document.createElement("ul");
-      list.className = "md-list";
-      while (i < lines.length) {
-        const bullet = BULLET.exec(lines[i]);
-        const ordered = bullet ? null : ORDERED.exec(lines[i]);
-        if (!bullet && !ordered) break;
-        const item = document.createElement("li");
-        const marker = document.createElement("span");
-        marker.className = "md-marker";
-        marker.textContent = bullet ? "•" : `${ordered?.[1]}.`;
-        const text = document.createElement("span");
-        inline(text, bullet ? bullet[1] : (ordered?.[2] ?? ""));
-        item.append(marker, text);
-        list.appendChild(item);
-        i++;
+    if (node.type === "image" || node.type === "imageReference") {
+      const definition =
+        node.type === "imageReference"
+          ? definitions.get(node.identifier)
+          : node;
+      const href = safeHref(definition?.url ?? "");
+      const link = document.createElement(href ? "a" : "span");
+      link.textContent = node.alt || "图片";
+      if (href && link instanceof HTMLAnchorElement) {
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
       }
-      parent.appendChild(list);
-      continue;
+      return link;
     }
+    if (node.type === "table") {
+      const wrap = document.createElement("div");
+      wrap.className = "md-table-wrap";
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const body = document.createElement("tbody");
+      for (const [index, row] of node.children.entries()) {
+        const tr = document.createElement("tr");
+        for (const [column, cell] of row.children.entries()) {
+          const td = document.createElement(index === 0 ? "th" : "td");
+          const align = node.align?.[column];
+          if (align) td.style.textAlign = align;
+          appendChildren(td, cell.children);
+          tr.appendChild(td);
+        }
+        (index === 0 ? head : body).appendChild(tr);
+      }
+      table.append(head, body);
+      wrap.appendChild(table);
+      return wrap;
+    }
+    if (node.type === "footnoteReference")
+      return document.createTextNode(`[${node.label ?? node.identifier}]`);
 
-    // A run of ordinary lines is one paragraph. Blank lines separate them and
-    // are not rendered as empty boxes.
-    const para: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== "" &&
-      !FENCE.test(lines[i]) &&
-      !HEADING.test(lines[i]) &&
-      !BULLET.test(lines[i]) &&
-      !ORDERED.test(lines[i])
-    ) {
-      para.push(lines[i]);
-      i++;
+    const tags: Partial<Record<MarkdownNode["type"], string>> = {
+      paragraph: "p",
+      strong: "strong",
+      emphasis: "em",
+      delete: "del",
+      inlineCode: "code",
+      blockquote: "blockquote",
+      break: "br",
+      thematicBreak: "hr",
+      listItem: "li",
+    };
+    const tag =
+      node.type === "heading"
+        ? `h${node.depth}`
+        : node.type === "list"
+          ? node.ordered
+            ? "ol"
+            : "ul"
+          : (tags[node.type] ?? "span");
+    const element = document.createElement(tag);
+    if (node.type === "paragraph") element.className = "md-p";
+    if (node.type === "heading") element.className = `md-h md-h${node.depth}`;
+    if (node.type === "inlineCode") {
+      element.className = "md-inline-code";
+      element.textContent = node.value;
     }
-    if (para.length > 0) {
-      const el = document.createElement("p");
-      el.className = "md-p";
-      inline(el, para.join("\n"));
-      parent.appendChild(el);
-      continue;
+    if (node.type === "list") {
+      element.className = "md-list";
+      if (element instanceof HTMLOListElement && node.start != null)
+        element.start = node.start;
     }
-    i++; // blank line
+    if (node.type === "listItem" && node.checked != null) {
+      element.className = "md-task";
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.checked = node.checked;
+      check.disabled = true;
+      element.appendChild(check);
+    }
+    if ("children" in node) appendChildren(element, node.children);
+    return element;
+  }
+}
+
+function safeHref(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:", "mailto:"].includes(url.protocol)
+      ? url.href
+      : null;
+  } catch {
+    return null;
   }
 }
 
 function codeBlock(code: string, lang: string): HTMLElement {
-  // The block scrolls inside itself. A phone is narrow and code does not wrap
-  // usefully, but the page must never scroll sideways as a whole.
   const wrap = document.createElement("div");
   wrap.className = "md-code";
-  if (lang) {
-    const label = document.createElement("span");
-    label.className = "md-code-lang";
-    label.textContent = lang;
-    wrap.appendChild(label);
-  }
+  const head = document.createElement("div");
+  head.className = "md-code-head";
+  const label = document.createElement("span");
+  label.textContent = lang || "代码";
   const pre = document.createElement("pre");
   pre.textContent = code;
-  wrap.appendChild(pre);
+  head.append(
+    label,
+    copyButton(() => pre.textContent ?? ""),
+  );
+  wrap.append(head, pre);
   return wrap;
-}
-
-/** `code` and **bold**, the only inline markup worth the trouble. */
-const INLINE = /(`[^`]+`|\*\*[^*]+\*\*)/;
-
-function inline(parent: HTMLElement, text: string): void {
-  for (const piece of text.split(INLINE)) {
-    if (piece === "") continue;
-    if (piece.length > 2 && piece.startsWith("`") && piece.endsWith("`")) {
-      const el = document.createElement("code");
-      el.className = "md-inline-code";
-      el.textContent = piece.slice(1, -1);
-      parent.appendChild(el);
-      continue;
-    }
-    if (piece.length > 4 && piece.startsWith("**") && piece.endsWith("**")) {
-      const el = document.createElement("strong");
-      el.textContent = piece.slice(2, -2);
-      parent.appendChild(el);
-      continue;
-    }
-    parent.appendChild(document.createTextNode(piece));
-  }
 }

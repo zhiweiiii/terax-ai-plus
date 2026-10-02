@@ -11,7 +11,7 @@
 //! Three backends, one shape:
 //!
 //! - `claude` - `~/.claude/projects/<escaped cwd>/<session>.jsonl`, appended
-//!   as the session runs. No dependency, trivially re-read.
+//!   as the session runs. Shared incremental JSONL parsing.
 //! - `opencode` - `~/.local/share/opencode/opencode.db`, SQLite. Its TUI opens
 //!   no port and `opencode export` costs a process per read, so the database
 //!   is read directly, read-only.
@@ -19,7 +19,16 @@
 
 mod claude;
 mod codex;
+mod jsonl;
 mod opencode;
+
+pub(crate) fn read_file(file: &std::path::Path, agent: &str) -> Option<std::sync::Arc<Transcript>> {
+    match agent {
+        "claude" => claude::read_file(file),
+        "codex" => codex::read_file(file),
+        _ => None,
+    }
+}
 
 use serde::Serialize;
 
@@ -78,8 +87,8 @@ fn is_false(b: &bool) -> bool {
 /// A transcript is mostly tool results - the biggest on this machine is 48 MB
 /// of them - and the phone is showing a conversation, not an archive. Enough
 /// to see what a command did, with the count of what was dropped.
-const TOOL_OUTPUT_LINES: usize = 10;
-const TOOL_OUTPUT_BYTES: usize = 800;
+const TOOL_OUTPUT_LINES: usize = 40;
+const TOOL_OUTPUT_BYTES: usize = 4096;
 
 /// Trim a tool's output to something a phone can show, reporting how many
 /// lines were dropped.
@@ -90,7 +99,7 @@ pub(crate) fn clip_output(text: &str) -> (String, usize) {
     }
     let total = text.lines().count();
     let mut out = String::new();
-    let mut kept = 0;
+    let mut kept: usize = 0;
     for line in text.lines().take(TOOL_OUTPUT_LINES) {
         if out.len() + line.len() > TOOL_OUTPUT_BYTES && kept > 0 {
             break;
@@ -101,13 +110,16 @@ pub(crate) fn clip_output(text: &str) -> (String, usize) {
         out.push_str(line);
         kept += 1;
     }
-    out.truncate(
-        out.char_indices()
-            .map(|(i, c)| i + c.len_utf8())
-            .take_while(|end| *end <= TOOL_OUTPUT_BYTES)
-            .last()
-            .unwrap_or(0),
-    );
+    let end = out
+        .char_indices()
+        .map(|(i, c)| i + c.len_utf8())
+        .take_while(|end| *end <= TOOL_OUTPUT_BYTES)
+        .last()
+        .unwrap_or(0);
+    if end < out.len() {
+        kept = kept.saturating_sub(1);
+        out.truncate(end);
+    }
     (out, total.saturating_sub(kept))
 }
 
@@ -167,46 +179,12 @@ pub struct Transcript {
     pub revision: i64,
 }
 
-/// Read the newest agent session for a working directory.
-///
-/// `agent` is what the PTY's own detection saw start (`pty::agent_detect`);
-/// when it is not known every backend is tried and the more recently updated
-/// one wins, because a directory can have been used by either.
-pub fn read(cwd: &str, agent: Option<&str>) -> Option<Transcript> {
-    match agent {
-        Some("claude") => claude::read(cwd),
-        Some("codex") => codex::read(cwd),
-        Some("opencode") => opencode::read(cwd),
-        _ => {
-            let a = claude::read(cwd);
-            let b = codex::read(cwd);
-            let c = opencode::read(cwd);
-            [a, b, c]
-                .into_iter()
-                .flatten()
-                .max_by_key(|transcript| transcript.revision)
-        }
-    }
+pub(crate) fn read_opencode(cwd: &str) -> Option<std::sync::Arc<Transcript>> {
+    opencode::read(cwd).map(std::sync::Arc::new)
 }
 
-/// Cheap change signal across all backends: the newest moment any of them
-/// wrote anything for this directory. A poller compares this and only calls
-/// `read` when it moved, so watching an idle agent costs a couple of stats.
-///
-/// opencode's half is not per-directory - its whole database is one file - so
-/// activity in another project also invalidates. That costs one extra read,
-/// which then finds an unchanged `revision` and sends nothing.
-pub fn fingerprint(cwd: &str, agent: Option<&str>) -> Option<i64> {
-    match agent {
-        Some("claude") => claude::changed_at(cwd),
-        Some("codex") => codex::changed_at(cwd),
-        Some("opencode") => opencode::changed_at(),
-        _ => claude::changed_at(cwd)
-            .into_iter()
-            .chain(codex::changed_at(cwd))
-            .chain(opencode::changed_at())
-            .max(),
-    }
+pub(crate) fn opencode_fingerprint() -> Option<i64> {
+    opencode::changed_at()
 }
 
 /// Windows paths reach us with either separator depending on who wrote them

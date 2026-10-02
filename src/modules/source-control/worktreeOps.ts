@@ -44,12 +44,6 @@ export async function gitWorktreeRemove(
   );
 }
 
-export async function gitWorktreePrune(repoRoot: string): Promise<void> {
-  assertOk(
-    await native.runCommand("git worktree prune", repoRoot, 30),
-    "Could not prune worktrees",
-  );
-}
 
 export function defaultWorktreePath(repoRoot: string, branch: string): string {
   const parts = repoRoot.split(/[\\/]/).filter(Boolean);

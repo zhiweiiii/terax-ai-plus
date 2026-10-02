@@ -55,6 +55,7 @@ const RECYCLE_AT = 4000;
 /** Hard cap on retained output lines, so a long session cannot grow the DOM
  *  (and the phone's memory) without bound. */
 const MAX_LINES = 4000;
+const MAX_TURNS = 1000;
 /** Coalesce window. Output arrives in many small chunks while a command runs;
  *  flushing per chunk would emit half-written lines and thrash the DOM. */
 const FLUSH_MS = 60;
@@ -79,6 +80,7 @@ export class Conversation {
   private idleTimer: number | null = null;
   private nextId = 1;
   private inAlt = false;
+  private agent: string | null = null;
   /** Previous alt-screen frame, for scroll detection. */
   private prevScreen: string[] = [];
   /** Column the previous frame's side panel started at, or -1. Rows that
@@ -172,6 +174,16 @@ export class Conversation {
     this.prevScreen = [];
   }
 
+  setAgent(agent: string | null) {
+    if (agent === this.agent) return;
+    this.agent = agent;
+    this.scheduleFlush();
+  }
+
+  get program(): string | null {
+    return this.agent;
+  }
+
   /** Put the headless parser into/out of the alternate screen to match the
    *  PTY's real mode. The server's history ring can trim the `1049h` enter
    *  sequence, so a backlog that starts mid-TUI would otherwise parse as a
@@ -203,19 +215,22 @@ export class Conversation {
    *  Write up to the switch, read the scrollback out as history, then write
    *  the rest. */
   async writeSeed(bytes: Uint8Array) {
+    const term = this.term;
     const at = indexOfAltEnter(bytes);
     const head = at < 0 ? bytes : bytes.subarray(0, at);
     if (head.length > 0) {
-      await new Promise<void>((done) => this.term.write(head, () => done()));
-      this.flush();
-      this.emitSeededCursorRow();
+      await new Promise<void>((done) => term.write(head, () => done()));
+      if (term !== this.term) return;
+      this.flush(at >= 0);
+      this.emitSeededCursorRow(at >= 0);
     }
     if (at < 0) return;
     // Attaching mid-session: whatever the program has on screen now is an
     // interaction the reader needs, never the splash it opened with.
     this.firstFrame = false;
     const tail = bytes.subarray(at);
-    await new Promise<void>((done) => this.term.write(tail, () => done()));
+    await new Promise<void>((done) => term.write(tail, () => done()));
+    if (term !== this.term) return;
     this.flush();
   }
 
@@ -232,10 +247,12 @@ export class Conversation {
    *  Slicing is safe at any byte: xterm carries a partial escape sequence over
    *  to the next write. */
   async writeBacklog(bytes: Uint8Array) {
+    const term = this.term;
     const sliceSize = BACKLOG_SLICE(this.term.cols);
     for (let at = 0; at < bytes.length; at += sliceSize) {
       const slice = bytes.subarray(at, at + sliceSize);
-      await new Promise<void>((done) => this.term.write(slice, () => done()));
+      await new Promise<void>((done) => term.write(slice, () => done()));
+      if (term !== this.term) return;
       this.flush();
     }
   }
@@ -250,9 +267,9 @@ export class Conversation {
    *  prompt, which is most of the time.
    *
    *  The read cursor moves past it, so the live stream does not repeat it. */
-  private emitSeededCursorRow() {
+  private emitSeededCursorRow(asShell = false) {
     const buf = this.term.buffer.active;
-    if (buf.type === "alternate") return;
+    if (buf.type === "alternate" || (this.agent !== null && !asShell)) return;
     const at = buf.baseY + buf.cursorY;
     const text = buf.getLine(at)?.translateToString(true) ?? "";
     if (text.trim() === "") return;
@@ -274,7 +291,7 @@ export class Conversation {
     this.recentSends.push(trimmed);
     if (this.recentSends.length > RECENT_SENDS) this.recentSends.shift();
 
-    if (this.inAlt) {
+    if (this.inAlt || this.agent !== null) {
       this.pending.push(trimmed);
       this.onChange();
       return;
@@ -294,11 +311,16 @@ export class Conversation {
 
   /** Start over — a new session, or a reconnect that replays history. */
   reset() {
+    if (this.flushTimer !== null) window.clearTimeout(this.flushTimer);
+    if (this.idleTimer !== null) window.clearTimeout(this.idleTimer);
+    this.flushTimer = null;
+    this.idleTimer = null;
     const { cols, rows } = this.term;
     this.term.dispose();
     this.term = this.makeTerm(cols || 80, rows || 24);
     this.readUpTo = 0;
     this.inAlt = false;
+    this.agent = null;
     this.prevScreen = [];
     this.sideCut = -1;
     this.liveScreen = null;
@@ -326,12 +348,12 @@ export class Conversation {
     }, FLUSH_MS);
   }
 
-  private flush() {
+  private flush(asShell = false) {
     const buf = this.term.buffer.active;
     if (buf.type === "alternate") {
       this.flushAlt();
     } else {
-      this.flushNormal();
+      this.flushNormal(asShell);
     }
     this.armIdle();
     this.onChange();
@@ -384,10 +406,12 @@ export class Conversation {
       // not dropped as an "echo" of something we sent.
       this.appendBlocks(
         markEchoes(
-          toBlocks(dropSideColumn(this.prevScreen.slice(0, scrolled), this.sideCut)),
+          toBlocks(
+            dropSideColumn(this.prevScreen.slice(0, scrolled), this.sideCut),
+          ),
           this.recentSends,
         ),
-        );
+      );
     }
     this.prevScreen = cur;
     this.setLive(cur);
@@ -410,7 +434,12 @@ export class Conversation {
     // it is asking about, and the rest of the screen is not part of the
     // question.
     this.promptBlocks = menu
-      ? toBlocks(this.liveScreen.slice(promptFrom(this.liveScreen, menu.start), menu.start))
+      ? toBlocks(
+          this.liveScreen.slice(
+            promptFrom(this.liveScreen, menu.start),
+            menu.start,
+          ),
+        )
       : [];
     const split = splitFooter(this.liveScreen, menu ? menu.end + 1 : 0);
     if (menu) {
@@ -489,18 +518,20 @@ export class Conversation {
 
   // ── Normal buffer ──────────────────────────────────────────────────────
 
-  private flushNormal() {
+  private flushNormal(asShell = false) {
     const buf = this.term.buffer.active;
-    if (this.inAlt) {
+    if (this.inAlt || (this.agent === null && this.liveScreen !== null)) {
       // The program exited. Whatever was still on its screen never scrolled
       // off, so fold it into the history before moving on — through the same
       // parse as every other frame: furniture stripped, echoes marked. Raw-
       // appending the screen put the input box, the status line and the
       // program's echo of a sent message into the output as anonymous AI.
       this.inAlt = false;
-      if (this.liveScreen && this.liveScreen.length) {
+      if (this.liveScreen?.length) {
         const blocks = markEchoes(
-          toBlocks(dropSideColumn(splitFooter(this.liveScreen).body, this.sideCut)),
+          toBlocks(
+            dropSideColumn(splitFooter(this.liveScreen).body, this.sideCut),
+          ),
           this.recentSends,
         );
         this.appendBlocks(blocks);
@@ -541,6 +572,34 @@ export class Conversation {
 
     // Everything above the cursor is settled; the cursor's own line may still
     // be half-written (a prompt, a progress line), so it is left for later.
+    if (this.agent !== null && !asShell) {
+      if (this.readUpTo > buf.baseY) this.readUpTo = buf.baseY;
+      const fresh: string[] = [];
+      for (let i = this.readUpTo; i < buf.baseY; i++) {
+        const line = buf.getLine(i);
+        if (!line) continue;
+        const text = line.translateToString(true);
+        if (line.isWrapped && fresh.length > 0) fresh[fresh.length - 1] += text;
+        else fresh.push(text);
+      }
+      if (fresh.length > 0)
+        this.appendBlocks(markEchoes(toBlocks(fresh), this.recentSends));
+      this.readUpTo = Math.max(this.readUpTo, buf.baseY);
+      const screen: string[] = [];
+      for (let y = 0; y < this.term.rows; y++)
+        screen.push(buf.getLine(buf.baseY + y)?.translateToString(true) ?? "");
+      this.setLive(screen);
+      this.recycleIfNeeded();
+      return;
+    }
+    this.liveScreen = null;
+    this.liveBlocks = [];
+    this.choices = [];
+    this.promptBlocks = [];
+    this.thinking = null;
+    this.mode = null;
+    this.status = null;
+    this.agents = [];
     const end = buf.baseY + buf.cursorY;
     if (end < this.readUpTo) {
       // The buffer was cleared or reset under us.
@@ -691,7 +750,8 @@ export class Conversation {
     if (buf.baseY < RECYCLE_AT) return;
     this.term.clear(); // keeps the current screen, drops the scrollback
     const after = this.term.buffer.active;
-    this.readUpTo = after.baseY + after.cursorY;
+    this.readUpTo =
+      this.agent === null ? after.baseY + after.cursorY : after.baseY;
   }
 
   /** Keep the retained transcript bounded. */
@@ -700,7 +760,16 @@ export class Conversation {
     for (const t of this.turns) {
       if (t.kind === "output") total += t.lines.length;
     }
-    while (total > MAX_LINES && this.turns.length > 1) {
+    while (this.turns.length > MAX_TURNS) {
+      const dropped = this.turns.shift();
+      if (dropped?.kind === "output") total -= dropped.lines.length;
+    }
+    while (total > MAX_LINES) {
+      const first = this.turns[0];
+      if (first?.kind === "output" && first.lines.length > total - MAX_LINES) {
+        first.lines.splice(0, total - MAX_LINES);
+        break;
+      }
       const dropped = this.turns.shift();
       if (dropped?.kind === "output") total -= dropped.lines.length;
     }
@@ -782,9 +851,9 @@ const PATH_LIKE = /^\/?[A-Za-z]:[\\/]|^\/(?:[A-Za-z0-9._-]+[\\/])+/;
 /** Above this share of frame characters, a line is drawing, not saying. */
 const CHROME_SHARE = 0.3;
 /** Prompt markers these tools put in front of what the user said. */
-const USER_MARK = /^[>❯]\s?/;
+const USER_MARK = /^[>❯›]\s?/;
 /** …and the same markers pointing at a numbered choice, which is not. */
-const MENU_ITEM = /^[>❯]\s*\d+[.)]\s/;
+const MENU_ITEM = /^[>❯›]\s*\d+[.)]\s/;
 
 /** A line with its frame removed. */
 export function stripChrome(line: string): string {
@@ -794,7 +863,9 @@ export function stripChrome(line: string): string {
 /** Strip the frame a TUI draws around text, so a line can be compared with
  *  what was actually typed. */
 function stripDecoration(line: string): string {
-  return stripChrome(line).replace(/^[>|*\-•⏺●○\s]+/, "").trim();
+  return stripChrome(line)
+    .replace(/^[>|*\-•⏺●○\s]+/, "")
+    .trim();
 }
 
 /** A block of screen content: one bubble. */
@@ -1045,7 +1116,8 @@ function condenseStatus(footer: string[], typed: string[]): string | null {
     if (isWidget(text)) continue;
     // The input box lives down here too, and what is being typed into it is
     // not status — it is a draft message.
-    if (typed.some((t) => t.length >= 2 && text.includes(collapse(t)))) continue;
+    if (typed.some((t) => t.length >= 2 && text.includes(collapse(t))))
+      continue;
     // A status bar is redrawn in pieces, so the same fragment shows up on
     // several rows; keep the first of each. Columns are separated by a run of
     // spaces as often as by a bullet, so split on both.
@@ -1148,7 +1220,8 @@ function isWorkingLine(raw: string): boolean {
 function readWorking(raw: string): Thinking | null {
   const text = stripChrome(raw).replace(SPINNER_LEAD, "").trim();
   if (text === "" || text.length > WORKING_MAX) return null;
-  const m = WORKING.exec(text);
+  const m =
+    WORKING.exec(text) ?? /^(Working|Thinking|Reconnecting)\s*\(/i.exec(text);
   if (!m) return null;
   const label = m[1].trim();
   if (label === "" || isWidget(label)) return null;
@@ -1207,7 +1280,7 @@ function detectModeAt(
 }
 
 /** A numbered menu row: "❯ 1. Yes", "  2. No, and tell Claude why". */
-const CHOICE_ROW = /^([>❯]?)\s*(\d{1,2})[.)]\s+(\S.*)$/;
+const CHOICE_ROW = /^([>❯›]?)\s*(\d{1,2})[.)]\s+(\S.*)$/;
 /** How far up from the input box a menu can start. Both tools draw the
  *  question and its options directly above the composer. */
 const CHOICE_WINDOW = 24;
@@ -1301,12 +1374,24 @@ function findChoices(screen: string[]): ChoiceMenu | null {
 
   // Whatever sits between one option and the next describes it. On a phone
   // that matters: "选项 A" alone is not a choice anyone can make.
+  let end = best[best.length - 1].at;
   const choices = best.map((hit, i) => {
-    const until = best[i + 1]?.at ?? hit.at + 1;
+    const following = best[i + 1];
+    const until =
+      following?.at ?? Math.min(screen.length, hit.at + CHOICE_ROW_GAP);
     const detail: string[] = [];
     for (let r = hit.at + 1; r < until; r++) {
       const text = stripChrome(screen[r]).trim();
+      if (
+        !following &&
+        (text === "" ||
+          isFurniture(screen[r]) ||
+          isInputBox(screen[r]) ||
+          isWorkingLine(screen[r]))
+      )
+        break;
       if (text !== "") detail.push(text);
+      if (!following) end = r;
     }
     return detail.length > 0
       ? { ...hit.choice, detail: detail.join(" ") }
@@ -1316,10 +1401,9 @@ function findChoices(screen: string[]): ChoiceMenu | null {
   return {
     choices,
     start: best[0].at,
-    end: best[best.length - 1].at,
+    end,
   };
 }
-
 
 /** A splash screen: a logo and a version line, and essentially nothing else.
  *
@@ -1392,7 +1476,11 @@ function markEchoes(blocks: Block[], sent: string[]): Block[] {
     // wording, which every tool phrases differently and changes over time.
     for (let i = runs.length - 1; i > 0; i--) {
       const before = runs[i - 1];
-      if (runs[i].role === "user" && before.role === "out" && before.lines.length === 1) {
+      if (
+        runs[i].role === "user" &&
+        before.role === "out" &&
+        before.lines.length === 1
+      ) {
         runs.splice(i - 1, 1);
       }
     }

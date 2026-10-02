@@ -1,289 +1,335 @@
-//! Past agent conversations for a directory, so one can be picked and resumed.
-//!
-//! Both agents ship a picker of their own (`claude --resume`, `codex resume`),
-//! but both are interactive TUIs: driving one to harvest a list would mean
-//! spawning a process and scraping a screen. They read files to build that
-//! list, so this reads the same files.
-//!
-//! - `claude` - `~/.claude/projects/<escaped cwd>/<session>.jsonl`. The escaped
-//!   directory can contain sessions from different cwd values, so inspect each.
-//! - `codex` - `~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl`. Laid out by
-//!   date rather than by directory, so the cwd comes out of each file.
-//!
-//! Nothing here parses a whole transcript. Rollouts reach 90 MB and a listing
-//! only needs a title and a timestamp, both of which live near the top, so each
-//! file is read up to `HEAD_BYTES` and no further.
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
-
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Enough to reach Claude's `ai-title`, which trails the first exchange rather
-/// than heading the file. Codex puts everything needed on line one.
-const HEAD_BYTES: usize = 192 * 1024;
-/// A listing is for picking up recent work, not for browsing an archive.
+const HEAD_BYTES: u64 = 192 * 1024;
 const MAX_PER_AGENT: usize = 40;
-const TITLE_MAX_CHARS: usize = 80;
+const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
-    /// `claude` or `codex`. Decides which resume command the UI offers.
     pub agent: &'static str,
-    /// What the agent's own resume takes.
     pub id: String,
-    /// Best available description: the agent's own title, else the opening ask.
     pub title: String,
-    /// Last write, unix seconds. What the list is ordered by.
     pub updated_at: i64,
 }
-
-fn modified_secs(path: &Path) -> i64 {
-    path.metadata()
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+#[derive(Clone)]
+struct Header {
+    cwd: String,
+    id: String,
+    title: String,
+}
+struct CachedHeader {
+    length: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    header: Option<Header>,
+    used: Instant,
+}
+struct CachedDirectory {
+    paths: Vec<PathBuf>,
+    checked: Instant,
 }
 
-/// Read at most the first `HEAD_BYTES`, dropping a trailing partial line so the
-/// caller only ever sees whole records.
-fn read_head(path: &Path) -> Option<String> {
-    use std::io::Read;
-    let mut file = fs::File::open(path).ok()?;
-    let mut buf = vec![0u8; HEAD_BYTES];
-    let mut filled = 0usize;
-    while filled < buf.len() {
-        match file.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(_) => break,
+fn header_cache() -> &'static Mutex<HashMap<PathBuf, CachedHeader>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedHeader>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn session_root(cwd: &str, agent: &str) -> Option<PathBuf> {
+    match agent {
+        "claude" => crate::modules::transcript::claude_project_dir(cwd),
+        "codex" => Some(dirs::home_dir()?.join(".codex").join("sessions")),
+        _ => None,
+    }
+}
+fn session_paths(cwd: &str, agent: &str) -> Vec<PathBuf> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedDirectory>>> = OnceLock::new();
+    let Some(root) = session_root(cwd, agent) else {
+        return Vec::new();
+    };
+    let mut cache = match CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        Ok(cache) => cache,
+        Err(_) => return Vec::new(),
+    };
+    if let Some(hit) = cache
+        .get(&root)
+        .filter(|hit| hit.checked.elapsed() < SCAN_INTERVAL)
+    {
+        return hit.paths.clone();
+    }
+    let mut paths = Vec::new();
+    collect_paths(&root, agent == "codex", &mut paths);
+    if cache.len() >= 32 && !cache.contains_key(&root) {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.checked)
+            .map(|(path, _)| path.clone())
+        {
+            cache.remove(&oldest);
         }
     }
-    buf.truncate(filled);
-    let text = String::from_utf8_lossy(&buf).into_owned();
-    match text.rfind('\n') {
-        Some(end) => Some(text[..end].to_string()),
-        None => Some(text),
+    cache.insert(
+        root,
+        CachedDirectory {
+            paths: paths.clone(),
+            checked: Instant::now(),
+        },
+    );
+    paths
+}
+fn collect_paths(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if recursive && kind.is_dir() {
+            collect_paths(&path, true, out);
+        } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            out.push(path);
+        }
     }
 }
-
-fn tidy(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= TITLE_MAX_CHARS {
-        return flat;
-    }
-    let cut: String = flat.chars().take(TITLE_MAX_CHARS).collect();
-    format!("{cut}...")
+fn valid_id(id: &str) -> bool {
+    id.len() == 36
+        && id.chars().enumerate().all(|(i, c)| {
+            if [8, 13, 18, 23].contains(&i) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
 }
-
-/// Whether a "user" message is something the user actually typed.
-///
-/// Both agents open a session by injecting context as a user turn: Codex sends
-/// `<environment_context>`, Claude Code sends slash-command wrappers and
-/// reminders, and either may lead with the project's instructions file. They are
-/// all XML-ish or a markdown heading, and neither is what the conversation was
-/// about, so titling a session with one is worse than saying nothing.
-fn is_boilerplate(text: &str) -> bool {
-    let head = text.trim_start();
-    head.starts_with('<')
-        || head.starts_with("Caveat:")
-        || head.starts_with("# AGENTS.md")
-        || head.starts_with("# CLAUDE.md")
-}
-
-/// Text out of a message body that is either a plain string or the block array
-/// an agent uses once a turn carries attachments.
 fn message_text(content: &Value) -> Option<String> {
     if let Some(text) = content.as_str() {
         return Some(text.to_string());
     }
-    let joined = content
-        .as_array()?
-        .iter()
-        .filter_map(|part| {
-            part.get("text")
-                .and_then(Value::as_str)
-                .or_else(|| part.as_str())
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!joined.trim().is_empty()).then_some(joined)
+    Some(
+        content
+            .as_array()?
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
-
-fn claude_sessions(cwd: &str) -> Vec<Session> {
-    let Some(dir) = crate::modules::transcript::claude_project_dir(cwd) else {
-        return Vec::new();
+fn title_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
+}
+fn boilerplate(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with('<')
+        || text.starts_with("Caveat:")
+        || text.starts_with("# AGENTS.md")
+        || text.starts_with("# CLAUDE.md")
+}
+fn parse_header(path: &Path, agent: &str) -> Option<Header> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(HEAD_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let end = bytes.iter().rposition(|b| *b == b'\n')?;
+    let text = std::str::from_utf8(&bytes[..end]).ok()?;
+    let mut cwd = None;
+    let mut id = if agent == "claude" {
+        path.file_stem()?.to_str().map(str::to_owned)
+    } else {
+        None
     };
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<(i64, PathBuf)> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-        .map(|path| (modified_secs(&path), path))
+    let mut title = None;
+    let mut first_ask = None;
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let payload = value.get("payload").unwrap_or(&value);
+        if cwd.is_none() {
+            cwd = payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        if agent == "codex" && value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            id = payload
+                .get("session_id")
+                .or_else(|| payload.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        if agent == "claude" && value.get("type").and_then(Value::as_str) == Some("ai-title") {
+            title = value
+                .get("aiTitle")
+                .and_then(Value::as_str)
+                .map(title_text)
+                .filter(|s| !s.is_empty());
+        }
+        if first_ask.is_none() {
+            let content =
+                if agent == "claude" && value.get("type").and_then(Value::as_str) == Some("user") {
+                    value
+                        .get("message")
+                        .and_then(|message| message.get("content"))
+                } else if agent == "codex"
+                    && payload.get("role").and_then(Value::as_str) == Some("user")
+                {
+                    payload.get("content")
+                } else {
+                    None
+                };
+            first_ask = content
+                .and_then(message_text)
+                .filter(|s| !s.trim().is_empty() && !boilerplate(s))
+                .map(|s| title_text(&s));
+        }
+        if cwd.is_some()
+            && id.is_some()
+            && (title.is_some() || (agent == "codex" && first_ask.is_some()))
+        {
+            break;
+        }
+    }
+    let id = id.filter(|id| valid_id(id))?;
+    Some(Header {
+        cwd: cwd?,
+        id,
+        title: title
+            .or(first_ask)
+            .unwrap_or_else(|| "(无标题会话)".to_string()),
+    })
+}
+fn session_header(path: &Path, agent: &str, metadata: &fs::Metadata) -> Option<Header> {
+    let modified = metadata.modified().ok();
+    let created = metadata.created().ok();
+    if let Ok(mut cache) = header_cache().lock() {
+        if let Some(hit) = cache.get_mut(path).filter(|hit| {
+            hit.created == created
+                && ((hit.length == metadata.len() && hit.modified == modified)
+                    || (hit.header.is_some()
+                        && hit.length >= HEAD_BYTES
+                        && metadata.len() > hit.length))
+        }) {
+            hit.used = Instant::now();
+            hit.length = metadata.len();
+            hit.modified = modified;
+            return hit.header.clone();
+        }
+    }
+    let header = parse_header(path, agent);
+    if let Ok(mut cache) = header_cache().lock() {
+        if cache.len() >= 512 && !cache.contains_key(path) {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(path, _)| path.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            path.to_path_buf(),
+            CachedHeader {
+                length: metadata.len(),
+                modified,
+                created,
+                header: header.clone(),
+                used: Instant::now(),
+            },
+        );
+    }
+    header
+}
+fn list_sessions(cwd: &str, agent: &'static str) -> Vec<Session> {
+    let mut files: Vec<_> = session_paths(cwd, agent)
+        .into_iter()
+        .filter_map(|path| {
+            let metadata = fs::metadata(&path).ok()?;
+            let modified = metadata
+                .modified()
+                .ok()?
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_secs() as i64;
+            Some((modified, path, metadata))
+        })
         .collect();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|(modified, _, _)| std::cmp::Reverse(*modified));
     files
         .into_iter()
-        .filter_map(|(updated_at, path)| {
-            let id = path.file_stem()?.to_string_lossy().into_owned();
-            let head = read_head(&path)?;
-            let mut title = None;
-            let mut first_ask = None;
-            let mut session_cwd = None;
-            for line in head.lines() {
-                let Ok(value) = serde_json::from_str::<Value>(line) else {
-                    continue;
-                };
-                if session_cwd.is_none() {
-                    session_cwd = value.get("cwd").and_then(Value::as_str).map(str::to_owned);
-                }
-                match value.get("type").and_then(Value::as_str) {
-                    Some("ai-title") if title.is_none() => {
-                        title = value
-                            .get("aiTitle")
-                            .and_then(Value::as_str)
-                            .map(tidy)
-                            .filter(|t| !t.is_empty());
-                    }
-                    Some("user") if first_ask.is_none() => {
-                        first_ask = value
-                            .pointer("/message/content")
-                            .and_then(message_text)
-                            .filter(|text| !is_boilerplate(text))
-                            .map(|text| tidy(&text));
-                    }
-                    _ => {}
-                }
-                if session_cwd.is_some() && title.is_some() {
-                    break;
-                }
-            }
-            if !session_cwd
-                .as_deref()
-                .is_some_and(|found| crate::modules::transcript::same_dir(found, cwd))
-            {
-                return None;
-            }
-            Some(Session {
-                agent: "claude",
-                title: title
-                    .or(first_ask)
-                    .unwrap_or_else(|| "(无标题会话)".to_string()),
-                id,
+        .filter_map(|(updated_at, path, metadata)| {
+            let header = session_header(&path, agent, &metadata)?;
+            crate::modules::transcript::same_dir(&header.cwd, cwd).then_some(Session {
+                agent,
+                id: header.id,
+                title: header.title,
                 updated_at,
             })
         })
         .take(MAX_PER_AGENT)
         .collect()
 }
-
-fn codex_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            codex_rollouts(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-            out.push(path);
-        }
-    }
-}
-
-fn codex_sessions(cwd: &str) -> Vec<Session> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    let root = home.join(".codex").join("sessions");
-    if !root.is_dir() {
-        return Vec::new();
-    }
-    let mut files = Vec::new();
-    codex_rollouts(&root, &mut files);
-    let mut dated: Vec<(i64, PathBuf)> = files
-        .into_iter()
-        .map(|path| (modified_secs(&path), path))
-        .collect();
-    // Date folders say when a session started, not when it was last touched, so
-    // order by mtime and only then stop looking.
-    dated.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let mut sessions = Vec::new();
-    for (updated_at, path) in dated {
-        if sessions.len() >= MAX_PER_AGENT {
-            break;
-        }
-        let Some(head) = read_head(&path) else {
-            continue;
-        };
-        let mut lines = head.lines();
-        // Line one is `session_meta`, carrying the id and the directory. A file
-        // that does not start with it is not a rollout this build understands.
-        let Some(meta) = lines
-            .next()
-            .and_then(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|value| value.get("type").and_then(Value::as_str) == Some("session_meta"))
-        else {
-            continue;
-        };
-        let payload = meta.get("payload").unwrap_or(&meta);
-        let Some(session_cwd) = payload.get("cwd").and_then(Value::as_str) else {
-            continue;
-        };
-        if !crate::modules::transcript::same_dir(session_cwd, cwd) {
+pub(crate) fn resolve_session_file(
+    cwd: &str,
+    agent: &str,
+    id: Option<&str>,
+    started_at: SystemTime,
+) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for path in session_paths(cwd, agent) {
+        if id.is_some_and(|id| {
+            !path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(id))
+        }) {
             continue;
         }
-        let Some(id) = payload
-            .get("session_id")
-            .or_else(|| payload.get("id"))
-            .and_then(Value::as_str)
-        else {
+        let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
-        let title = lines
-            .find_map(codex_user_text)
-            .map(|text| tidy(&text))
-            .filter(|text| !text.is_empty())
-            .unwrap_or_else(|| "(无标题会话)".to_string());
-        sessions.push(Session {
-            agent: "codex",
-            id: id.to_string(),
-            title,
-            updated_at,
-        });
+        if id.is_none()
+            && !metadata
+                .created()
+                .is_ok_and(|created| created >= started_at)
+        {
+            continue;
+        }
+        let Some(header) = session_header(&path, agent, &metadata) else {
+            continue;
+        };
+        if !crate::modules::transcript::same_dir(&header.cwd, cwd)
+            || id.is_some_and(|id| header.id != id)
+        {
+            continue;
+        }
+        candidates.push(path);
     }
-    sessions
+    (candidates.len() == 1).then(|| candidates.remove(0))
 }
-
-/// The first thing the user actually asked, out of a rollout line.
-fn codex_user_text(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(line).ok()?;
-    let payload = value.get("payload").unwrap_or(&value);
-    if payload.get("role").and_then(Value::as_str) != Some("user") {
-        return None;
-    }
-    message_text(payload.get("content")?).filter(|text| !is_boilerplate(text))
-}
-
-/// Tauri command: both agents' past sessions for one directory, newest first.
-///
-/// Async so the reads stay off the main thread. Each file costs one bounded
-/// head read, so the whole listing is a few hundred KB however large the
-/// transcripts have grown.
 #[tauri::command]
 pub async fn agent_sessions(cwd: String) -> Vec<Session> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut all = claude_sessions(&cwd);
-        all.extend(codex_sessions(&cwd));
-        all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let mut all = list_sessions(&cwd, "claude");
+        all.extend(list_sessions(&cwd, "codex"));
+        all.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         all
     })
     .await

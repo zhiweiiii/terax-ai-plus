@@ -1,5 +1,11 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { terminalInputOwner } from "@/modules/terminal/lib/inputPolicy";
+import {
+  installTerminalDiagnostics,
+  recordTerminalEvent,
+  terminalDiagnosticsEnabled,
+} from "@/modules/terminal/lib/terminalDiagnostics";
 import { invoke } from "@tauri-apps/api/core";
 import {
   useCallback,
@@ -107,6 +113,7 @@ type Session = {
   // the terminal, so the leaf must keep its live grid while hidden.
   commandRunning: boolean;
   promptConfirmTimer: ReturnType<typeof setTimeout> | null;
+  promptEpoch: number;
   hiddenReleaseTimer: ReturnType<typeof setTimeout> | null;
   // Pane is parked on a dead shell (spawn failed, or the shell exited
   // abnormally) showing a notice; Enter respawns instead of reaching the pty.
@@ -391,6 +398,7 @@ function cancelHiddenRelease(s: Session): void {
 }
 
 function cancelPromptConfirm(s: Session): void {
+  s.promptEpoch += 1;
   if (s.promptConfirmTimer !== null) {
     clearTimeout(s.promptConfirmTimer);
     s.promptConfirmTimer = null;
@@ -400,6 +408,7 @@ function cancelPromptConfirm(s: Session): void {
 function confirmBlockPrompt(leafId: number): void {
   const s = sessions.get(leafId);
   if (!s || s.blockMode === "prompt" || s.promptConfirmTimer !== null) return;
+  const epoch = s.promptEpoch;
   s.promptConfirmTimer = setTimeout(() => {
     s.promptConfirmTimer = null;
     void (async () => {
@@ -422,7 +431,11 @@ function confirmBlockPrompt(leafId: number): void {
         );
         return;
       }
-      if (!foreground && sessions.get(leafId) === current) {
+      if (
+        !foreground &&
+        sessions.get(leafId) === current &&
+        current.promptEpoch === epoch
+      ) {
         applyBlockMode(leafId, "prompt");
       }
     })();
@@ -525,14 +538,14 @@ configureRendererPool({
   },
   focusLeafInput(leafId) {
     const s = sessions.get(leafId);
-    if (!s?.blocks || s.blockMode !== "prompt") return false;
-    const slot = getSlotForLeaf(leafId);
-    if (slot) {
-      slot.term.options.disableStdin = true;
-      if (slot.term.textarea) slot.term.textarea.disabled = true;
-      slot.term.blur();
+    if (!s) return false;
+    const owner = syncLeafInput(leafId, s);
+    if (owner === "terminal") return false;
+    if (owner === "shell" && s.visibleNow && s.focusedNow) {
+      if (terminalDiagnosticsEnabled())
+        recordTerminalEvent(leafId, "focus", { target: "shell" });
+      s.inputFocus?.();
     }
-    s.inputFocus?.();
     return true;
   },
   isLeafFocused(leafId) {
@@ -597,6 +610,7 @@ function ensureSession(
     altScreenAtRelease: false,
     commandRunning: false,
     promptConfirmTimer: null,
+    promptEpoch: 0,
     hiddenReleaseTimer: null,
     awaitingRestart: false,
     shellState: createShellIntegrationState(),
@@ -617,8 +631,15 @@ function deliverPtyBytes(leafId: number, bytes: Uint8Array): void {
   // Retained slots keep parsing live (render paused); the ring is only for
   // leaves whose buffer was stolen or never bound.
   const slot = getLiveSlotForLeaf(leafId);
-  if (slot) slot.term.write(bytes);
-  else s.dormantRing.push(bytes);
+  if (slot) {
+    if (terminalDiagnosticsEnabled())
+      recordTerminalEvent(leafId, "output", {
+        bytes: bytes.length,
+        visible: s.visibleNow,
+        parked: slot.parked,
+      });
+    slot.term.write(bytes);
+  } else s.dormantRing.push(bytes);
 }
 
 const SPAWN_RETRY_DELAY_MS = 250;
@@ -645,6 +666,8 @@ function surfaceSpawnFailure(leafId: number, s: Session, e: unknown): void {
   console.error("[terax] shell spawn failed:", e);
   s.shellExited = true;
   s.awaitingRestart = true;
+  cancelPromptConfirm(s);
+  syncLeafInput(leafId, s);
   const detail = String(e)
     .replace(/[\x00-\x1f\x7f]/g, " ")
     .slice(0, 300);
@@ -662,6 +685,8 @@ function surfaceSpawnFailure(leafId: number, s: Session, e: unknown): void {
 // last pane and with it the window.
 function surfaceAbnormalExit(leafId: number, s: Session, code: number): void {
   s.awaitingRestart = true;
+  cancelPromptConfirm(s);
+  syncLeafInput(leafId, s);
   // Win32 codes come back as unsigned; show the familiar hex next to it.
   const hex =
     code < 0 || code > 0xffff
@@ -698,8 +723,8 @@ async function openPtyForSession(
           scheduleHiddenRelease(leafId, s);
           return;
         }
-        const slot = getSlotForLeaf(leafId);
-        if (slot) slot.term.options.disableStdin = true;
+        cancelPromptConfirm(s);
+        syncLeafInput(leafId, s);
         scheduleHiddenRelease(leafId, s);
         if (s.callbacks.onExit) s.callbacks.onExit(code);
         else s.pendingExit = code;
@@ -724,31 +749,44 @@ async function openPtyForSession(
   return pty;
 }
 
+function syncLeafInput(
+  leafId: number,
+  s: Session,
+): ReturnType<typeof terminalInputOwner> {
+  const owner = terminalInputOwner(s);
+  const slot = getSlotForLeaf(leafId);
+  if (slot) {
+    const disabled = owner !== "terminal";
+    if (slot.term.options.disableStdin !== disabled)
+      slot.term.options.disableStdin = disabled;
+    if (slot.term.textarea && slot.term.textarea.disabled !== disabled)
+      slot.term.textarea.disabled = disabled;
+    if (disabled && slot.term.textarea === document.activeElement)
+      slot.term.blur();
+  }
+  return owner;
+}
+
 function applyBlockMode(leafId: number, mode: BlockMode, force = false): void {
   const s = sessions.get(leafId);
   if (!s) return;
   const previousMode = s.blockMode;
   if (previousMode === mode && !force) return;
-  const wasPrompt = previousMode === "prompt";
   const prompt = mode === "prompt";
   s.blockMode = mode;
   s.commandRunning = !prompt;
   // Mirrors the non-blocks prompt tracker so the OSC 52 clipboard gate
   // treats agent output (a running block) as untrusted too.
   s.shellState.inCommand = !prompt;
-  const slot = getSlotForLeaf(leafId);
-  if (slot && (wasPrompt !== prompt || force)) {
-    slot.term.options.disableStdin = prompt;
-    // Disable the helper textarea at the prompt so a grid click can't focus the
-    // xterm (no flashing cursor) and can't steal focus from the shell input.
-    if (slot.term.textarea) slot.term.textarea.disabled = prompt;
-    if (prompt) {
-      slot.term.blur();
-    }
-    if (s.visibleNow && s.focusedNow) {
-      focusSlot(leafId);
-    }
-  }
+  syncLeafInput(leafId, s);
+  if (terminalDiagnosticsEnabled())
+    recordTerminalEvent(leafId, "mode", {
+      from: previousMode,
+      to: mode,
+      epoch: s.promptEpoch,
+    });
+  if (s.visibleNow && s.focusedNow && (previousMode !== mode || force))
+    focusSlot(leafId);
   for (const l of s.blockListeners) l();
 }
 
@@ -795,7 +833,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
         });
         s.blockDecorations = deco;
         const onGridFocus = () => {
-          if (s.blockMode === "prompt") s.inputFocus?.();
+          if (terminalInputOwner(s) === "shell") focusSlot(leafId);
         };
         term.textarea?.addEventListener("focus", onGridFocus);
         return [
@@ -831,6 +869,7 @@ function bindLeafToSlot(leafId: number, s: Session): void {
   });
   s.snapshot = null;
   s.hasSlot = true;
+  syncLeafInput(leafId, s);
   if (s.blocks) applyBlockMode(leafId, s.blockMode, true);
   if (s.lastCwd !== null) s.callbacks.onCwd?.(s.lastCwd);
   if (s.pendingExit !== null) {
@@ -914,13 +953,14 @@ export async function respawnSession(
 
   const slot = getSlotForLeaf(leafId);
   if (slot) {
-    slot.term.options.disableStdin = false;
     slot.term.clear();
     slot.term.reset();
   } else {
     discardRetainedSlot(leafId);
   }
 
+  if (s.blocks) applyBlockMode(leafId, "running", true);
+  else syncLeafInput(leafId, s);
   s.ptyOpening = true;
   let pty: PtySession;
   try {
@@ -1096,6 +1136,9 @@ export function useTerminalSession({
     if (!s) return;
     s.visibleNow = visible;
     s.focusedNow = focused;
+    syncLeafInput(leafId, s);
+    if (terminalDiagnosticsEnabled())
+      recordTerminalEvent(leafId, "visibility", { visible, focused });
     if (visible) {
       cancelHiddenRelease(s);
       if (s.container && !s.hasSlot) bindLeafToSlot(leafId, s);
@@ -1323,3 +1366,6 @@ if (import.meta.env?.DEV && typeof window !== "undefined") {
   (window as unknown as { __teraxTerm?: unknown }).__teraxTerm =
     terminalDebugStats;
 }
+
+if (typeof window !== "undefined")
+  installTerminalDiagnostics(terminalDebugStats);

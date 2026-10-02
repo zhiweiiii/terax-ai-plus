@@ -218,7 +218,7 @@ src/                        React 前端
     tabs/                   标签与分屏模型
     terminal/               xterm.js 会话、OSC 处理、渲染器池
     theme/                  自研主题引擎与预设
-    updater/                自动更新 UI
+    updater/                本仓库手动/签名更新 UI
     workspace/              工作区环境切换
 ```
 

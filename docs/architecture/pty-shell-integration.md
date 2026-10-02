@@ -50,7 +50,7 @@ profile 会在用户的 `$PROFILE` 跑完之后包住其 `prompt` 函数，让�
 
 注入的脚本发出 **OSC 7**（cwd）与 **OSC 133 A/B/C/D**（提示符边界和退出码），这样 Terax 不用解析用户的提示符就能跟踪 cwd、识别命令边界。
 
-blocks 终端只在主缓冲区消费 OSC 133 来切换底部 shell 输入栏。全屏 TUI 在 alternate screen 内也可能发出同类序列，但它们不代表 PowerShell 的提示符边界；`BlockDecorations` 会忽略它们。inline TUI 也可能发出伪 prompt 标记，因此 prompt 不会立即移交焦点，而是经 `pty_has_foreground_job` 确认前台任务已经退出。这样 Codex 等持续重绘的 TUI 不会在运行中让底部输入栏与终端 textarea 争抢焦点，IME 候选窗也不会在两处跳动。
+blocks 终端只在主缓冲区消费 OSC 133 来切换底部 shell 输入栏。全屏 TUI 在 alternate screen 内也可能发出同类序列，但它们不代表 PowerShell 的提示符边界；`BlockDecorations` 会忽略它们。inline TUI 也可能发出伪 prompt 标记，因此 prompt 不会立即移交焦点，而是经 `pty_has_foreground_job` 确认前台任务已经退出，并核对检查开始时的命令代次；每个新的 C 标记都作废旧检查，即使模式已经是 running。这样 Codex 等持续重绘的 TUI 不会在运行中让底部输入栏与终端 textarea 争抢焦点，IME 候选窗也不会在两处跳动。
 
 shell 提示符的独立输入栏通过 `disableStdin` 接管光标；前台命令运行时把焦点交给 xterm。Codex 的可见光标、隐藏 textarea 和 IME composition view 均由 xterm 自身维护，Terax 不修改其私有接口。终端历史使用 xterm 的 slider，alternate buffer 隐藏外层历史滑块。
 
@@ -73,6 +73,8 @@ PowerShell / PSReadLine 启动时会发一个光标位置查询（`ESC[6n`）并
 ### agent 检测
 
 reader 线程在字节流上跑 `AgentDetector`（`agent_detect.rs`）。它由 `OSC 133;C;<cmd>` 或自带的 `OSC 777` 标记触发，发出 `terax:agent-signal` 状态转换（`started`、`working`、`attention`、`finished`、`exited`）。检测**只认 OSC 序列**、从不看原始输出，所以不断重绘的 TUI 不会让状态来回跳。
+
+PowerShell 的 C 标记增加内部 `terax-start=<epoch-ms>;` 前缀，时间在命令启动前捕获，避免 reader 稍后处理时新 rollout 已经创建。前端剥掉该前缀，不显示在命令标题中。恢复命令同时提取 UUID；PTY 记录 agent 名字、恢复 ID、启动时间和固定文件，查找文件不持有 reader 使用的 agent 锁。
 
 会话同时记住当前运行的 agent 名字（`Session::web_agent`）。这既是"要不要去读 agent transcript"的闸门（昨天跑过 agent 的目录不该在今天的提示符上显示旧对话），也是选哪个后端去读的依据。
 
