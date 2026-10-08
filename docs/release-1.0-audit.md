@@ -2,6 +2,8 @@
 
 ## 1.0.0 正式发布准备
 
+发布完成于 2026-10-08 12:16（Asia/Shanghai）：[Terax 1.0.0](https://github.com/zhiweiiii/terax-ai-plus/releases/tag/v1.0.0)，tag 指向 `d8b3ae0`。GitHub 状态为非草稿、非预发布且为 latest，安装包上传大小与服务端 SHA256 一致，公开下载再次核对 SHA256 通过。发布文档后续补记不移动正式 tag。
+
 本机 `pnpm tauri build` 成功，NSIS 安装包 5124384 字节，程序 FileVersion/ProductVersion 均为 1.0.0，SHA256 为 `ca375ca4e242492ab9eaf676285f035db18c96799911d453c19780808b7e31f1`。发布前 lint、类型、Rust fmt/clippy、结构 Knip、生产 audit 与体积检查通过。README 按用户要求重写为 Claude Code/Codex 开发导向，并增加 Windows 终端区域实图和当前手机页面截图；手机内容为模拟协议的公开演示，不是真实模型会话。旧上游 macOS/已移除功能截图不再用于首页介绍，未删除历史图片资产。
 
 用户在代码提交推送后确认测试没有问题，并授权发布正式 1.0。此确认是用户验收结论，不将此前未由审查者运行的真实设备场景补记为审查者已测。四份版本清单及三个 Rust workspace 包统一为 1.0.0，构建使用现有 tag 模式固定版本，避免本地增号成 1.0.1。发布 Windows x64 NSIS 安装包，沿用手动下载安装渠道，不生成未配置签名的自动更新产物。安装包成功后核对版本、大小与 SHA256，再发布非草稿、非预发布的 GitHub Release；实际结果以 GitHub 为准。
