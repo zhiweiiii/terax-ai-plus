@@ -1,5 +1,9 @@
 # 可靠性与发布
 
+## 1.0.0 正式渠道
+
+用户确认测试通过后发布 1.0.0，清单同步到 package.json、tauri.conf.json、Cargo.toml 和 Cargo.lock 的三个 workspace 包。正式构建沿用 `pnpm tauri build` 的 tag 校验模式固定 v1.0.0，不执行普通本地自动 patch 增号。GitHub Release 标记为稳定正式版，提供 Windows x64 NSIS 安装包；没有签名配置时继续手动下载，不生成 latest.json 或伪装成签名自动更新。
+
 ## 1.0 审查收尾边界（2026-10-08）
 
 代码侧全文分析、确认缺陷修复和最终两轮全仓工程检查已完成，证据与覆盖表见 [审查记录](../release-1.0-audit.md)。两轮包含前端/Rust/脚本静态检查、生产依赖审计、双端构建、体积/入口图与关键实际组件/独立浏览器回归，不是实机发布验收。正式发布仍须实际 Windows CLI 高输出和输入、WSL、iOS Safari、安装/升级及后台任务验收；当前未打包、发布或自动增号。历史 Codex 光标/停刷风险不能仅凭隔离验证宣布彻底消失。

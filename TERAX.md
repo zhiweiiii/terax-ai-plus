@@ -182,6 +182,8 @@ Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: tru
 
 ### 打包配置
 
+1.0.0 正式发布由用户确认测试通过后授权，清单与 workspace 包统一版本，使用 tag 模式固定正式版本。默认仍为 Windows x64 NSIS 手动下载渠道，不在没有本仓库签名配置时上传自动更新产物。
+
 默认 `pnpm tauri build` 生成手动安装 NSIS 包，不要求签名密钥；`tauri.manual-release.json` 保留为旧命令兼容配置。发布工作流手动触发时使用 `build-v<version>`，`v*` 标签也可触发。默认不生成自动更新产物，不能继续使用上游的公钥或 SignPath 账户。
 
 - `bundle.targets` 是 `["nsis"]`，**只出 exe 安装包**。MSI 会把任务栏图标指向 `C:\Windows\Installer\{ProductCode}\ProductIcon`，而 ProductCode 每次构建都变，覆盖安装后固定在任务栏的图标就没了。
