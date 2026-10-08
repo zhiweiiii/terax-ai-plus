@@ -48,5 +48,3 @@ fn strip_verbatim(s: &str) -> String {
     };
     stripped.replace('\\', "/")
 }
-
-

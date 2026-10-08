@@ -42,6 +42,7 @@ fn client() -> &'static Client {
         // though no request is sent yet.
         let _guard = runtime().enter();
         Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
             // No overall timeout: a long generation is a normal response, not a
             // stalled one. A dead connection is caught by the read timeout.
@@ -92,11 +93,7 @@ fn request_headers(provider: &Provider, session: Option<&str>) -> HeaderMap {
 
 /// Send one converted request. Returns the live response so the caller can
 /// stream it; the body is not read here.
-pub fn send(
-    provider: &Provider,
-    body: &Value,
-    session: Option<&str>,
-) -> Result<Response, String> {
+pub fn send(provider: &Provider, body: &Value, session: Option<&str>) -> Result<Response, String> {
     let url = provider.messages_url();
     let headers = request_headers(provider, session);
     let request = client().post(&url).headers(headers).json(body);
@@ -119,10 +116,12 @@ pub fn send(
 
 /// Read the whole body. Used for non-streaming replies and for error bodies.
 pub fn read_all(response: reqwest::Response) -> Result<Vec<u8>, String> {
-    runtime()
-        .block_on(async { response.bytes().await })
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| format!("{e}"))
+    let mut bytes = Vec::new();
+    for_each_chunk(response, |chunk| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    Ok(bytes)
 }
 
 /// Pump the response body, handing each chunk to `on_chunk`. Running on the
@@ -134,8 +133,13 @@ where
 {
     runtime().block_on(async {
         let mut stream = response.bytes_stream();
+        let mut received = 0usize;
         while let Some(item) = stream.next().await {
             let chunk = item.map_err(|e| format!("{e}"))?;
+            received = received.saturating_add(chunk.len());
+            if received > 64 * 1024 * 1024 {
+                return Err("upstream response exceeds size limit".into());
+            }
             on_chunk(&chunk)?;
         }
         Ok(())

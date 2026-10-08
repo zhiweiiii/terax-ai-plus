@@ -3,9 +3,14 @@ import {
   type GitLogEntry,
   type GitRepoHead,
   type GitStatusSnapshot,
-  native,
+  native as nativeCommands,
 } from "@/lib/native";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import {
@@ -29,7 +34,9 @@ import {
 
 /** Every repo that failed, one per line, so the toast copy action yields
  *  all of them. They used to go to the console, out of the user reach. */
-function failureDetail(failed: { repoRoot: string; error?: unknown }[]): string {
+function failureDetail(
+  failed: { repoRoot: string; error?: unknown }[],
+): string {
   return failed
     .map(
       (f) =>
@@ -99,7 +106,12 @@ export type PushPlan = {
   skipped: { name: string; reason: string }[];
 };
 
-export type PullStrategy = "merge" | "rebase" | "ff-only" | "squash" | "no-commit";
+export type PullStrategy =
+  | "merge"
+  | "rebase"
+  | "ff-only"
+  | "squash"
+  | "no-commit";
 
 export type PushAdvancedOptions = {
   force: boolean;
@@ -110,6 +122,7 @@ export type PushAdvancedOptions = {
 /** Repos the remote refused (rejected / non-fast-forward), force-worthy. */
 export type PushAllResult = {
   rejected: { repoRoot: string; error: string }[];
+  failed: { repoRoot: string; error: string }[];
 };
 
 export type GitRemoteEntry = { name: string; url: string };
@@ -193,6 +206,72 @@ export function useMultiRepoSourceControl(
   contextPath: string | null,
   scanRoot: string | null,
 ): MultiRepoSourceControl {
+  const workspaceKey = useWorkspaceEnvStore((state) =>
+    workspaceScopeKey(state.env),
+  );
+  const contextKey = `${workspaceKey}\0${scanRoot ?? ""}`;
+  const contextRef = useRef({ key: contextKey });
+  if (contextRef.current.key !== contextKey)
+    contextRef.current = { key: contextKey };
+  const context = contextRef.current;
+  const mountedRef = useRef(false);
+  const batchBusyRef = useRef(false);
+  const summaryBusyRef = useRef<SourceControlRemoteAction | null>(null);
+  const [batchBusy, setBatchBusy] = useState<SourceControlRemoteAction | null>(
+    null,
+  );
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const ensureCurrent = useCallback(() => {
+    if (
+      !mountedRef.current ||
+      contextRef.current !== context ||
+      currentWorkspaceScopeKey() !== workspaceKey
+    )
+      throw new Error("Workspace changed; remaining Git operations cancelled");
+  }, [context, workspaceKey]);
+  const native = useMemo(
+    () =>
+      new Proxy(nativeCommands, {
+        get(target, property: keyof typeof nativeCommands) {
+          const command = target[property];
+          return async (...args: unknown[]) => {
+            ensureCurrent();
+            const result = await (
+              command as (...args: unknown[]) => Promise<unknown>
+            )(...args);
+            ensureCurrent();
+            return result;
+          };
+        },
+      }),
+    [ensureCurrent],
+  );
+  const runBatch = useCallback(
+    async <T>(
+      action: SourceControlRemoteAction,
+      operation: () => Promise<T>,
+    ): Promise<T> => {
+      ensureCurrent();
+      if (batchBusyRef.current || summaryBusyRef.current)
+        throw new Error("Another Git batch operation is running");
+      batchBusyRef.current = true;
+      setBatchBusy(action);
+      try {
+        const result = await operation();
+        ensureCurrent();
+        return result;
+      } finally {
+        batchBusyRef.current = false;
+        if (mountedRef.current) setBatchBusy(null);
+      }
+    },
+    [ensureCurrent],
+  );
   const {
     repos,
     activeRepo,
@@ -214,11 +293,13 @@ export function useMultiRepoSourceControl(
     }
     // Find the repo that contains the current context path.
     if (contextPath) {
-      const match = repos.find((r) =>
-        contextPath
-          .replace(/\\/g, "/")
-          .startsWith(r.repoRoot.replace(/\\/g, "/")),
-      );
+      const normalized = contextPath.replace(/\\/g, "/");
+      const match = repos
+        .filter((r) => {
+          const root = r.repoRoot.replace(/\\/g, "/").replace(/\/$/, "");
+          return normalized === root || normalized.startsWith(`${root}/`);
+        })
+        .sort((a, b) => b.repoRoot.length - a.repoRoot.length)[0];
       if (match) return match.repoRoot;
     }
     // Nothing contains the context, which is the normal shape of a workspace
@@ -240,6 +321,7 @@ export function useMultiRepoSourceControl(
     effectiveEnabled,
     effectiveRepoRoot,
   );
+  summaryBusyRef.current = summary.busyAction;
 
   // Every repo's snapshot. The active repo's one comes from `summary`; the
   // rest are fetched here so the aggregate badge, the grouped change list and
@@ -286,19 +368,43 @@ export function useMultiRepoSourceControl(
       }
       // Refresh status after batch fetch.
       await summary.refresh({ remote: "never" });
+      ensureCurrent();
+      await refreshAllRepoStatuses();
       return results;
     } catch (error) {
       errorToast("Batch fetch failed", error);
       return [];
     }
-  }, [repos, summary]);
+  }, [repos, summary, native, ensureCurrent, refreshAllRepoStatuses]);
 
   // Sync = fetch, then fast-forward pull where the fetch revealed new commits.
   // Repos are walked one at a time on purpose: running them together would put
   // several credential prompts and remote connections in flight at once, and a
   // failure part-way would leave no way to tell how far it got.
-  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  const [syncProgress, setProgress] = useState<SyncProgress | null>(null);
+  const progressContextRef = useRef(context);
+  const setSyncProgress = useCallback(
+    (value: React.SetStateAction<SyncProgress | null>) => {
+      if (
+        !mountedRef.current ||
+        contextRef.current !== context ||
+        currentWorkspaceScopeKey() !== workspaceKey
+      )
+        return;
+      progressContextRef.current = context;
+      setProgress(value);
+    },
+    [context, workspaceKey],
+  );
   const autoClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: A different repository scope must cancel the previous progress timer.
+  useEffect(
+    () => () => {
+      if (autoClearRef.current) clearTimeout(autoClearRef.current);
+      autoClearRef.current = null;
+    },
+    [contextKey],
+  );
 
   const clearSyncProgress = useCallback(() => {
     if (autoClearRef.current) {
@@ -306,7 +412,7 @@ export function useMultiRepoSourceControl(
       autoClearRef.current = null;
     }
     setSyncProgress(null);
-  }, []);
+  }, [setSyncProgress]);
 
   const runPullWalk = useCallback(
     async (strategy: PullStrategy): Promise<{ failed: number }> => {
@@ -343,6 +449,7 @@ export function useMultiRepoSourceControl(
       // prompts and remote connections in flight, and the progress list would
       // stop meaning "this is what it is doing right now".
       for (const target of targets) {
+        ensureCurrent();
         setPhase(target.repoRoot, { kind: "fetching" });
         try {
           await native.gitFetch(target.repoRoot);
@@ -359,6 +466,7 @@ export function useMultiRepoSourceControl(
               setPhase(target.repoRoot, { kind: "pulled", commits });
               pulled++;
             } else if (status.ahead > 0 && status.behind > 0) {
+              failed++;
               setPhase(target.repoRoot, { kind: "diverged" });
             } else {
               setPhase(target.repoRoot, { kind: "up-to-date" });
@@ -387,6 +495,8 @@ export function useMultiRepoSourceControl(
         current ? { ...current, running: false } : current,
       );
       await summary.refresh({ remote: "never" });
+      ensureCurrent();
+      await refreshAllRepoStatuses();
       // A clean run needs no follow-up; anything worth reading stays until the
       // user dismisses it.
       if (failed === 0 && pulled === 0) {
@@ -397,13 +507,22 @@ export function useMultiRepoSourceControl(
       }
       return { failed };
     },
-    [repos, summary],
+    [
+      repos,
+      summary,
+      native,
+      ensureCurrent,
+      refreshAllRepoStatuses,
+      setSyncProgress,
+    ],
   );
 
   // Sync = fetch, then fast-forward pull where the fetch revealed new commits.
   // The "ff-only" strategy makes this identical to the original sync behavior.
   const syncAll = useCallback(async (): Promise<void> => {
-    await runPullWalk("ff-only");
+    const { failed } = await runPullWalk("ff-only");
+    if (failed)
+      throw new Error(`Sync failed or diverged in ${failed} repositories`);
   }, [runPullWalk]);
 
   // Read-only survey: what would a push actually send, per repo. Runs before
@@ -412,6 +531,7 @@ export function useMultiRepoSourceControl(
     const entries: PushPlanEntry[] = [];
     const skipped: { name: string; reason: string }[] = [];
     for (const repo of repos) {
+      ensureCurrent();
       const name = repoDisplayName(repo.repoRoot);
       try {
         const status = await native.gitStatus(repo.repoRoot);
@@ -427,10 +547,9 @@ export function useMultiRepoSourceControl(
           skipped.push({ name, reason: "Diverged — pull first" });
           continue;
         }
-        // The branch is strictly ahead, so its newest `ahead` commits are
-        // exactly the ones the push would send.
-        const commits = await native.gitLog(repo.repoRoot, {
-          limit: status.ahead,
+        const commits = await native.gitLogFiltered(repo.repoRoot, {
+          branch: "@{upstream}..HEAD",
+          maxCount: Math.min(status.ahead, 200),
         });
         // Patches for the newest commits so the confirmation dialog shows the
         // actual content of the push, not just subject lines. Failures degrade
@@ -474,7 +593,7 @@ export function useMultiRepoSourceControl(
           remote: parseUpstreamRemote(status.upstream) ?? undefined,
           commits,
           diffs: diffResults,
-          moreCommits: commits.length - diffResults.length,
+          moreCommits: Math.max(0, status.ahead - diffResults.length),
         });
       } catch (error) {
         skipped.push({
@@ -483,8 +602,30 @@ export function useMultiRepoSourceControl(
         });
       }
     }
+    ensureCurrent();
     return { entries, skipped };
-  }, [repos]);
+  }, [repos, native, ensureCurrent]);
+
+  const validatePushEntry = useCallback(
+    async (entry: PushPlanEntry) => {
+      if (!repos.some((repo) => repo.repoRoot === entry.repoRoot))
+        throw new Error("Push plan no longer belongs to this workspace");
+      const status = await native.gitStatus(entry.repoRoot);
+      if (
+        status.branch !== entry.branch ||
+        status.upstream !== entry.upstream ||
+        status.ahead !== entry.ahead ||
+        status.behind !== (entry.behind ?? 0)
+      )
+        throw new Error("Branch or upstream changed; review a new push plan");
+      if (entry.commits.length) {
+        const [head] = await native.gitLog(entry.repoRoot, { limit: 1 });
+        if (head?.sha !== entry.commits[0].sha)
+          throw new Error("Commits changed; review a new push plan");
+      }
+    },
+    [repos, native],
+  );
 
   const pushAll = useCallback(
     async (plan: PushPlan): Promise<void> => {
@@ -517,8 +658,10 @@ export function useMultiRepoSourceControl(
       // Same reasoning as sync: one repo at a time keeps credential prompts
       // serialised and the progress list truthful.
       for (const entry of plan.entries) {
+        ensureCurrent();
         setPhase(entry.repoRoot, { kind: "pulling", commits: entry.ahead });
         try {
+          await validatePushEntry(entry);
           await native.gitPush(entry.repoRoot);
           setPhase(entry.repoRoot, { kind: "pulled", commits: entry.ahead });
         } catch (error) {
@@ -532,8 +675,17 @@ export function useMultiRepoSourceControl(
         current ? { ...current, running: false } : current,
       );
       await summary.refresh({ remote: "never" });
+      ensureCurrent();
+      await refreshAllRepoStatuses();
     },
-    [summary],
+    [
+      summary,
+      native,
+      ensureCurrent,
+      refreshAllRepoStatuses,
+      setSyncProgress,
+      validatePushEntry,
+    ],
   );
 
   const pushAllAdvanced = useCallback(
@@ -542,7 +694,8 @@ export function useMultiRepoSourceControl(
       options: PushAdvancedOptions,
     ): Promise<PushAllResult> => {
       const rejected: PushAllResult["rejected"] = [];
-      if (plan.entries.length === 0) return { rejected };
+      const failed: PushAllResult["failed"] = [];
+      if (plan.entries.length === 0) return { rejected, failed };
       if (autoClearRef.current) {
         clearTimeout(autoClearRef.current);
         autoClearRef.current = null;
@@ -569,21 +722,21 @@ export function useMultiRepoSourceControl(
       });
 
       for (const entry of plan.entries) {
+        ensureCurrent();
         const targetRemote = entry.remote;
         const upstreamRemote = parseUpstreamRemote(entry.upstream);
-        if (
-          targetRemote &&
-          upstreamRemote &&
-          targetRemote !== upstreamRemote
-        ) {
+        if (targetRemote && upstreamRemote && targetRemote !== upstreamRemote) {
+          const error = `Push to "${targetRemote}" is not supported: this build pushes to the tracking remote "${upstreamRemote}"`;
+          failed.push({ repoRoot: entry.repoRoot, error });
           setPhase(entry.repoRoot, {
             kind: "failed",
-            error: `Push to "${targetRemote}" is not supported: this build pushes to the tracking remote "${upstreamRemote}"`,
+            error,
           });
           continue;
         }
         setPhase(entry.repoRoot, { kind: "pulling", commits: entry.ahead });
         try {
+          await validatePushEntry(entry);
           await native.gitPushAdvanced(entry.repoRoot, {
             force: options.force,
             noVerify: options.noVerify,
@@ -592,6 +745,7 @@ export function useMultiRepoSourceControl(
           setPhase(entry.repoRoot, { kind: "pulled", commits: entry.ahead });
         } catch (error) {
           const message = typeof error === "string" ? error : String(error);
+          failed.push({ repoRoot: entry.repoRoot, error: message });
           setPhase(entry.repoRoot, { kind: "failed", error: message });
           if (isRejectedPushError(message)) {
             rejected.push({ repoRoot: entry.repoRoot, error: message });
@@ -602,45 +756,56 @@ export function useMultiRepoSourceControl(
         current ? { ...current, running: false } : current,
       );
       await summary.refresh({ remote: "never" });
-      return { rejected };
+      ensureCurrent();
+      await refreshAllRepoStatuses();
+      return { rejected, failed };
     },
-    [summary],
+    [
+      summary,
+      native,
+      ensureCurrent,
+      refreshAllRepoStatuses,
+      setSyncProgress,
+      validatePushEntry,
+    ],
   );
 
   const pushUpToCommit = useCallback(
     async (repoRoot: string, sha: string): Promise<void> => {
       await native.gitPushUpToCommit(repoRoot, sha);
       await summary.refresh({ remote: "never" });
+      ensureCurrent();
+      await refreshAllRepoStatuses();
     },
-    [summary],
+    [summary, native, ensureCurrent, refreshAllRepoStatuses],
   );
 
   const listRemotes = useCallback(
     async (repoRoot: string): Promise<GitRemoteEntry[]> => {
       return native.gitRemoteList(repoRoot);
     },
-    [],
+    [native],
   );
 
   const addRemote = useCallback(
     async (repoRoot: string, name: string, url: string): Promise<void> => {
       await native.gitRemoteAdd(repoRoot, name, url);
     },
-    [],
+    [native],
   );
 
   const removeRemote = useCallback(
     async (repoRoot: string, name: string): Promise<void> => {
       await native.gitRemoteRemove(repoRoot, name);
     },
-    [],
+    [native],
   );
 
   const setRemoteUrl = useCallback(
     async (repoRoot: string, name: string, url: string): Promise<void> => {
       await native.gitRemoteSetUrl(repoRoot, name, url);
     },
-    [],
+    [native],
   );
 
   const cloneRepository = useCallback(
@@ -651,7 +816,7 @@ export function useMultiRepoSourceControl(
     ): Promise<void> => {
       await native.gitClone(url, targetDir, options);
     },
-    [],
+    [native],
   );
 
   // The panel drives everything through the summary, so route "sync" here when
@@ -659,57 +824,71 @@ export function useMultiRepoSourceControl(
   // Batch walks cannot set the underlying summary's busyAction, so their own
   // flag is merged in below; without it, commit/stage could run concurrently
   // with a fetch or push walk.
-  const [batchBusy, setBatchBusy] = useState<SourceControlRemoteAction | null>(
-    null,
-  );
   const runRemoteAction = useCallback<SourceControlSummary["runRemoteAction"]>(
     async (mode = "contextual") => {
+      if (batchBusyRef.current)
+        return {
+          ok: false,
+          action: null,
+          error: "Another Git batch operation is running",
+        };
       if (repos.length <= 1) return summary.runRemoteAction(mode);
       if (mode === "sync") {
-        setBatchBusy("fetch");
         try {
-          await syncAll();
+          await runBatch("fetch", syncAll);
           return { ok: true, action: "fetch" };
-        } finally {
-          setBatchBusy(null);
+        } catch (error) {
+          return { ok: false, action: "fetch", error: String(error) };
         }
       }
       if (mode === "push") {
         // Commit & Push lands here: the active repo's summary would only push
         // itself, silently leaving the other committed repos unpushed.
-        setBatchBusy("push");
         try {
-          const failures: string[] = [];
-          for (const repo of repos) {
-            try {
-              const status = await native.gitStatus(repo.repoRoot);
-              if (!status.upstream || status.ahead === 0) continue;
-              if (status.behind > 0) {
+          return await runBatch("push", async () => {
+            const failures: string[] = [];
+            for (const repo of repos) {
+              ensureCurrent();
+              try {
+                const status = await native.gitStatus(repo.repoRoot);
+                if (!status.upstream || status.ahead === 0) continue;
+                if (status.behind > 0) {
+                  failures.push(
+                    `${repoDisplayName(repo.repoRoot)}: diverged from upstream`,
+                  );
+                  continue;
+                }
+                await native.gitPushAdvanced(repo.repoRoot, {});
+              } catch (error) {
                 failures.push(
-                  `${repoDisplayName(repo.repoRoot)}: diverged from upstream`,
+                  `${repoDisplayName(repo.repoRoot)}: ${
+                    typeof error === "string" ? error : String(error)
+                  }`,
                 );
-                continue;
               }
-              await native.gitPushAdvanced(repo.repoRoot, {});
-            } catch (error) {
-              failures.push(
-                `${repoDisplayName(repo.repoRoot)}: ${
-                  typeof error === "string" ? error : String(error)
-                }`,
-              );
             }
-          }
-          await summary.refresh({ remote: "never" });
-          return failures.length === 0
-            ? { ok: true, action: "push" }
-            : { ok: false, action: "push", error: failures.join("; ") };
-        } finally {
-          setBatchBusy(null);
+            await summary.refresh({ remote: "never" });
+            ensureCurrent();
+            await refreshAllRepoStatuses();
+            return failures.length === 0
+              ? { ok: true, action: "push" }
+              : { ok: false, action: "push", error: failures.join("; ") };
+          });
+        } catch (error) {
+          return { ok: false, action: "push", error: String(error) };
         }
       }
       return summary.runRemoteAction(mode);
     },
-    [repos, summary, syncAll],
+    [
+      repos,
+      summary,
+      syncAll,
+      runBatch,
+      native,
+      ensureCurrent,
+      refreshAllRepoStatuses,
+    ],
   );
 
   const wrappedSummary = useMemo<SourceControlSummary>(
@@ -731,20 +910,26 @@ export function useMultiRepoSourceControl(
     applyRepoStatus,
     refreshRepoStatus,
     refreshAllRepoStatuses,
-    fetchAll,
-    syncAll,
-    syncProgress,
+    fetchAll: () => runBatch("fetch", fetchAll),
+    syncAll: () => runBatch("fetch", syncAll),
+    syncProgress: progressContextRef.current === context ? syncProgress : null,
     clearSyncProgress,
-    buildPushPlan,
-    pushAll,
-    pushAllAdvanced,
-    pushUpToCommit,
+    buildPushPlan: () => runBatch("push", buildPushPlan),
+    pushAll: (plan) => runBatch("push", () => pushAll(plan)),
+    pushAllAdvanced: (plan, options) =>
+      runBatch("push", () => pushAllAdvanced(plan, options)),
+    pushUpToCommit: (repoRoot, sha) =>
+      runBatch("push", () => pushUpToCommit(repoRoot, sha)),
     listRemotes,
-    addRemote,
-    removeRemote,
-    setRemoteUrl,
-    cloneRepository,
+    addRemote: (repoRoot, name, url) =>
+      runBatch("push", () => addRemote(repoRoot, name, url)),
+    removeRemote: (repoRoot, name) =>
+      runBatch("push", () => removeRemote(repoRoot, name)),
+    setRemoteUrl: (repoRoot, name, url) =>
+      runBatch("push", () => setRemoteUrl(repoRoot, name, url)),
+    cloneRepository: (url, targetDir, options) =>
+      runBatch("fetch", () => cloneRepository(url, targetDir, options)),
     scanRepos: scan,
-    isLoading: scanLoading || summary.isLoading,
+    isLoading: scanLoading || summary.isLoading || batchBusy !== null,
   };
 }

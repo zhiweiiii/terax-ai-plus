@@ -1,4 +1,4 @@
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { LOCAL_WORKSPACE } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { appConfigDir, join } from "@tauri-apps/api/path";
@@ -21,22 +21,26 @@ async function themesDir(): Promise<string> {
 }
 
 export async function themeFilePath(id: string): Promise<string> {
+  if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(id))
+    throw new Error("Invalid theme ID");
   return join(await themesDir(), `${id}${THEME_FILE_EXT}`);
 }
 
 export async function writeThemeFile(theme: Theme): Promise<string> {
+  const parsed = validateTheme(theme);
+  if (!parsed.ok) throw new Error(parsed.error);
+  const path = await themeFilePath(parsed.theme.id);
   const dir = await themesDir();
-  const ws = currentWorkspaceEnv();
+  const ws = LOCAL_WORKSPACE;
   const dirExists = await invoke("fs_stat", { path: dir, workspace: ws })
     .then(() => true)
     .catch(() => false);
   if (!dirExists) {
     await invoke("fs_create_dir", { path: dir, workspace: ws });
   }
-  const path = await join(dir, `${theme.id}${THEME_FILE_EXT}`);
   await invoke("fs_write_file", {
     path,
-    content: JSON.stringify(theme, null, 2),
+    content: JSON.stringify(parsed.theme, null, 2),
     workspace: ws,
     source: "theme",
   });
@@ -46,9 +50,9 @@ export async function writeThemeFile(theme: Theme): Promise<string> {
 export async function deleteThemeFile(id: string): Promise<void> {
   try {
     const path = await themeFilePath(id);
-    await invoke("fs_delete", { path, workspace: currentWorkspaceEnv() });
-  } catch {
-    /* file may not exist yet — nothing to clean up */
+    await invoke("fs_delete", { path, workspace: LOCAL_WORKSPACE });
+  } catch (error) {
+    console.warn("[terax] theme file cleanup failed:", error);
   }
 }
 

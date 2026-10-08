@@ -8,7 +8,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { File02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -34,30 +38,61 @@ export function NewEditorDialog({
 }: Props) {
   const [name, setName] = useState("untitled.txt");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const composingRef = useRef(false);
+  const workspace = useWorkspaceEnvStore((s) => s.env);
+  const scopeKey = workspaceScopeKey(workspace);
+  const identity = open ? `${scopeKey}\0${rootPath}` : null;
+  const scopeRef = useRef({ identity });
+  if (scopeRef.current.identity !== identity) scopeRef.current = { identity };
+  const scope = scopeRef.current;
+  const mountedRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!open) return;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!identity) return;
     setName("untitled.txt");
     setError(null);
     // Pre-select the basename so the user can quickly retype the filename
     // while keeping the extension handy.
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       const el = inputRef.current;
       if (!el) return;
       el.focus();
       const dot = el.value.lastIndexOf(".");
       el.setSelectionRange(0, dot > 0 ? dot : el.value.length);
     }, 0);
-  }, [open]);
+    return () => clearTimeout(timer);
+  }, [identity]);
 
   const submit = async () => {
-    const trimmed = name.trim();
+    if (
+      !open ||
+      busyRef.current ||
+      !mountedRef.current ||
+      scopeRef.current !== scope ||
+      currentWorkspaceScopeKey() !== scopeKey
+    )
+      return;
+    const trimmed = name.trim().replace(/\\/g, "/");
     if (!trimmed) {
       setError("Name is required");
       return;
     }
-    if (trimmed.includes("..")) {
+    if (
+      trimmed.startsWith("/") ||
+      /^[A-Za-z]:/.test(trimmed) ||
+      /[\u0000-\u001f]/.test(trimmed) ||
+      trimmed.split("/").some((part) => !part || part === "." || part === "..")
+    ) {
       setError("Path must be relative");
       return;
     }
@@ -65,18 +100,26 @@ export function NewEditorDialog({
       setError("No workspace root");
       return;
     }
-    const path = trimmed.startsWith("/")
-      ? trimmed
-      : joinPath(rootPath, trimmed);
+    const path = joinPath(rootPath.replace(/\\/g, "/"), trimmed);
+    busyRef.current = true;
+    setBusy(true);
+    const current = () =>
+      mountedRef.current &&
+      scopeRef.current === scope &&
+      currentWorkspaceScopeKey() === scopeKey;
     try {
       await invoke("fs_create_file", {
         path,
-        workspace: currentWorkspaceEnv(),
+        workspace,
       });
+      if (!current()) return;
       onCreated(path);
       onOpenChange(false);
     } catch (e) {
-      setError(String(e));
+      if (current()) setError(String(e));
+    } finally {
+      busyRef.current = false;
+      if (mountedRef.current) setBusy(false);
     }
   };
 
@@ -95,13 +138,26 @@ export function NewEditorDialog({
         </DialogHeader>
         <Input
           ref={inputRef}
+          aria-label="Filename"
           value={name}
+          disabled={busy}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+          }}
           onChange={(e) => {
             setName(e.target.value);
             setError(null);
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (
+              e.key === "Enter" &&
+              !composingRef.current &&
+              !e.nativeEvent.isComposing &&
+              e.keyCode !== 229
+            ) {
               e.preventDefault();
               void submit();
             }
@@ -109,17 +165,21 @@ export function NewEditorDialog({
           placeholder="example.ts"
         />
         {error ? (
-          <div className="text-xs text-destructive">{error}</div>
+          <div role="alert" className="text-xs text-destructive">
+            {error}
+          </div>
         ) : (
           <div className="text-xs text-muted-foreground truncate">
-            {rootPath ? joinPath(rootPath, name.trim() || "…") : "—"}
+            {rootPath ? joinPath(rootPath, name.trim() || "...") : "..."}
           </div>
         )}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()}>Create</Button>
+          <Button disabled={busy} onClick={() => void submit()}>
+            {busy ? "Creating..." : "Create"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -14,6 +14,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type JSX, useEffect, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
 import { AboutSection } from "./sections/AboutSection";
 import { EditorSection } from "./sections/EditorSection";
 import { GeneralSection } from "./sections/GeneralSection";
@@ -88,21 +89,31 @@ export function SettingsApp() {
   const ActiveSection = TABS.find((t) => t.id === active)?.component;
 
   useEffect(() => {
-    void init();
+    void init().catch((error) =>
+      errorToast("Could not load preferences", error),
+    );
   }, [init]);
 
   useEffect(() => {
+    let alive = true;
+    let cleanup: (() => void) | undefined;
     const apply = (detail: string) => {
-      if ((VALID_TABS as string[]).includes(detail)) {
+      if (alive && (VALID_TABS as string[]).includes(detail)) {
         setActive(detail as SettingsTab);
       }
     };
-    const unlistenPromise = getCurrentWebviewWindow().listen<string>(
-      "terax:settings-tab",
-      (e) => apply(e.payload),
-    );
+    void getCurrentWebviewWindow()
+      .listen<string>("terax:settings-tab", (e) => apply(e.payload))
+      .then((unlisten) => {
+        if (alive) cleanup = unlisten;
+        else unlisten();
+      })
+      .catch((error) =>
+        errorToast("Could not listen for settings navigation", error),
+      );
     return () => {
-      void unlistenPromise.then((un) => un());
+      alive = false;
+      cleanup?.();
     };
   }, []);
 

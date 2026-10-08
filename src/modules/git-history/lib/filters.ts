@@ -102,44 +102,6 @@ export function compileSearch(
   }
 }
 
-export function findMatchIndex(
-  text: string,
-  query: string,
-  options: SearchOptions,
-): number {
-  const re = compileSearch(query, options);
-  if (!re) return -1;
-  const match = re.exec(text);
-  return match ? match.index : -1;
-}
-
-export function findMatch(
-  text: string,
-  query: string,
-  options: SearchOptions,
-): { index: number; length: number } | null {
-  const re = compileSearch(query, options);
-  if (!re) return null;
-  const match = re.exec(text);
-  return match ? { index: match.index, length: match[0].length } : null;
-}
-
-export function matchCommit(
-  commit: GitLogEntry,
-  query: string,
-  options: SearchOptions,
-): boolean {
-  if (!query) return true;
-  const re = compileSearch(query, options);
-  if (!re) return false;
-  return (
-    re.test(commit.subject) ||
-    re.test(commit.author) ||
-    re.test(commit.authorEmail) ||
-    re.test(commit.shortSha)
-  );
-}
-
 export function uniqueAuthors(entries: readonly GitLogEntry[]): string[] {
   const seen = new Set<string>();
   const authors: string[] = [];

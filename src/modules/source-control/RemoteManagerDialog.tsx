@@ -20,9 +20,10 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useState } from "react";
-import { errorToast } from "@/lib/errorToast";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
+import { useRepositoryOperation } from "@/modules/source-control/useRepositoryOperation";
+import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 import { toast } from "sonner";
-import type { GitRemoteEntry } from "./useMultiRepoSourceControl";
 
 type Props = {
   open: boolean;
@@ -43,51 +44,63 @@ export function RemoteManagerDialog({
   onRemove,
   onSetUrl,
 }: Props) {
-  const [remotes, setRemotes] = useState<GitRemoteEntry[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [editingUrl, setEditingUrl] = useState<{ name: string; url: string } | null>(
-    null,
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const operation = useRepositoryOperation(open && !!repoRoot, repoRoot ?? "");
+  const load = useCallback(
+    () =>
+      repoRoot
+        ? native.gitRemoteList(repoRoot, workspace)
+        : Promise.resolve([]),
+    [repoRoot, workspace],
   );
+  const {
+    results: remotes,
+    error,
+    loading,
+    retry,
+  } = useAsyncQuery({
+    enabled: open && !!repoRoot,
+    term: "",
+    minLength: 0,
+    debounceMs: 0,
+    run: load,
+    scopeKey: JSON.stringify([repoRoot, workspaceScopeKey(workspace)]),
+  });
+  const [editingUrl, setEditingUrl] = useState<{
+    name: string;
+    url: string;
+  } | null>(null);
   const [armedRemove, setArmedRemove] = useState<string | null>(null);
   const [addName, setAddName] = useState("");
   const [addUrl, setAddUrl] = useState("");
-  const [busy, setBusy] = useState<BusyKey>(null);
+  const [busyKey, setBusyKey] = useState<BusyKey>(null);
+  const busy = operation.busy ? busyKey : null;
 
-  const load = useCallback(async () => {
-    if (!repoRoot) {
-      setRemotes([]);
-      return;
-    }
-    setError(null);
-    try {
-      setRemotes(await native.gitRemoteList(repoRoot));
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-      setRemotes([]);
-    }
-  }, [repoRoot]);
-
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Clear confirmations and drafts when the repository or workspace changes.
   useEffect(() => {
     if (!open) return;
     setEditingUrl(null);
     setArmedRemove(null);
     setAddName("");
     setAddUrl("");
-    setBusy(null);
-    void load();
-  }, [open, load]);
+  }, [open, operation.scopeKey]);
 
   const run = async (key: string, op: () => Promise<void>) => {
-    if (busy) return;
-    setBusy(key);
-    try {
-      await op();
-      await load();
-    } catch (e) {
-      errorToast("远程仓库操作失败", e);
-    } finally {
-      setBusy(null);
-    }
+    await operation.run(
+      async () => {
+        setBusyKey(key);
+        await op();
+      },
+      () => {
+        if (key === "add") {
+          setAddName("");
+          setAddUrl("");
+        }
+        if (key.startsWith("seturl:")) setEditingUrl(null);
+        retry();
+      },
+      "Remote repository operation failed",
+    );
   };
 
   const handleAdd = () => {
@@ -120,14 +133,19 @@ export function RemoteManagerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md"
+        showCloseButton={!operation.busy}
+        onEscapeKeyDown={(event) => {
+          if (operation.busy) event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (operation.busy) event.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-1.75">
-            <HugeiconsIcon
-              icon={Edit02Icon}
-              size={15}
-              strokeWidth={1.9}
-            />
+            <HugeiconsIcon icon={Edit02Icon} size={15} strokeWidth={1.9} />
             Remotes
           </DialogTitle>
           <DialogDescription>
@@ -137,7 +155,7 @@ export function RemoteManagerDialog({
         </DialogHeader>
 
         <div className="flex max-h-[45vh] min-h-24 flex-col gap-1 overflow-y-auto">
-          {remotes === null ? (
+          {loading ? (
             <div className="flex items-center gap-2 px-1 py-3 text-[11px] text-muted-foreground">
               <Spinner className="size-3" />
               Loading remotes…
@@ -192,9 +210,7 @@ export function RemoteManagerDialog({
                       <button
                         type="button"
                         title={
-                          removing
-                            ? "Click again to remove"
-                            : "Remove remote"
+                          removing ? "Click again to remove" : "Remove remote"
                         }
                         disabled={busy !== null}
                         onClick={() => handleRemove(remote.name)}
@@ -222,13 +238,19 @@ export function RemoteManagerDialog({
                   {editing ? (
                     <div className="mt-1.5 flex items-center gap-1.5">
                       <Input
+                        disabled={operation.busy}
+                        aria-label={`URL for ${remote.name}`}
                         value={editingUrl?.url ?? ""}
                         onChange={(e) =>
                           setEditingUrl((current) =>
-                            current ? { ...current, url: e.target.value } : current,
+                            current
+                              ? { ...current, url: e.target.value }
+                              : current,
                           )
                         }
                         onKeyDown={(e) => {
+                          if (e.nativeEvent.isComposing || e.keyCode === 229)
+                            return;
                           if (e.key === "Enter") {
                             e.preventDefault();
                             handleSetUrl(remote.name);
@@ -241,7 +263,7 @@ export function RemoteManagerDialog({
                       <Button
                         size="xs"
                         onClick={() => handleSetUrl(remote.name)}
-                        disabled={busy === `seturl:${remote.name}`}
+                        disabled={operation.busy || !editingUrl?.url.trim()}
                       >
                         Save
                       </Button>
@@ -267,9 +289,12 @@ export function RemoteManagerDialog({
           </div>
           <div className="flex items-center gap-1.5">
             <Input
+              disabled={operation.busy || !repoRoot}
+              aria-label="Remote name"
               value={addName}
               onChange={(e) => setAddName(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   handleAdd();
@@ -279,9 +304,12 @@ export function RemoteManagerDialog({
               placeholder="name"
             />
             <Input
+              disabled={operation.busy || !repoRoot}
+              aria-label="Remote URL"
               value={addUrl}
               onChange={(e) => setAddUrl(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   handleAdd();
@@ -292,23 +320,33 @@ export function RemoteManagerDialog({
             />
             <Button
               size="xs"
-              disabled={busy !== null || !addName.trim() || !addUrl.trim()}
+              disabled={
+                operation.busy || !repoRoot || !addName.trim() || !addUrl.trim()
+              }
               onClick={handleAdd}
             >
-              {busy === "add" ? <Spinner className="size-3" /> : <HugeiconsIcon icon={Add01Icon} size={12} strokeWidth={2} />}
+              {busy === "add" ? (
+                <Spinner className="size-3" />
+              ) : (
+                <HugeiconsIcon icon={Add01Icon} size={12} strokeWidth={2} />
+              )}
               Add
             </Button>
           </div>
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button
+            variant="ghost"
+            disabled={operation.busy}
+            onClick={() => onOpenChange(false)}
+          >
             Close
           </Button>
           <Button
             variant="outline"
-            disabled={busy !== null}
-            onClick={() => void load()}
+            disabled={operation.busy || loading || !repoRoot}
+            onClick={retry}
           >
             <HugeiconsIcon icon={Refresh01Icon} size={12} strokeWidth={1.9} />
             Refresh

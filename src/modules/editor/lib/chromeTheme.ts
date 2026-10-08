@@ -405,7 +405,16 @@ const chrome = EditorView.theme({
     },
   },
 
-  ".cm-tooltip ::-webkit-scrollbar": { width: "8px", height: "8px" },
+  ".cm-tooltip *, .cm-lsp-locations ul": {
+    scrollbarWidth: "thin",
+    scrollbarColor:
+      "color-mix(in srgb, var(--muted-foreground) 30%, transparent) transparent",
+  },
+  ".cm-tooltip ::-webkit-scrollbar, .cm-lsp-locations ul::-webkit-scrollbar": {
+    display: "block",
+    width: "8px",
+    height: "8px",
+  },
   ".cm-tooltip ::-webkit-scrollbar-thumb": {
     backgroundColor:
       "color-mix(in srgb, var(--muted-foreground) 30%, transparent)",

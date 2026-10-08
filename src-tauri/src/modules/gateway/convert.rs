@@ -158,7 +158,10 @@ pub fn request_to_openai(body: &Value) -> Value {
     // Compatible relays omit usage from the stream unless it is asked for, and
     // without it every streamed request records zero tokens.
     if result.get("stream").and_then(Value::as_bool) == Some(true) {
-        match result.get_mut("stream_options").and_then(Value::as_object_mut) {
+        match result
+            .get_mut("stream_options")
+            .and_then(Value::as_object_mut)
+        {
             Some(options) => {
                 options.insert("include_usage".into(), json!(true));
             }
@@ -350,8 +353,9 @@ pub fn response_to_anthropic(body: &Value) -> Option<Value> {
     // DeepSeek and its lookalikes carry chain of thought here.
     if let Some(reasoning) = message
         .get("reasoning_content")
-        .or_else(|| message.get("reasoning"))
         .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .or_else(|| message.get("reasoning").and_then(Value::as_str))
     {
         if !reasoning.is_empty() {
             content.push(json!({ "type": "thinking", "thinking": reasoning }));

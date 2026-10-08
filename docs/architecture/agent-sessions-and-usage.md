@@ -97,6 +97,12 @@ Codex CLI 提供本机 JSON-RPC app-server。Terax 只在用户打开 Codex 用�
 
 这不是对运行中 Codex TUI 的连接，也不读取或传出 `~/.codex` 的登录凭据。查询完成（或超时）后该 app-server 立刻结束；和 Claude 一样，成功结果在内存缓存 10 分钟、不轮询，失败不缓存。没有已登录 Codex 或本机 CLI 不支持 app-server 时，面板原样显示错误，而不拿会话 transcript 的 token 数冒充套餐额度。
 
+### 运行环境边界
+
+历史菜单的异步结果同时绑定 cwd、工作区环境和打开代次，失败可重试，不把读取失败显示成空历史。当前读取器只访问 Windows 用户目录，不读取 WSL 用户目录；WSL 中保留新建对话命令，历史区明确提示使用对应 CLI 的 resume，前后端均不拿本机历史填充 WSL 项目。
+
+目录枚举使用显式栈，扫描限制 32768 个项、8192 个 JSONL 文件、8 层，并在每个项检查 2 秒期限。超限或 IO 异常返回错误，不用部分候选列表推断唯一会话；结果和错误均缓存 2 秒。恢复文件解析核对 cwd/session ID，发现第二个候选立即拒绝绑定。Claude 项目目录的回退查找另有共享项数/时间预算。
+
 ## 相关
 
 - [手机端对话视图](mobile-conversation-view.md) - `transcript` 模块读同一批文件的另一个用途

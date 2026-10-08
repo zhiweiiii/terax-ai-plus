@@ -1,4 +1,4 @@
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 
 export type ReadResult =
@@ -150,13 +150,6 @@ export type GitBranchListResult = {
   branches: GitBranchEntry[];
 };
 
-export type GitCommitOptions = {
-  amend?: boolean;
-  noVerify?: boolean;
-  allowEmpty?: boolean;
-  gpgSign?: boolean;
-};
-
 export type PreCommitChecks = {
   warnings: string[];
 };
@@ -244,10 +237,13 @@ export type WebStatus = {
 
 export const native = {
   workspaceCurrentDir: () => invoke<string>("workspace_current_dir"),
-  workspaceAuthorize: (path: string) =>
+  workspaceAuthorize: (
+    path: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<string>("workspace_authorize", {
       path,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   readFile: (path: string) =>
     invoke<ReadResult>("fs_read_file", {
@@ -269,18 +265,26 @@ export const native = {
     invoke<void>("fs_create_file", { path, workspace: currentWorkspaceEnv() }),
   createDir: (path: string) =>
     invoke<void>("fs_create_dir", { path, workspace: currentWorkspaceEnv() }),
-  runCommand: (command: string, cwd?: string | null, timeoutSecs?: number) =>
+  runCommand: (
+    command: string,
+    cwd?: string | null,
+    timeoutSecs?: number,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<CommandOutput>("shell_run_command", {
       command,
       cwd: cwd ?? null,
       timeoutSecs: timeoutSecs ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
 
-  gitResolveRepo: (cwd: string) =>
+  gitResolveRepo: (
+    cwd: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitRepoInfo | null>("git_resolve_repo", {
       cwd,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitPanelSnapshot: (cwd: string) =>
     invoke<GitPanelSnapshot>("git_panel_snapshot", {
@@ -292,25 +296,31 @@ export const native = {
       repoRoot,
       workspace: currentWorkspaceEnv(),
     }),
-  gitDiff: (repoRoot: string, path: string | null, staged: boolean) =>
+  gitDiff: (
+    repoRoot: string,
+    path: string | null,
+    staged: boolean,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitDiffResult>("git_diff", {
       repoRoot,
       path,
       staged,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitDiffContent: (
     repoRoot: string,
     path: string,
     staged: boolean,
     originalPath?: string | null,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
   ) =>
     invoke<GitDiffContentResult>("git_diff_content", {
       repoRoot,
       path,
       staged,
       originalPath: originalPath ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitStage: (repoRoot: string, paths: string[]) =>
     invoke<void>("git_stage", {
@@ -341,10 +351,13 @@ export const native = {
       repoRoot,
       workspace: currentWorkspaceEnv(),
     }),
-  gitPullFfOnly: (repoRoot: string) =>
+  gitPullFfOnly: (
+    repoRoot: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<void>("git_pull_ff_only", {
       repoRoot,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitPush: (repoRoot: string) =>
     invoke<GitPushResult>("git_push", {
@@ -354,24 +367,26 @@ export const native = {
   gitLog: (
     repoRoot: string,
     options?: { limit?: number; beforeSha?: string },
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
   ) =>
     invoke<GitLogEntry[]>("git_log", {
       repoRoot,
       limit: options?.limit ?? null,
       beforeSha: options?.beforeSha ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitLogFile: (
     repoRoot: string,
     path: string,
     options?: { maxCount?: number; skip?: number },
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
   ) =>
     invoke<GitLogEntry[]>("git_log_file", {
       repoRoot,
       path,
       maxCount: options?.maxCount ?? null,
       skip: options?.skip ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitShowCommit: (repoRoot: string, sha: string) =>
     invoke<GitDiffResult>("git_show_commit", {
@@ -379,46 +394,59 @@ export const native = {
       sha,
       workspace: currentWorkspaceEnv(),
     }),
-  gitCommitFiles: (repoRoot: string, sha: string) =>
+  gitCommitFiles: (
+    repoRoot: string,
+    sha: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitCommitFileChange[]>("git_commit_files", {
       repoRoot,
       sha,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitCommitFileDiff: (
     repoRoot: string,
     sha: string,
     path: string,
     originalPath?: string | null,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
   ) =>
     invoke<GitDiffContentResult>("git_commit_file_diff", {
       repoRoot,
       sha,
       path,
       originalPath: originalPath ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  gitRemoteUrl: (repoRoot: string, name?: string) =>
+  gitRemoteUrl: (
+    repoRoot: string,
+    name?: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<string | null>("git_remote_url", {
       repoRoot,
       name: name ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  gitListBranches: (repoRoot: string) =>
+  gitListBranches: (
+    repoRoot: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitBranchListResult>("git_list_branches", {
       repoRoot,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitCheckoutBranch: (
     repoRoot: string,
     branch: string,
     localName?: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
   ) =>
     invoke<void>("git_checkout_branch", {
       repoRoot,
       branch,
       localName: localName ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitScanRepos: (baseDir: string, maxDepth?: number) =>
     invoke<GitRepoHead[]>("git_scan_repos", {
@@ -437,37 +465,11 @@ export const native = {
       repoRoots,
       workspace: currentWorkspaceEnv(),
     }),
-  gitCommitAdvanced: (
-    repoRoot: string,
-    message: string,
-    options?: GitCommitOptions,
-  ) =>
-    invoke<GitCommitResult>("git_commit_advanced", {
-      repoRoot,
-      message,
-      options: {
-        amend: options?.amend ?? false,
-        noVerify: options?.noVerify ?? false,
-        allowEmpty: options?.allowEmpty ?? false,
-        gpgSign: options?.gpgSign ?? false,
-      },
-      workspace: currentWorkspaceEnv(),
-    }),
-  gitAmendSpecificCommit: (
-    repoRoot: string,
-    targetSha: string,
-    message: string,
-  ) =>
-    invoke<GitCommitResult>("git_amend_specific_commit", {
-      repoRoot,
-      targetSha,
-      message,
-      workspace: currentWorkspaceEnv(),
-    }),
-  gitCommitReword: (repoRoot: string, message: string) =>
+  gitCommitReword: (repoRoot: string, message: string, expectedSha: string) =>
     invoke<GitCommitResult>("git_commit_reword", {
       repoRoot,
       message,
+      expectedSha,
       workspace: currentWorkspaceEnv(),
     }),
   gitPreCommitChecks: (repoRoot: string) =>
@@ -484,33 +486,45 @@ export const native = {
     repoRoot: string,
     name: string,
     options?: GitCreateBranchOptions,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
   ) =>
     invoke<void>("git_create_branch", {
       repoRoot,
       name,
       checkout: options?.checkout ?? false,
       startPoint: options?.startPoint ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  gitRenameBranch: (repoRoot: string, oldName: string, newName: string) =>
+  gitRenameBranch: (
+    repoRoot: string,
+    oldName: string,
+    newName: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<void>("git_rename_branch", {
       repoRoot,
       oldName,
       newName,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitDeleteBranch: (
     repoRoot: string,
     name: string,
     options?: GitDeleteBranchOptions,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
   ) =>
     invoke<void>("git_delete_branch", {
       repoRoot,
       name,
       remote: options?.remote ?? false,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  gitMerge: (repoRoot: string, branch: string, options?: GitMergeOptions) =>
+  gitMerge: (
+    repoRoot: string,
+    branch: string,
+    options?: GitMergeOptions,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitMergeResult>("git_merge", {
       repoRoot,
       branch,
@@ -519,13 +533,17 @@ export const native = {
       squash: options?.squash ?? false,
       message: options?.message ?? null,
       noCommit: options?.noCommit ?? false,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  gitRebase: (repoRoot: string, branch: string) =>
+  gitRebase: (
+    repoRoot: string,
+    branch: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitRebaseResult>("git_rebase", {
       repoRoot,
       branch,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitTagCreate: (
     repoRoot: string,
@@ -544,19 +562,29 @@ export const native = {
       },
       workspace: currentWorkspaceEnv(),
     }),
-  gitDiffWithRef: (repoRoot: string, ref: string, path?: string | null) =>
+  gitDiffWithRef: (
+    repoRoot: string,
+    ref: string,
+    path?: string | null,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitDiffResult>("git_diff_with_ref", {
       repoRoot,
       reference: ref,
       path: path ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  gitCompareBranches: (repoRoot: string, left: string, right: string) =>
+  gitCompareBranches: (
+    repoRoot: string,
+    left: string,
+    right: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitCompareResult>("git_compare_branches", {
       repoRoot,
       left,
       right,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitPullAdvanced: (repoRoot: string, strategy: string) =>
     invoke<void>("git_pull_advanced", {
@@ -581,10 +609,13 @@ export const native = {
       sha,
       workspace: currentWorkspaceEnv(),
     }),
-  gitRemoteList: (repoRoot: string) =>
+  gitRemoteList: (
+    repoRoot: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitRemoteEntry[]>("git_remote_list", {
       repoRoot,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitRemoteAdd: (repoRoot: string, name: string, url: string) =>
     invoke<void>("git_remote_add", {
@@ -621,7 +652,11 @@ export const native = {
       repoRoot,
       workspace: currentWorkspaceEnv(),
     }),
-  gitLogFiltered: (repoRoot: string, options?: GitLogFilterOptions) =>
+  gitLogFiltered: (
+    repoRoot: string,
+    options?: GitLogFilterOptions,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitLogEntry[]>("git_log_filtered", {
       repoRoot,
       options: {
@@ -633,7 +668,7 @@ export const native = {
         maxCount: options?.maxCount ?? null,
         skip: options?.skip ?? null,
       },
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   gitReset: (repoRoot: string, mode: ResetMode, target?: string | null) =>
     invoke<void>("git_reset", {
@@ -654,31 +689,6 @@ export const native = {
       sha,
       workspace: currentWorkspaceEnv(),
     }),
-  gitRewordCommit: (repoRoot: string, sha: string, message: string) =>
-    invoke<void>("git_reword_commit", {
-      repoRoot,
-      sha,
-      message,
-      workspace: currentWorkspaceEnv(),
-    }),
-  gitFixupCommit: (repoRoot: string, sha: string) =>
-    invoke<void>("git_fixup_commit", {
-      repoRoot,
-      sha,
-      workspace: currentWorkspaceEnv(),
-    }),
-  gitSquashCommit: (repoRoot: string, sha: string) =>
-    invoke<void>("git_squash_commit", {
-      repoRoot,
-      sha,
-      workspace: currentWorkspaceEnv(),
-    }),
-  gitDropCommit: (repoRoot: string, sha: string) =>
-    invoke<void>("git_drop_commit", {
-      repoRoot,
-      sha,
-      workspace: currentWorkspaceEnv(),
-    }),
   gitDiffRange: (repoRoot: string, from: string, to: string) =>
     invoke<GitDiffResult>("git_diff_range", {
       repoRoot,
@@ -686,23 +696,25 @@ export const native = {
       to,
       workspace: currentWorkspaceEnv(),
     }),
-  gitDiffCommitVsWorktree: (repoRoot: string, sha: string) =>
+  gitDiffCommitVsWorktree: (
+    repoRoot: string,
+    sha: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<GitDiffResult>("git_diff_commit_vs_worktree", {
       repoRoot,
       sha,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  gitCreatePatch: (repoRoot: string, shas: string[]) =>
-    invoke<string>("git_create_patch", {
-      repoRoot,
-      shas,
-      workspace: currentWorkspaceEnv(),
-    }),
-  gitBranchesContaining: (repoRoot: string, sha: string) =>
+  gitBranchesContaining: (
+    repoRoot: string,
+    sha: string,
+    workspace: WorkspaceEnv = currentWorkspaceEnv(),
+  ) =>
     invoke<string[]>("git_branches_containing", {
       repoRoot,
       sha,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
   webStatus: () => invoke<WebStatus>("web_status"),
 };

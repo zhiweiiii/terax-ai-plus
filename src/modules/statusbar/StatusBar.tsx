@@ -43,7 +43,17 @@ export function StatusBar({
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
-    void getVersion().then(setVersion).catch(() => setVersion(null));
+    let alive = true;
+    void getVersion()
+      .then((value) => {
+        if (alive) setVersion(value);
+      })
+      .catch((error) => {
+        if (alive) console.warn("[terax] version query failed:", error);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   return (
@@ -79,7 +89,7 @@ export function StatusBar({
           className="select-text px-1 text-[10px] tabular-nums text-muted-foreground"
           title="Terax 版本"
         >
-          v{version ?? "—"}
+          v{version ?? "--"}
         </span>
         <Button
           variant="ghost"

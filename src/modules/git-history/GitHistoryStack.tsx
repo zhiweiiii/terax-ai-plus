@@ -1,7 +1,10 @@
 import type { GitRepoHead } from "@/lib/native";
 import type { GitHistoryTab, Tab } from "@/modules/tabs";
-import { useEffect, useRef } from "react";
-import { GitHistoryPane, type GitHistoryPaneHandle } from "./GitHistoryPane";
+import { useCallback, useRef } from "react";
+import {
+  GitHistoryPane,
+  type GitHistoryPaneHandle,
+} from "@/modules/git-history/GitHistoryPane";
 
 type CommitFileDiffOpenInput = {
   repoRoot: string;
@@ -39,12 +42,15 @@ export function GitHistoryStack({
     (t): t is GitHistoryTab => t.kind === "git-history" && t.id === activeId,
   );
   const registerRef = useRef(registerHandle);
-  useEffect(() => {
-    registerRef.current = registerHandle;
-  }, [registerHandle]);
+  registerRef.current = registerHandle;
 
-  const setRef = (h: GitHistoryPaneHandle | null) =>
-    registerRef.current(active?.id ?? -1, h);
+  const tabId = active?.id;
+  const setRef = useCallback(
+    (h: GitHistoryPaneHandle | null) => {
+      if (tabId !== undefined) registerRef.current(tabId, h);
+    },
+    [tabId],
+  );
 
   if (!active) return null;
   return (

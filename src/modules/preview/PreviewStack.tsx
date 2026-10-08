@@ -22,12 +22,8 @@ export function PreviewStack({
 
   const registerRef = useRef(registerHandle);
   const urlChangeRef = useRef(onUrlChange);
-  useEffect(() => {
-    registerRef.current = registerHandle;
-  }, [registerHandle]);
-  useEffect(() => {
-    urlChangeRef.current = onUrlChange;
-  }, [onUrlChange]);
+  registerRef.current = registerHandle;
+  urlChangeRef.current = onUrlChange;
 
   const refCallbacks = useRef(
     new Map<number, (h: PreviewPaneHandle | null) => void>(),

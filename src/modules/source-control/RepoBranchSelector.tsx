@@ -12,11 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
-import {
-  type GitBranchEntry,
-  type GitRepoHead,
-  native,
-} from "@/lib/native";
+import { type GitBranchEntry, type GitRepoHead, native } from "@/lib/native";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   ArrowDown01Icon,
@@ -36,7 +32,12 @@ import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { BranchActionsMenu } from "./BranchActionsMenu";
 import { BranchConfirmDialog } from "./BranchConfirmDialog";
-import { gitMerge, gitRebase } from "./branchOps";
+import { useRepositoryOperation } from "@/modules/source-control/useRepositoryOperation";
+import {
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+  type WorkspaceEnv,
+} from "@/modules/workspace";
 import { CompareBranchesDialog } from "./CompareBranchesDialog";
 import { DeleteBranchDialog } from "./DeleteBranchDialog";
 import { NewBranchDialog } from "./NewBranchDialog";
@@ -101,7 +102,16 @@ function currentBranchOf(branches: GitBranchEntry[]): string | null {
  * there, and the repo list scrolls in its own inner container instead.
  * Branches are only fetched when a repo's flyout opens.
  */
-export function RepoBranchSelector({
+export function RepoBranchSelector(props: Props) {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const key = JSON.stringify([
+    workspaceScopeKey(workspace),
+    props.repos.map((repo) => repo.repoRoot).sort(),
+  ]);
+  return <ScopedRepoBranchSelector key={key} {...props} />;
+}
+
+function ScopedRepoBranchSelector({
   repos,
   activeRepo,
   activeBranch,
@@ -115,34 +125,68 @@ export function RepoBranchSelector({
   const [branches, setBranches] = useState<Record<string, GitBranchEntry[]>>(
     {},
   );
-  const [loading, setLoading] = useState<string | null>(null);
-  const [checkingOut, setCheckingOut] = useState<string | null>(null);
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const { busy, run, isCurrent } = useRepositoryOperation(
+    true,
+    JSON.stringify(repos.map((repo) => repo.repoRoot).sort()),
+  );
+  const [loading, setLoading] = useState<Set<string>>(new Set());
+  const [branchErrors, setBranchErrors] = useState<Record<string, string>>({});
+  const [checkoutKey, setCheckingOut] = useState<string | null>(null);
+  const checkingOut = busy ? checkoutKey : null;
   // Remote branch being checked out as a new local branch, with the editable
   // local name; null hides the naming row.
   const [pendingRemote, setPendingRemote] = useState<PendingRemote | null>(
     null,
   );
   const [dialog, setDialog] = useState<BranchDialog>(null);
-  const [busyOp, setBusyOp] = useState<string | null>(null);
-  const protectedBranches = usePreferencesStore(
-    (s) => s.protectedBranches,
-  );
+  const dialogRef = useRef(dialog);
+  dialogRef.current = dialog;
+  const [busyLabel, setBusyOp] = useState<string | null>(null);
+  const busyOp = busy ? busyLabel : null;
+  const protectedBranches = usePreferencesStore((s) => s.protectedBranches);
   const inFlight = useRef<Set<string>>(new Set());
 
-  const loadBranches = useCallback(async (repoRoot: string) => {
-    if (inFlight.current.has(repoRoot)) return;
-    inFlight.current.add(repoRoot);
-    setLoading(repoRoot);
-    try {
-      const result = await native.gitListBranches(repoRoot);
-      setBranches((current) => ({ ...current, [repoRoot]: result.branches }));
-    } catch (e) {
-      errorToast(`Could not list branches for ${shortName(repoRoot)}`, e);
-    } finally {
-      inFlight.current.delete(repoRoot);
-      setLoading((current) => (current === repoRoot ? null : current));
-    }
-  }, []);
+  const loadBranches = useCallback(
+    async (repoRoot: string) => {
+      if (!isCurrent() || inFlight.current.has(repoRoot)) return;
+      inFlight.current.add(repoRoot);
+      setLoading((current) => new Set(current).add(repoRoot));
+      setBranchErrors((current) => {
+        const next = { ...current };
+        delete next[repoRoot];
+        return next;
+      });
+      try {
+        const result = await native.gitListBranches(repoRoot, workspace);
+        if (isCurrent())
+          setBranches((current) => ({
+            ...current,
+            [repoRoot]: result.branches,
+          }));
+      } catch (error) {
+        if (isCurrent()) {
+          setBranchErrors((current) => ({
+            ...current,
+            [repoRoot]: String(error),
+          }));
+          errorToast(
+            `Could not list branches for ${shortName(repoRoot)}`,
+            error,
+          );
+        }
+      } finally {
+        inFlight.current.delete(repoRoot);
+        if (isCurrent())
+          setLoading((current) => {
+            const next = new Set(current);
+            next.delete(repoRoot);
+            return next;
+          });
+      }
+    },
+    [isCurrent, workspace],
+  );
 
   const checkout = useCallback(
     async (
@@ -152,33 +196,37 @@ export function RepoBranchSelector({
       localName?: string,
       label?: string,
     ) => {
-      if (checkingOut) return;
-      setCheckingOut(`${repoRoot}:${branchName}`);
-      try {
-        await native.gitCheckoutBranch(repoRoot, branchName, localName);
-        // A remote ref becomes a local tracking branch, so the cached list for
-        // this repo is stale either way.
-        setBranches((current) => {
-          const next = { ...current };
-          delete next[repoRoot];
-          return next;
-        });
-        setOpen(false);
-        setPendingRemote(null);
-        onChangeRepo(repoRoot);
-        onCheckedOut?.(repoRoot);
-        toast.success(
-          kind === "remote"
-            ? `Checked out ${label ?? branchName} as ${localName} in ${shortName(repoRoot)}`
-            : `Switched to ${label ?? branchName} in ${shortName(repoRoot)}`,
-        );
-      } catch (e) {
-        errorToast(`Checkout failed in ${shortName(repoRoot)}`, e);
-      } finally {
-        setCheckingOut(null);
-      }
+      return run(
+        (workspace) => {
+          setCheckingOut(`${repoRoot}:${branchName}`);
+          setBusyOp("checkout");
+          return native.gitCheckoutBranch(
+            repoRoot,
+            branchName,
+            localName,
+            workspace,
+          );
+        },
+        () => {
+          setBranches((current) => {
+            const next = { ...current };
+            delete next[repoRoot];
+            return next;
+          });
+          setOpen(false);
+          setPendingRemote(null);
+          onChangeRepo(repoRoot);
+          onCheckedOut?.(repoRoot);
+          toast.success(
+            kind === "remote"
+              ? `Checked out ${label ?? branchName} as ${localName} in ${shortName(repoRoot)}`
+              : `Switched to ${label ?? branchName} in ${shortName(repoRoot)}`,
+          );
+        },
+        `Checkout failed in ${shortName(repoRoot)}`,
+      );
     },
-    [checkingOut, onChangeRepo, onCheckedOut],
+    [run, onChangeRepo, onCheckedOut],
   );
 
   const handleRemoteCheckout = useCallback(async () => {
@@ -201,75 +249,116 @@ export function RepoBranchSelector({
     [loadBranches, onCheckedOut],
   );
 
-  const runPull = useCallback(
-    async (repoRoot: string) => {
-      if (busyOp) return;
-      setBusyOp("pull");
-      try {
-        await native.gitPullFfOnly(repoRoot);
-        toast.success(`Pulled latest for ${shortName(repoRoot)}`);
-      } catch (e) {
-        errorToast(`Pull failed in ${shortName(repoRoot)}`, e);
-      } finally {
-        setBusyOp(null);
-        refreshRepo(repoRoot);
-      }
+  const checkConfirmation = useCallback(
+    async (
+      repoRoot: string,
+      expected: string | undefined,
+      workspace: WorkspaceEnv,
+    ) => {
+      if (!expected)
+        throw new Error("Branches are not loaded; review the operation again");
+      const result = await native.gitListBranches(repoRoot, workspace);
+      if (!isCurrent() || currentBranchOf(result.branches) !== expected)
+        throw new Error("Current branch changed; review the operation again");
     },
-    [busyOp, refreshRepo],
+    [isCurrent],
+  );
+
+  const runPull = useCallback(
+    async (repoRoot: string, expected?: string) => {
+      return run(
+        async (workspace) => {
+          setCheckingOut(null);
+          setBusyOp("pull");
+          await checkConfirmation(repoRoot, expected, workspace);
+          if (!isCurrent()) throw new Error("Workspace changed");
+          await native.gitPullFfOnly(repoRoot, workspace);
+        },
+        () => {
+          toast.success(`Pulled latest for ${shortName(repoRoot)}`);
+          refreshRepo(repoRoot);
+        },
+        `Pull failed in ${shortName(repoRoot)}`,
+        (error) => {
+          errorToast("Pull failed", error);
+          refreshRepo(repoRoot);
+        },
+      );
+    },
+    [run, checkConfirmation, isCurrent, refreshRepo],
   );
 
   const runMerge = useCallback(
-    async (repoRoot: string, target: string) => {
-      if (busyOp) return;
-      setBusyOp("merge");
-      try {
-        const result = await gitMerge(repoRoot, target);
-        if (result.conflicts) {
-          toast.warning(`Merge of ${target} has conflicts`, {
-            description:
-              "Resolve them in the terminal, then commit the merge.",
-          });
-        } else if (result.upToDate) {
-          toast.info(`Already up to date with ${target}`);
-        } else if (result.merged) {
-          toast.success(`Merged ${target} in ${shortName(repoRoot)}`);
-        } else {
-          errorToast(result.message || `Merge of ${target} failed`);
-        }
-      } catch (e) {
-        errorToast(`Merge failed in ${shortName(repoRoot)}`, e);
-      } finally {
-        setBusyOp(null);
-        refreshRepo(repoRoot);
-      }
+    async (repoRoot: string, target: string, expected?: string) => {
+      return run(
+        async (workspace) => {
+          setCheckingOut(null);
+          setBusyOp("merge");
+          await checkConfirmation(repoRoot, expected, workspace);
+          if (!isCurrent()) throw new Error("Workspace changed");
+          const result = await native.gitMerge(
+            repoRoot,
+            target,
+            undefined,
+            workspace,
+          );
+          if (!result.conflicts && !result.upToDate && !result.merged)
+            throw new Error(result.message || `Merge of ${target} failed`);
+          return result;
+        },
+        (result) => {
+          if (result.conflicts)
+            toast.warning(`Merge of ${target} has conflicts`, {
+              description:
+                "Resolve them in the terminal, then commit the merge.",
+            });
+          else if (result.upToDate)
+            toast.info(`Already up to date with ${target}`);
+          else if (result.merged)
+            toast.success(`Merged ${target} in ${shortName(repoRoot)}`);
+          refreshRepo(repoRoot);
+        },
+        `Merge failed in ${shortName(repoRoot)}`,
+        (error) => {
+          errorToast("Merge failed", error);
+          refreshRepo(repoRoot);
+        },
+      );
     },
-    [busyOp, refreshRepo],
+    [run, checkConfirmation, isCurrent, refreshRepo],
   );
 
   const runRebase = useCallback(
-    async (repoRoot: string, target: string) => {
-      if (busyOp) return;
-      setBusyOp("rebase");
-      try {
-        const result = await gitRebase(repoRoot, target);
-        if (result.ok) {
-          toast.success(`Rebased onto ${target} in ${shortName(repoRoot)}`);
-        } else if (result.conflict) {
-          toast.warning(`Rebase onto ${target} hit conflicts`, {
-            description:
-              "Resolve them in the terminal, then continue or abort.",
-          });
-        } else {
-          errorToast(result.message || `Rebase onto ${target} failed`);
-        }
-      } catch (e) {
-        errorToast(`Rebase failed in ${shortName(repoRoot)}`, e);
-      } finally {
-        setBusyOp(null);
-        refreshRepo(repoRoot);
-      }
+    async (repoRoot: string, target: string, expected?: string) => {
+      return run(
+        async (workspace) => {
+          setCheckingOut(null);
+          setBusyOp("rebase");
+          await checkConfirmation(repoRoot, expected, workspace);
+          if (!isCurrent()) throw new Error("Workspace changed");
+          const result = await native.gitRebase(repoRoot, target, workspace);
+          if (!result.ok && !result.conflict)
+            throw new Error(result.message || `Rebase onto ${target} failed`);
+          return result;
+        },
+        (result) => {
+          if (result.ok)
+            toast.success(`Rebased onto ${target} in ${shortName(repoRoot)}`);
+          else if (result.conflict)
+            toast.warning(`Rebase onto ${target} hit conflicts`, {
+              description:
+                "Resolve them in the terminal, then continue or abort.",
+            });
+          refreshRepo(repoRoot);
+        },
+        `Rebase failed in ${shortName(repoRoot)}`,
+        (error) => {
+          errorToast("Rebase failed", error);
+          refreshRepo(repoRoot);
+        },
+      );
     },
-    [busyOp, refreshRepo],
+    [run, checkConfirmation, isCurrent, refreshRepo],
   );
 
   const handleCreated = useCallback(
@@ -295,7 +384,7 @@ export function RepoBranchSelector({
       if (current && protectedBranches.includes(current)) {
         setDialog({ kind: "pull-confirm", repoRoot, current });
       } else {
-        void runPull(repoRoot);
+        void runPull(repoRoot, current ?? undefined);
       }
     },
     [branches, protectedBranches, runPull],
@@ -308,7 +397,7 @@ export function RepoBranchSelector({
       if (current && protectedBranches.includes(current)) {
         setDialog({ kind: "merge-confirm", repoRoot, target, current });
       } else {
-        void runMerge(repoRoot, target);
+        void runMerge(repoRoot, target, current ?? undefined);
       }
     },
     [branches, protectedBranches, runMerge],
@@ -321,7 +410,7 @@ export function RepoBranchSelector({
       if (current && protectedBranches.includes(current)) {
         setDialog({ kind: "rebase-confirm", repoRoot, target, current });
       } else {
-        void runRebase(repoRoot, target);
+        void runRebase(repoRoot, target, current ?? undefined);
       }
     },
     [branches, protectedBranches, runRebase],
@@ -389,7 +478,11 @@ export function RepoBranchSelector({
             className="h-7 min-w-0 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
             title="切换仓库或分支"
           >
-            <HugeiconsIcon icon={FolderGitTwoIcon} size={14} strokeWidth={1.75} />
+            <HugeiconsIcon
+              icon={FolderGitTwoIcon}
+              size={14}
+              strokeWidth={1.75}
+            />
             <span className="max-w-28 truncate">{activeName ?? "无仓库"}</span>
             {activeBranch ? (
               <>
@@ -432,11 +525,7 @@ export function RepoBranchSelector({
                   onRescan();
                 }}
               >
-                <HugeiconsIcon
-                  icon={Refresh01Icon}
-                  size={11}
-                  strokeWidth={2}
-                />
+                <HugeiconsIcon icon={Refresh01Icon} size={11} strokeWidth={2} />
               </Button>
             )}
           </DropdownMenuLabel>
@@ -487,7 +576,9 @@ export function RepoBranchSelector({
                   <BranchFlyout
                     repoRoot={repo.repoRoot}
                     branches={repoBranches}
-                    loading={loading === repo.repoRoot}
+                    loading={loading.has(repo.repoRoot)}
+                    error={branchErrors[repo.repoRoot]}
+                    onRetry={() => void loadBranches(repo.repoRoot)}
                     checkingOut={checkingOut}
                     busyOp={busyOp}
                     pendingRemote={
@@ -498,9 +589,7 @@ export function RepoBranchSelector({
                     onPull={() => handlePull(repo.repoRoot)}
                     onMerge={(target) => handleMerge(repo.repoRoot, target)}
                     onRebase={(target) => handleRebase(repo.repoRoot, target)}
-                    onCompare={(target) =>
-                      handleCompare(repo.repoRoot, target)
-                    }
+                    onCompare={(target) => handleCompare(repo.repoRoot, target)}
                     onDiff={() => handleDiff(repo.repoRoot)}
                     onNewBranch={() => handleNewBranch(repo.repoRoot)}
                     onWorktrees={() => handleWorktrees(repo.repoRoot)}
@@ -538,16 +627,15 @@ export function RepoBranchSelector({
           if (!next) setDialog(null);
         }}
         repoRoot={dialog?.kind === "new" ? dialog.repoRoot : ""}
-        repoName={
-          dialog?.kind === "new" ? shortName(dialog.repoRoot) : ""
-        }
+        repoName={dialog?.kind === "new" ? shortName(dialog.repoRoot) : ""}
         defaultStartPoint={
           dialog?.kind === "new"
             ? (currentBranchOf(branches[dialog.repoRoot] ?? []) ?? "HEAD")
             : ""
         }
         onCreated={(checkedOut) => {
-          if (dialog?.kind === "new") handleCreated(dialog.repoRoot, checkedOut);
+          if (dialog?.kind === "new")
+            handleCreated(dialog.repoRoot, checkedOut);
         }}
       />
       <RenameBranchDialog
@@ -556,9 +644,7 @@ export function RepoBranchSelector({
           if (!next) setDialog(null);
         }}
         repoRoot={dialog?.kind === "rename" ? dialog.repoRoot : ""}
-        repoName={
-          dialog?.kind === "rename" ? shortName(dialog.repoRoot) : ""
-        }
+        repoName={dialog?.kind === "rename" ? shortName(dialog.repoRoot) : ""}
         branchName={dialog?.kind === "rename" ? dialog.branch.name : ""}
         onRenamed={() => {
           if (dialog?.kind === "rename") refreshRepo(dialog.repoRoot);
@@ -570,15 +656,14 @@ export function RepoBranchSelector({
           if (!next) setDialog(null);
         }}
         repoRoot={dialog?.kind === "delete" ? dialog.repoRoot : ""}
-        repoName={
-          dialog?.kind === "delete" ? shortName(dialog.repoRoot) : ""
-        }
+        repoName={dialog?.kind === "delete" ? shortName(dialog.repoRoot) : ""}
         branch={dialog?.kind === "delete" ? dialog.branch : null}
         onDeleted={() => {
           if (dialog?.kind === "delete") refreshRepo(dialog.repoRoot);
         }}
       />
       <BranchConfirmDialog
+        busy={busy}
         open={confirmState !== null}
         onOpenChange={(next) => {
           if (!next) setDialog(null);
@@ -592,16 +677,29 @@ export function RepoBranchSelector({
               ? "变基"
               : "拉取"
         }
-        onConfirm={() => {
-          if (!confirmState) return;
-          setDialog(null);
+        onConfirm={async () => {
+          if (!confirmState || busy || !isCurrent()) return;
+          let completed: boolean;
           if (confirmState.kind === "merge-confirm") {
-            void runMerge(confirmState.repoRoot, confirmState.target);
+            completed = await runMerge(
+              confirmState.repoRoot,
+              confirmState.target,
+              confirmState.current,
+            );
           } else if (confirmState.kind === "rebase-confirm") {
-            void runRebase(confirmState.repoRoot, confirmState.target);
+            completed = await runRebase(
+              confirmState.repoRoot,
+              confirmState.target,
+              confirmState.current,
+            );
           } else {
-            void runPull(confirmState.repoRoot);
+            completed = await runPull(
+              confirmState.repoRoot,
+              confirmState.current,
+            );
           }
+          if (completed && isCurrent() && dialogRef.current === confirmState)
+            setDialog(null);
         }}
       />
       <CompareBranchesDialog
@@ -610,9 +708,7 @@ export function RepoBranchSelector({
           if (!next) setDialog(null);
         }}
         repoRoot={dialog?.kind === "compare" ? dialog.repoRoot : ""}
-        repoName={
-          dialog?.kind === "compare" ? shortName(dialog.repoRoot) : ""
-        }
+        repoName={dialog?.kind === "compare" ? shortName(dialog.repoRoot) : ""}
         left={
           dialog?.kind === "compare"
             ? (currentBranchOf(branches[dialog.repoRoot] ?? []) ?? "HEAD")
@@ -657,6 +753,8 @@ function BranchFlyout({
   repoRoot,
   branches,
   loading,
+  error,
+  onRetry,
   checkingOut,
   busyOp,
   pendingRemote,
@@ -678,6 +776,8 @@ function BranchFlyout({
   repoRoot: string;
   branches: GitBranchEntry[];
   loading: boolean;
+  error?: string;
+  onRetry: () => void;
   checkingOut: string | null;
   busyOp: string | null;
   pendingRemote: PendingRemote | null;
@@ -696,7 +796,7 @@ function BranchFlyout({
   onRename: (branch: GitBranchEntry) => void;
   onDelete: (branch: GitBranchEntry) => void;
 }) {
-  const current = currentBranchOf(branches) ?? "HEAD";
+  const current = currentBranchOf(branches);
   return (
     <DropdownMenuSubContent
       sideOffset={4}
@@ -705,11 +805,7 @@ function BranchFlyout({
       style={{ maxHeight: "none" }}
     >
       <DropdownMenuLabel className="flex items-center gap-2 px-2 py-1.5 text-[11px] text-muted-foreground">
-        <HugeiconsIcon
-          icon={FolderGitTwoIcon}
-          size={12}
-          strokeWidth={1.75}
-        />
+        <HugeiconsIcon icon={FolderGitTwoIcon} size={12} strokeWidth={1.75} />
         <span className="min-w-0 flex-1 truncate">{shortName(repoRoot)}</span>
         <BranchActionsMenu
           currentBranch={current}
@@ -723,6 +819,7 @@ function BranchFlyout({
         />
       </DropdownMenuLabel>
       <DropdownMenuItem
+        disabled={busyOp !== null}
         onSelect={(e) => {
           e.preventDefault();
           onNewBranch();
@@ -738,6 +835,7 @@ function BranchFlyout({
         新建分支…
       </DropdownMenuItem>
       <DropdownMenuItem
+        disabled={busyOp !== null}
         onSelect={(e) => {
           e.preventDefault();
           onWorktrees();
@@ -771,15 +869,29 @@ function BranchFlyout({
             onCancel={onCancelRemote}
           />
         ) : null}
-        {renderBranches(
-          branches,
-          checkingOut,
-          repoRoot,
-          onSelectLocal,
-          onRemoteSelect,
-          onRename,
-          onDelete,
-        )}
+        {error ? (
+          <div className="px-2 py-2 text-[11px] text-destructive">
+            {error}
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={onRetry}
+              disabled={loading}
+            >
+              Retry
+            </Button>
+          </div>
+        ) : null}
+        {(!loading || branches.length > 0) &&
+          renderBranches(
+            branches,
+            checkingOut ?? (busyOp ? "operation" : null),
+            repoRoot,
+            onSelectLocal,
+            onRemoteSelect,
+            onRename,
+            onDelete,
+          )}
       </div>
     </DropdownMenuSubContent>
   );
@@ -815,6 +927,7 @@ function renderBranches(
           key={`l:${branch.name}`}
           branch={branch}
           busy={checkingOut === `${repoRoot}:${branch.name}`}
+          blocked={checkingOut !== null}
           onSelect={() => onSelectLocal(branch.name)}
           onRename={onRename}
           onDelete={onDelete}
@@ -833,6 +946,7 @@ function renderBranches(
           key={`r:${branch.name}`}
           branch={branch}
           busy={checkingOut === `${repoRoot}:${branch.name}`}
+          blocked={checkingOut !== null}
           onSelect={() => onRemoteSelect(branch)}
           onDelete={onDelete}
         />
@@ -844,25 +958,29 @@ function renderBranches(
 function BranchItem({
   branch,
   busy,
+  blocked,
   onSelect,
   onRename,
   onDelete,
 }: {
   branch: GitBranchEntry;
   busy: boolean;
+  blocked: boolean;
   onSelect: () => void;
   onRename?: (branch: GitBranchEntry) => void;
   onDelete?: (branch: GitBranchEntry) => void;
 }) {
   const remote = branch.kind === "remote";
-  const showRename = onRename !== undefined && branch.kind === "local" && !busy;
+  const showRename =
+    onRename !== undefined && branch.kind === "local" && !blocked;
   const showDelete =
     onDelete !== undefined &&
     branch.kind !== "worktree" &&
     !branch.isHead &&
-    !busy;
+    !blocked;
   return (
     <DropdownMenuItem
+      disabled={blocked}
       onSelect={(e) => {
         // Keep the menu open long enough for the spinner to be visible.
         e.preventDefault();
@@ -916,16 +1034,18 @@ function BranchItem({
                 onRename(branch);
               }}
             >
-              <HugeiconsIcon icon={PencilEdit02Icon} size={11} strokeWidth={1.9} />
+              <HugeiconsIcon
+                icon={PencilEdit02Icon}
+                size={11}
+                strokeWidth={1.9}
+              />
             </button>
           ) : null}
           {showDelete ? (
             <button
               type="button"
               title={
-                remote
-                  ? `删除远程分支 ${branch.name}`
-                  : `删除 ${branch.name}`
+                remote ? `删除远程分支 ${branch.name}` : `删除 ${branch.name}`
               }
               className="flex size-5 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
               onClick={(e) => {

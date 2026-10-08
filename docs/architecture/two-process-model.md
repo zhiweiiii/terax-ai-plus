@@ -1,5 +1,7 @@
 # 双进程模型与 IPC 命令参考
 
+`wsl_native_paths({paths, workspace})` 将 Windows 原生拖放/剪贴板路径转换到指定 WSL 发行版，返回同序的绝对 Linux 路径；本机直通。输入/命令/输出有界且转换运行在 blocking 池，目标固定为所属 Session，不采用当前全局环境。`fs_watch_add` 返回可空注册句柄，释放改为 `fs_watch_remove({lease})`，不再重新解析可能已经消失的目录。
+
 Git diff 展示：后端返回原始两侧内容，前端统一 LF 后由 CodeMirror 计算字符级差异。GitDiffPane 显式配置 scanLimit 10000、timeout 200ms，避免默认低扫描额度把大文件的少量分散修改合为整段；超时仍允许粗略结果。该配置不修改源文件或 Git 暂存区。
 
 本文是 `TERAX.md` 的展开。与 `TERAX.md` 冲突时以 `TERAX.md` 为准。
@@ -31,7 +33,7 @@ Terax 是两个进程：Rust 后端（`src-tauri/`）和 webview 前端（`src/`
 
 长生命周期的交互式终端会话。
 
-- `pty_open` - 新建 PTY 会话
+- `pty_open` - 新建 PTY 会话，返回 `{ id, shellKind }`，引用类型来自实际启动的 shell
 - `pty_write` - 发送输入字节（文本或控制序列）
 - `pty_resize` - 调整 PTY 尺寸
 - `pty_close` / `pty_close_all` - 销毁一个或全部会话
@@ -41,6 +43,8 @@ Terax 是两个进程：Rust 后端（`src-tauri/`）和 webview 前端（`src/`
 `pty_open` 的输出通过接到 Tauri `Channel<Response>` 的回调流出；退出码走另一个 `Channel<i32>`。
 
 ### 文件系统（`src-tauri/src/modules/fs/`）
+
+`fs_write_file` 成功后广播 `fs:file-written`，包含 `{ path, source?, workspace }`；消费方按写入原环境读取，不按当前选择环境推测。
 
 **目录树**：`list_subdirs`、`fs_read_dir`
 
@@ -110,6 +114,28 @@ Terax 是两个进程：Rust 后端（`src-tauri/`）和 webview 前端（`src/`
 - webview 除了上面这些命令，不得启动进程或读取文件。
 - 新命令必须在 `lib.rs` 注册，并在边界上设防（工作区授权、IPC 白名单）。
 - 用到插件 API 的命令，必须把插件权限加进 `src-tauri/capabilities/default.json`。
+
+
+## 文件事件与剪贴板边界
+
+剪贴板图片经 fs_save_clipboard_image 的原始 binary body 和 x-image-mime 头传输，32 MB 上限在前后端校验；写盘在 blocking 池完成，返回唯一扩展名路径，不按毫秒覆盖。fs_clipboard_file_paths 同样在 blocking 池读取 Windows CF_HDROP，限制 1024 个路径、每路径 32768 UTF-16 单元和总 1 Mi 单元。
+
+前端 watchAdd 返回绑定添加时工作区的释放句柄，添加成功后才删除、幂等清理。原生文件事件队列和每批路径限 4096，丢失、notify 错误或 rescan 时发送 fs:changed 的 rescan 标志。文件树重列目录，编辑器重新检查 mtime，Git 更新工作树。事件总线隔离订阅异常并忽略桥销毁后的晚到回调。
+
+
+## Git 范围与异步状态
+
+仓库扫描按工作区环境和目录索引选择记忆，卸载及重新扫描作废旧回复，StrictMode 重挂载会重新扫描。次级仓库状态按环境保留，单仓库刷新与批量刷新共享请求序号，旧批次不能覆盖更新值；禁用、环境切换和卸载停止后续读取。文件事件同时刷新活动与其他匹配仓库，不以相似路径前缀混淆目录。
+
+单仓库远程操作设置同步占用标志防止重复点击，各 await 之后重查输入上下文，切换环境后不继续执行 pull/push。状态读取同步更新仓库元信息，切换期间隐藏旧范围结果。已发出的原生命令不能在前端取消；环境变化只取消尚未发出的后续步骤。移除无法绕过 in-flight 去重的旧 watchdog，原生进程仍受超时限制。批量 Git 远程操作还在逐项审查。
+
+批量 Git 使用绑定扫描根及环境的调用边界，在调用前与返回后核对即时环境，统一占用标志排除重复操作。旧范围进度不会显示在新工作区，计时器随范围释放。同步分叉或失败明确报告失败；完成后同时刷新活动和次级仓库。推送确认按 @{upstream}..HEAD 读取至多 200 个提交，最多取 6 个 patch；真正推送前复核分支、upstream、ahead/behind 和 HEAD，不把过期确认用于新分支。原生已开始执行的命令仍由其捕获的环境和进程超时负责，不承诺撤销已产生的修改。
+
+文件树写入使用渲染时环境，在发出命令前检查范围及即时环境；创建/重命名返回 boolean 供输入控件决定是否保留草稿并允许重试。
+
+资源管理器的系统打开/定位在 Windows 上保留 UNC，WSL 绝对路径转为 \\wsl.localhost\<distro>\ 路径。Git 标记将目录链接映射到 canonical 根，再匹配最深仓库；异步 canonicalize 绑定请求、挂载及环境，不使用旧环境结果。
+
+fs_stat 和 fs_canonicalize 也通过 fs::blocking 执行路径解析、metadata 和 canonicalize，不在异步运行线程直接等待慢磁盘或 UNC。
 
 ## 另见
 

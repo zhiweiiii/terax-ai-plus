@@ -1,3 +1,5 @@
+import { useGroupDeleteGuard } from "@/app/hooks/useGroupDeleteGuard";
+import { useLaunchFiles } from "@/app/hooks/useLaunchFiles";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -5,19 +7,14 @@ import {
 } from "@/components/ui/resizable";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import {
-  consumeLaunchCommand,
-  consumeLaunchFiles,
-  getLaunchDir,
-} from "@/lib/launchDir";
-import { native } from "@/lib/native";
 import { agentFileRef } from "@/lib/agentRef";
-import { quoteShellArg } from "@/lib/shellQuote";
+import { errorToast } from "@/lib/errorToast";
+import { consumeLaunchCommand, getLaunchDir } from "@/lib/launchDir";
+import { native } from "@/lib/native";
 import { useZoom } from "@/lib/useZoom";
 import { isMarkdownPath } from "@/lib/utils";
 import { CommandPalette, createCommandItems } from "@/modules/command-palette";
 import { useControlBridge } from "@/modules/control";
-import { bridgeNativeFileEvents } from "@/modules/events";
 import type { GitDiffPaneHandle } from "@/modules/editor";
 import {
   type EditorPaneHandle,
@@ -25,6 +22,7 @@ import {
   useApplyEditorFontSize,
   useEditorFileSync,
 } from "@/modules/editor";
+import { bridgeNativeFileEvents } from "@/modules/events";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
 import { FileHistoryDialog } from "@/modules/git-history";
 import type { GitHistoryPaneHandle } from "@/modules/git-history/GitHistoryPane";
@@ -71,12 +69,14 @@ import {
 } from "@/modules/tabs";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import {
+  cdCommandForLeaf,
   clearFocusedTerminal,
   disposeSession,
   findLeafCwd,
   hasLeaf,
   leafCwd,
   leafIds,
+  leafWorkspace,
   navigateFocusedBlocks,
   type PaneBounds,
   pasteToLeaf,
@@ -95,7 +95,6 @@ import {
   type WorkspaceEnv,
   workspaceScopeKey,
 } from "@/modules/workspace";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   useCallback,
@@ -282,7 +281,7 @@ export default function App() {
     adoptWorkspaceEnv,
   });
 
-  useSpacePersistence({
+  const flushSpaces = useSpacePersistence({
     tabs,
     activeId,
     activeSpaceId: activeSpaceId ?? DEFAULT_SPACE_ID,
@@ -359,7 +358,12 @@ export default function App() {
   useWebTerminalSync({
     terminalTabs: allTerminalTabs,
     activeId,
-    activateTab: (id) => setActiveId(id),
+    activateTab: (id, leafId, spaceId) => {
+      useSpaces.getState().setActive(spaceId);
+      setActiveSpaceForNewTabs(spaceId);
+      setActiveId(id);
+      focusPane(id, leafId);
+    },
   });
 
   const {
@@ -394,7 +398,6 @@ export default function App() {
   const isTerminalTab = activeTab?.kind === "terminal";
   const isBlockTab = activeTerminalTab?.blocks === true;
 
-  useEditorFileSync({ tabs, tabsRef, editorRefs });
   useThemeFileEditing({ tabsRef, openFileTab });
 
   // One source of truth for the side panels: the command line (terminal tab)
@@ -434,8 +437,8 @@ export default function App() {
     handlePathDeleted,
   } = useTabCloseGuards({ tabs, disposeTab });
 
-  const { pendingAppClose, confirmAppClose, cancelAppClose } =
-    useAppCloseGuard(tabsRef);
+  const { pendingAppClose, confirmAppClose, cancelAppClose, prepareUpdate } =
+    useAppCloseGuard(tabsRef, flushSpaces);
 
   useEffect(() => {
     const live = new Set<number>();
@@ -589,7 +592,8 @@ export default function App() {
       const leafId = findClaudeLeaf(path);
       if (leafId === null) {
         toast.error("请先打开 agent", {
-          description: "在当前命令行里启动 Claude Code 或 opencode 后再发送。",
+          description:
+            "在当前命令行里启动 Claude Code、Codex 或 OpenCode 后再发送。",
         });
         return;
       }
@@ -638,7 +642,7 @@ export default function App() {
   const sendSelectionToClaude = useCallback(
     (targetLeafId?: number) => {
       const selection = captureActiveSelection();
-      if (!selection || !selection.trim()) return;
+      if (!selection?.trim()) return;
 
       // Resolve the source file first — it both labels the block and decides
       // which Claude Code pane receives it. Git tabs carry a repo-relative path,
@@ -732,7 +736,12 @@ export default function App() {
       if (activeLeafId === null) return;
       const term = terminalRefs.current.get(activeLeafId);
       if (!term) return;
-      term.write(`cd ${quoteShellArg(path)}\r`);
+      try {
+        term.write(cdCommandForLeaf(activeLeafId, path));
+      } catch (error) {
+        errorToast("切换终端目录失败", error);
+        return;
+      }
       term.focus();
     },
     [activeLeafId],
@@ -741,16 +750,9 @@ export default function App() {
   const cdInNewTab = useCallback(
     (path: string) => {
       const tabId = newTab(path);
-      setTimeout(() => {
-        const tab = tabsRef.current.find((x) => x.id === tabId);
-        if (!tab || tab.kind !== "terminal") return;
-        const t = terminalRefs.current.get(tab.activeLeafId);
-        if (!t) return;
-        t.write(`cd ${quoteShellArg(path)}\r`);
-        t.focus();
-      }, 80);
+      setActiveId(tabId);
     },
-    [newTab],
+    [newTab, setActiveId],
   );
 
   const handleOpenFile = useCallback(
@@ -776,37 +778,7 @@ export default function App() {
     [handleOpenFile],
   );
 
-  // Warm start: the backend emits once the window already exists. Attach on
-  // mount so an "Open With" that lands mid-restore isn't dropped — the backend
-  // also seeds the drain-once state, so the boot drain below is the safety net.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    (async () => {
-      const off = await listen<string[]>("terax:open-file", (e) => {
-        openLaunchFiles(e.payload);
-      });
-      if (disposed) off();
-      else unlisten = off;
-    })();
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [openLaunchFiles]);
-
-  // Cold start: files arrive as CLI args (Linux/Windows) or the macOS open-files
-  // event, and get_launch_files drains them once. Wait for `booted` — the spaces
-  // restore ends in replaceTabs(), which overwrites the whole tab list and would
-  // discard a launch tab opened before it, making the file flash open and vanish.
-  // Booting first also lands the tab in the restored active space, and lets
-  // openFileTab dedupe against a session that already had the file open.
-  useEffect(() => {
-    if (!booted) return;
-    void (async () => {
-      openLaunchFiles(await consumeLaunchFiles());
-    })();
-  }, [booted, openLaunchFiles]);
+  useLaunchFiles(booted, openLaunchFiles);
 
   // Cold start: `--run` opens one terminal tab in the launch dir and types the
   // command. Gated on `booted` for the same reason as launch files above, and
@@ -827,15 +799,33 @@ export default function App() {
   }, [booted, newCommandTab]);
 
   const handlePathRenamed = useCallback(
-    (from: string, to: string) => {
-      for (const t of tabs) {
-        if (t.kind !== "editor") continue;
-        if (t.path === from) {
-          const i = to.lastIndexOf("/");
-          updateTab(t.id, { path: to, title: i === -1 ? to : to.slice(i + 1) });
-        } else if (t.path.startsWith(`${from}/`)) {
-          const suffix = t.path.slice(from.length);
-          const newPath = `${to}${suffix}`;
+    (from: string, to: string, workspace: WorkspaceEnv) => {
+      const previous = from.replace(/\\/g, "/").replace(/\/+$/, "");
+      const next = to.replace(/\\/g, "/").replace(/\/+$/, "");
+      const scope = workspaceScopeKey(workspace);
+      const spaceIds = new Set(
+        useSpaces
+          .getState()
+          .spaces.filter((space) => workspaceScopeKey(space.env) === scope)
+          .map((space) => space.id),
+      );
+      for (const t of tabsRef.current) {
+        if (!spaceIds.has(t.spaceId)) continue;
+        if (t.kind !== "editor" && t.kind !== "markdown") continue;
+        const current = t.path.replace(/\\/g, "/");
+        const currentKey =
+          workspace.kind === "local" ? current.toLowerCase() : current;
+        const previousKey =
+          workspace.kind === "local" ? previous.toLowerCase() : previous;
+        if (currentKey === previousKey) {
+          const i = next.lastIndexOf("/");
+          updateTab(t.id, {
+            path: next,
+            title: i === -1 ? next : next.slice(i + 1),
+          });
+        } else if (currentKey.startsWith(`${previousKey}/`)) {
+          const suffix = current.slice(previous.length);
+          const newPath = `${next}${suffix}`;
           const i = newPath.lastIndexOf("/");
           updateTab(t.id, {
             path: newPath,
@@ -844,7 +834,7 @@ export default function App() {
         }
       }
     },
-    [tabs, updateTab],
+    [updateTab],
   );
 
   // The cwd of the command line the side panels follow; falls back to the
@@ -1012,7 +1002,7 @@ export default function App() {
   const splitActivePaneInActiveTab = useCallback(
     (dir: "row" | "col") => {
       const t = tabsRef.current.find((x) => x.id === activeId);
-      if (!t || t.kind !== "terminal") return;
+      if (t?.kind !== "terminal") return;
       splitActivePane(activeId, dir);
     },
     [activeId, splitActivePane],
@@ -1096,8 +1086,8 @@ export default function App() {
           gitDiffRefs.current.get(activeId)?.openSearch();
         } else if (kind === "git-history") {
           gitHistoryRefs.current.get(activeId)?.openSearch();
-        } else if (kind === "preview" && activeLeafId !== null) {
-          previewRefs.current.get(activeLeafId)?.focusFrame();
+        } else if (kind === "preview") {
+          previewRefs.current.get(activeId)?.focusFrame();
         }
       },
       "selection.sendToAgent": () => sendSelectionToClaude(),
@@ -1131,7 +1121,6 @@ export default function App() {
       sendSelectionToClaude,
       toggleSidebar,
       toggleExplorerFocus,
-      openSidebarView,
       zoomIn,
       zoomOut,
       zoomReset,
@@ -1191,7 +1180,7 @@ export default function App() {
         );
         if (!inTerminal) return false;
         const sel = captureActiveSelection();
-        return !sel || !sel.trim();
+        return !sel?.trim();
       }
       if (id === "terminal.clear") {
         // Only intercept ⌘K while a terminal is focused; elsewhere let the key
@@ -1222,7 +1211,13 @@ export default function App() {
       }
       return false;
     },
-    [agentKeyPassthrough, AGENT_OWNED_SHORTCUTS, activeTerminalTab, activeTab],
+    [
+      agentKeyPassthrough,
+      AGENT_OWNED_SHORTCUTS,
+      activeTerminalTab,
+      activeTab,
+      captureActiveSelection,
+    ],
   );
 
   useGlobalShortcuts(shortcutHandlers, { isDisabled: shortcutsDisabled });
@@ -1293,10 +1288,14 @@ export default function App() {
   const handleTerminalCwd = useCallback(
     (leafId: number, cwd: string) => {
       setLeafCwd(leafId, cwd);
-      if (cwd && !authorizedCwds.current.has(cwd)) {
-        authorizedCwds.current.add(cwd);
-        native.workspaceAuthorize(cwd).catch(() => {
-          authorizedCwds.current.delete(cwd);
+      const workspace = leafWorkspace(leafId);
+      if (!workspace || !cwd) return;
+      const key = `${workspaceScopeKey(workspace)}\0${cwd}`;
+      if (!authorizedCwds.current.has(key)) {
+        if (authorizedCwds.current.size >= 512) authorizedCwds.current.clear();
+        authorizedCwds.current.add(key);
+        native.workspaceAuthorize(cwd, workspace).catch(() => {
+          authorizedCwds.current.delete(key);
         });
       }
     },
@@ -1314,7 +1313,7 @@ export default function App() {
       const tab = all.find(
         (t) => t.kind === "terminal" && hasLeaf(t.paneTree, leafId),
       );
-      if (!tab || tab.kind !== "terminal") return;
+      if (tab?.kind !== "terminal") return;
       // Last pane of the last tab: quit instead of respawning a shell.
       if (leafIds(tab.paneTree).length === 1 && all.length === 1) {
         void getCurrentWindow().close();
@@ -1362,6 +1361,9 @@ export default function App() {
 
   const handleDeleteGroup = useCallback(
     (id: string) => {
+      const spaces = useSpaces.getState().spaces;
+      if (spaces.length <= 1 || !spaces.some((space) => space.id === id))
+        return;
       const nextSpaceId = useSpaces.getState().remove(id);
       if (!nextSpaceId) return;
       const root = useSpaces
@@ -1371,6 +1373,13 @@ export default function App() {
     },
     [removeTabsForSpace],
   );
+
+  const {
+    pendingGroupDelete,
+    requestGroupDelete,
+    cancelGroupDelete,
+    confirmGroupDelete,
+  } = useGroupDeleteGuard(tabsRef, handleDeleteGroup);
 
   // Clicking a side-panel button or a group tab leaves keyboard focus on that
   // control, so the arrow keys then drive the button row instead of the
@@ -1398,6 +1407,13 @@ export default function App() {
   );
 
   const spacesList = useSpaces((s) => s.spaces);
+  useEditorFileSync({
+    tabs,
+    spaces: spacesList,
+    tabsRef,
+    editorRefs,
+    markdownRefs,
+  });
 
   const commandPaletteItems = useMemo(
     () =>
@@ -1440,7 +1456,6 @@ export default function App() {
       handleCloseTabOrPane,
       splitActivePaneInActiveTab,
       toggleSidebar,
-      sendSelectionToClaude,
     ],
   );
 
@@ -1563,7 +1578,7 @@ export default function App() {
                   onSwitch={handleSwitchGroup}
                   onCreate={handleCreateGroup}
                   onRename={handleRenameGroup}
-                  onDelete={handleDeleteGroup}
+                  onDelete={(id) => void requestGroupDelete(id)}
                 />
               }
               headerTabs={
@@ -1714,6 +1729,7 @@ export default function App() {
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="relative min-h-0 flex-1">
                     <WorkspaceSurface
+                      spaces={spacesList}
                       tabs={tabs}
                       activeId={activeId}
                       activeTab={activeTab}
@@ -1831,10 +1847,13 @@ export default function App() {
             }}
           />
 
-          <UpdaterDialog />
+          <UpdaterDialog beforeInstall={prepareUpdate} />
 
           <CloseDialogs
             tabs={tabs}
+            pendingGroupDelete={pendingGroupDelete}
+            onCancelGroupDelete={cancelGroupDelete}
+            onConfirmGroupDelete={confirmGroupDelete}
             pendingCloseTab={pendingCloseTab}
             onCancelClose={cancelClose}
             onConfirmClose={confirmClose}

@@ -30,7 +30,7 @@ pub struct LspExit {
 
 pub struct LspSession {
     #[cfg(windows)]
-    _job: Option<crate::modules::proc::job::ProcessJob>,
+    _job: crate::modules::proc::job::ProcessJob,
     child: Arc<SharedChild>,
     stdin: Mutex<Option<ChildStdin>>,
     pub(super) exited: Arc<AtomicBool>,
@@ -50,12 +50,14 @@ impl LspSession {
     // only the leader leaves them burning CPU. Unix: signal the process
     // group. Windows: the Job Object covers the tree.
     pub fn kill(&self) {
-        *self.stdin.lock().unwrap() = None;
+        #[cfg(windows)]
+        self._job.terminate();
         #[cfg(unix)]
         unsafe {
             libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL);
         }
         let _ = self.child.kill();
+        *self.stdin.lock().unwrap() = None;
     }
 }
 
@@ -80,7 +82,6 @@ pub fn spawn(
     let mut cmd = Command::new(binary);
     cmd.args(args)
         .current_dir(root)
-        .envs(super::env::server_env_overlay())
         .envs(extra_env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -117,10 +118,11 @@ pub fn spawn(
 
     #[cfg(windows)]
     let job = match crate::modules::proc::job::ProcessJob::create_for(child.id()) {
-        Ok(j) => Some(j),
+        Ok(j) => j,
         Err(e) => {
-            log::warn!("lsp job-object setup failed for pid={}: {e}", child.id());
-            None
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("lsp job-object setup failed: {e}"));
         }
     };
 
@@ -132,6 +134,21 @@ pub fn spawn(
         stdin: Mutex::new(Some(stdin)),
         exited: exited.clone(),
     });
+    struct SpawnGuard<'a> {
+        session: &'a LspSession,
+        armed: bool,
+    }
+    impl Drop for SpawnGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                self.session.kill();
+            }
+        }
+    }
+    let mut spawn_guard = SpawnGuard {
+        session: &session,
+        armed: true,
+    };
 
     let session_reader = session.clone();
     let reader_thread = thread::Builder::new()
@@ -245,6 +262,7 @@ pub fn spawn(
     }
 
     let child_waiter = child;
+    let session_waiter = session.clone();
     let exited_w = exited;
     thread::Builder::new()
         .name(format!("terax-lsp-waiter-{id}"))
@@ -257,6 +275,7 @@ pub fn spawn(
                 }
             };
             exited_w.store(true, Ordering::Release);
+            session_waiter.kill();
             // Bounded, not join: a grandchild inheriting stdout keeps the
             // pipe open past child exit and would hang us.
             let deadline = Instant::now() + Duration::from_millis(500);
@@ -279,6 +298,7 @@ pub fn spawn(
         })
         .map_err(|e| e.to_string())?;
 
+    spawn_guard.armed = false;
+    drop(spawn_guard);
     Ok(session)
 }
-

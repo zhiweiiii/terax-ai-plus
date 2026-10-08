@@ -1,12 +1,11 @@
-// Pure parsing + ranking for shell history. No I/O here so the formats stay
-// unit-tested. zsh metafies bytes >= 0x80 in its histfile (Meta 0x83 followed
-// by byte ^ 0x20); callers demetafy raw bytes before handing us a string.
+// zsh metafies bytes >= 0x80 as Meta 0x83 followed by byte ^ 0x20.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistEntry {
     pub cmd: String,
     pub count: u32,
     pub last: i64,
+    pub order: u64,
 }
 
 const META: u8 = 0x83;
@@ -78,6 +77,22 @@ pub fn parse_zsh(content: &str) -> Vec<(String, i64)> {
     out
 }
 
+pub fn parse_powershell(content: &str) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    let mut command = String::new();
+    for line in content.trim_start_matches('\u{feff}').lines() {
+        if let Some(line) = line.strip_suffix('`') {
+            command.push_str(line);
+            command.push('\n');
+        } else {
+            command.push_str(line);
+            push_cmd(&mut out, &command, 0);
+            command.clear();
+        }
+    }
+    out
+}
+
 pub fn parse_bash(content: &str) -> Vec<(String, i64)> {
     let mut out = Vec::new();
     let mut ts = 0i64;
@@ -141,16 +156,18 @@ pub fn parse_fish(content: &str) -> Vec<(String, i64)> {
 pub fn build_index(entries: Vec<(String, i64)>) -> Vec<HistEntry> {
     use std::collections::HashMap;
     let mut map: HashMap<String, HistEntry> = HashMap::new();
-    for (cmd, ts) in entries {
+    for (order, (cmd, ts)) in entries.into_iter().enumerate() {
         let e = map.entry(cmd.clone()).or_insert(HistEntry {
             cmd,
             count: 0,
             last: 0,
+            order: 0,
         });
-        e.count += 1;
+        e.count = e.count.saturating_add(1);
         if ts > e.last {
             e.last = ts;
         }
+        e.order = order as u64;
     }
     let mut v: Vec<HistEntry> = map.into_values().collect();
     sort_recent(&mut v);
@@ -158,7 +175,12 @@ pub fn build_index(entries: Vec<(String, i64)>) -> Vec<HistEntry> {
 }
 
 pub fn sort_recent(v: &mut [HistEntry]) {
-    v.sort_by(|a, b| b.last.cmp(&a.last).then(b.count.cmp(&a.count)));
+    v.sort_by(|a, b| {
+        b.last
+            .cmp(&a.last)
+            .then(b.order.cmp(&a.order))
+            .then(b.count.cmp(&a.count))
+    });
 }
 
 // fish-style autosuggestion: the most recent full command that extends `line`.
@@ -169,7 +191,12 @@ pub fn suggest(index: &[HistEntry], line: &str) -> Option<String> {
     index
         .iter()
         .filter(|e| e.cmd.len() > line.len() && e.cmd.starts_with(line))
-        .max_by(|a, b| a.last.cmp(&b.last).then(a.count.cmp(&b.count)))
+        .max_by(|a, b| {
+            a.last
+                .cmp(&b.last)
+                .then(a.order.cmp(&b.order))
+                .then(a.count.cmp(&b.count))
+        })
         .map(|e| e.cmd.clone())
 }
 
@@ -181,12 +208,16 @@ pub fn complete_commands(
     prefix: &str,
     limit: usize,
 ) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
     use std::collections::{HashMap, HashSet};
     let mut freq: HashMap<&str, u32> = HashMap::new();
     for e in index {
         let w = e.cmd.split_whitespace().next().unwrap_or("");
         if !w.is_empty() && w.starts_with(prefix) {
-            *freq.entry(w).or_insert(0) += e.count;
+            let count = freq.entry(w).or_insert(0);
+            *count = count.saturating_add(e.count);
         }
     }
     let mut hist_words: Vec<(&str, u32)> = freq.into_iter().collect();
@@ -218,6 +249,9 @@ pub fn complete_commands(
 // Recency-ranked, deduped commands for the Ctrl-R style popover. Substring,
 // case-insensitive; `index` is already most-recent-first.
 pub fn list(index: &[HistEntry], query: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
     let q = query.trim().to_lowercase();
     let mut out = Vec::new();
     for e in index {
@@ -230,5 +264,3 @@ pub fn list(index: &[HistEntry], query: &str, limit: usize) -> Vec<String> {
     }
     out
 }
-
-

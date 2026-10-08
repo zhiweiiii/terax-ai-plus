@@ -48,7 +48,7 @@ export function BlockWatermark({ leafId, subscribe }: Props) {
         draggable={false}
         className="size-24 rounded-3xl shadow-lg shadow-black/25"
       />
-      <div className="grid grid-cols-[auto_auto] items-center gap-x-12 gap-y-3 text-[13px]">
+      <div className="grid max-w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3 px-4 text-[13px]">
         <Hint label="Browse your command history" keys="↑" />
         <Hint label="Autocomplete paths and commands" keys="Tab" />
         <Hint
@@ -82,7 +82,7 @@ function Hint(props: {
 }
 
 function ShortcutKeys({ id }: { id: Parameters<typeof useShortcutLabel>[0] }) {
-  const tokens = useShortcutLabel(id).split(" ");
+  const tokens = useShortcutLabel(id).split(" ").filter(Boolean);
   return (
     <>
       {tokens.map((t) => (

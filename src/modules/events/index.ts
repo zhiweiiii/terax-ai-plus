@@ -1,3 +1,4 @@
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useEffect, useRef } from "react";
 
@@ -14,8 +15,16 @@ import { useEffect, useRef } from "react";
  *    side panels follow switches, carrying the new owner's cwd.
  */
 
-export type FsChangedEvent = { paths: string[] };
-export type FsWrittenEvent = { path: string; source?: string };
+export type FsChangedEvent = {
+  paths: string[];
+  rescan?: boolean;
+  workspace?: WorkspaceEnv;
+};
+export type FsWrittenEvent = {
+  path: string;
+  source?: string;
+  workspace?: WorkspaceEnv;
+};
 export type ContextChangedEvent = {
   cwd: string | null;
   terminalId: number | null;
@@ -42,8 +51,7 @@ export function onEvent<K extends EventKey>(
     set = new Set();
     registry.set(event, set);
   }
-  const wrapped: AnyHandler = (payload) =>
-    handler(payload as AppEventMap[K]);
+  const wrapped: AnyHandler = (payload) => handler(payload as AppEventMap[K]);
   set.add(wrapped);
   return () => {
     set.delete(wrapped);
@@ -56,7 +64,13 @@ export function emitEvent<K extends EventKey>(
 ): void {
   const set = registry.get(event);
   if (!set) return;
-  for (const handler of [...set]) handler(payload);
+  for (const handler of [...set]) {
+    try {
+      handler(payload);
+    } catch (error) {
+      console.error(`[terax] ${event} listener failed:`, error);
+    }
+  }
 }
 
 /**
@@ -84,24 +98,32 @@ export function bridgeNativeFileEvents(): () => void {
   const unsubs: Array<() => void> = [];
   const window = getCurrentWebviewWindow();
   void window
-    .listen<{ paths: string[] }>("fs:changed", (e) => {
-      emitEvent("fs:changed", { paths: e.payload.paths });
+    .listen<FsChangedEvent>("fs:changed", (e) => {
+      if (alive) emitEvent("fs:changed", e.payload);
     })
     .then((un) => {
       if (alive) unsubs.push(un);
       else un();
-    });
+    })
+    .catch((error) =>
+      console.error("[terax] filesystem listener failed:", error),
+    );
   void window
-    .listen<{ path: string; source?: string }>("fs:file-written", (e) => {
+    .listen<FsWrittenEvent>("fs:file-written", (e) => {
+      if (!alive) return;
       emitEvent("fs:written", {
         path: e.payload.path,
         source: e.payload.source,
+        workspace: e.payload.workspace,
       });
     })
     .then((un) => {
       if (alive) unsubs.push(un);
       else un();
-    });
+    })
+    .catch((error) =>
+      console.error("[terax] file-write listener failed:", error),
+    );
   return () => {
     alive = false;
     for (const un of unsubs) un();

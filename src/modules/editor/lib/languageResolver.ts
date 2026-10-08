@@ -13,6 +13,7 @@ export interface LanguageResult {
 }
 
 const cache = new Map<string, LanguageResult | null>();
+const pending = new Map<string, Promise<LanguageResult>>();
 
 function basenameOf(filename: string): string {
   const lower = filename.toLowerCase();
@@ -32,7 +33,7 @@ function prefixOf(base: string): string | null {
 
 // Order: exact filename, real extension, then filename prefix scoped to
 // name-based languages (so `Dockerfile.web` resolves while Go never captures
-// `go.sum`). Always returns a key so misses are negative-cached too.
+// `go.sum`). Unknown filenames are not retained in the language cache.
 function match(base: string): {
   key: string;
   def: LanguageDefinition | undefined;
@@ -73,15 +74,20 @@ export async function resolveLanguage(
   const { key, def } = match(basenameOf(filename));
   const cached = cache.get(key);
   if (cached !== undefined) return cached;
-  if (!def) {
-    cache.set(key, null);
-    return null;
-  }
-  const result: LanguageResult = {
-    ext: await def.loader(),
-    name: def.name,
-    id: def.extensions[0] ?? "",
-  };
-  cache.set(key, result);
-  return result;
+  if (!def) return null;
+  const existing = pending.get(key);
+  if (existing) return existing;
+  const loading = Promise.resolve()
+    .then(async () => {
+      const result: LanguageResult = {
+        ext: await def.loader(),
+        name: def.name,
+        id: def.extensions[0] ?? "",
+      };
+      cache.set(key, result);
+      return result;
+    })
+    .finally(() => pending.delete(key));
+  pending.set(key, loading);
+  return loading;
 }

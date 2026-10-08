@@ -13,8 +13,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { pathIdentity } from "@/lib/pathIdentity";
 import { toast } from "sonner";
 import type { GitStatusSnapshot } from "@/lib/native";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   setCompactFolders,
@@ -74,8 +76,8 @@ type Props = {
   onOpenFile: (path: string, pin?: boolean) => void;
   /** Open a content-search hit at a specific line. */
   onOpenSearchHit?: (path: string, line: number) => void;
-  onPathRenamed?: (from: string, to: string) => void;
-  onPathDeleted?: (path: string) => void;
+  onPathRenamed?: (from: string, to: string, workspace: WorkspaceEnv) => void;
+  onPathDeleted?: (path: string, workspace: WorkspaceEnv) => void;
   onRevealInTerminal?: (path: string) => void;
   onOpenInSourceControl?: (path: string) => void;
   onOpenGitHistory?: (path: string) => void;
@@ -149,8 +151,13 @@ function applyFilter(
 }
 
 /** The one subdirectory a directory holds, when that is all it holds. */
+type RowTree = Pick<
+  ReturnType<typeof useFileTree>,
+  "nodes" | "expanded" | "renaming" | "pendingCreate" | "joinPath"
+>;
+
 function soleChildDir(
-  tree: ReturnType<typeof useFileTree>,
+  tree: RowTree,
   path: string,
 ): { name: string; path: string } | null {
   const node = tree.nodes[path];
@@ -163,7 +170,7 @@ function soleChildDir(
 
 function buildRows(
   rootPath: string,
-  tree: ReturnType<typeof useFileTree>,
+  tree: RowTree,
   lookup: (path: string) => GitStatusCode | null,
   hideGitIgnored: boolean,
   compactFolders: boolean,
@@ -173,7 +180,7 @@ function buildRows(
 
   const walk = (parent: string, depth: number, parentIgnored: boolean) => {
     const node = tree.nodes[parent];
-    if (!node || node.status !== "loaded") return;
+    if (node?.status !== "loaded") return;
     for (const entry of node.entries) {
       let path = tree.joinPath(parent, entry.name);
       const isDir = entry.kind === "dir";
@@ -298,7 +305,12 @@ export const FileExplorer = memo(
     const searchRef = useRef<ExplorerSearchHandle>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const openPathSet = useMemo(
+      () => new Set((openFilePaths ?? []).map(pathIdentity)),
+      [openFilePaths],
+    );
 
+    const { nodes, expanded, renaming, pendingCreate, joinPath } = tree;
     const { rows, entryIndexByPath } = useMemo(() => {
       if (!rootPath)
         return {
@@ -307,20 +319,18 @@ export const FileExplorer = memo(
         };
       return buildRows(
         rootPath,
-        tree,
+        { nodes, expanded, renaming, pendingCreate, joinPath },
         lookupGitStatus,
         hideGitIgnored,
         compactFolders,
       );
-      // `tree` is intentionally omitted: its identity changes every render, but
-      // the listed fields are the only inputs buildRows actually reads.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
       rootPath,
-      tree.nodes,
-      tree.expanded,
-      tree.renaming,
-      tree.pendingCreate,
+      nodes,
+      expanded,
+      renaming,
+      pendingCreate,
+      joinPath,
       lookupGitStatus,
       hideGitIgnored,
       compactFolders,
@@ -498,8 +508,19 @@ export const FileExplorer = memo(
       tree.pendingCreate?.parentPath === rootPath ? tree.pendingCreate : null;
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (tree.renaming || tree.pendingCreate || searchRef.current?.isFocused()) return;
+      if (
+        e.nativeEvent.isComposing ||
+        e.nativeEvent.keyCode === 229 ||
+        e.ctrlKey ||
+        e.metaKey ||
+        e.altKey
+      )
+        return;
+      if (tree.renaming || tree.pendingCreate || searchRef.current?.isFocused())
+        return;
       const target = e.target as HTMLElement;
+      if (target !== containerRef.current && !target.closest("[data-fs-path]"))
+        return;
       if (
         target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
@@ -570,14 +591,11 @@ export const FileExplorer = memo(
       }
     };
 
-    // Tree paths and tab paths can differ in separator, so compare normalized.
-    const openPathSet = useMemo(
-      () => new Set((openFilePaths ?? []).map((p) => p.replace(/\\/g, "/"))),
-      [openFilePaths],
-    );
-    const activeNormalized = activeFilePath?.replace(/\\/g, "/") ?? null;
+    const activeNormalized = activeFilePath
+      ? pathIdentity(activeFilePath)
+      : null;
     const openStateFor = (path: string): "active" | "open" | null => {
-      const norm = path.replace(/\\/g, "/");
+      const norm = pathIdentity(path);
       if (norm === activeNormalized) return "active";
       return openPathSet.has(norm) ? "open" : null;
     };
@@ -589,9 +607,7 @@ export const FileExplorer = memo(
           return (
             <EntryRow
               path={row.path}
-              collapsePath={
-                row.kind === "entry" ? row.collapsePath : undefined
-              }
+              collapsePath={row.kind === "entry" ? row.collapsePath : undefined}
               name={row.name}
               isDir={row.isDir}
               isExpanded={row.kind === "entry" ? row.isExpanded : false}
@@ -630,9 +646,13 @@ export const FileExplorer = memo(
     };
 
     return (
+      // biome-ignore lint/a11y/useSemanticElements: This tree navigation group contains controls, not form fields.
       <div
         ref={containerRef}
+        role="group"
+        aria-label="File explorer"
         className="flex h-full flex-col outline-none"
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: This group is the imperative focus target for tree navigation.
         tabIndex={0}
         onKeyDown={handleKeyDown}
       >
@@ -714,14 +734,18 @@ export const FileExplorer = memo(
                   silently do nothing. Say why instead of pretending. */}
               <DropdownMenuCheckboxItem
                 checked={compactFolders}
-                onCheckedChange={(v) => applyFilter(setCompactFolders, v === true)}
+                onCheckedChange={(v) =>
+                  applyFilter(setCompactFolders, v === true)
+                }
               >
                 合并单层目录
               </DropdownMenuCheckboxItem>
               <DropdownMenuCheckboxItem
                 checked={hideGitIgnored}
                 disabled={!gitDecorations}
-                onCheckedChange={(v) => applyFilter(setHideGitIgnored, v === true)}
+                onCheckedChange={(v) =>
+                  applyFilter(setHideGitIgnored, v === true)
+                }
               >
                 隐藏 git 忽略文件
               </DropdownMenuCheckboxItem>

@@ -41,7 +41,12 @@ export function BranchConfirmDialog({
   onConfirm: () => void;
 }) {
   return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
+    <AlertDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!busy) onOpenChange(next);
+      }}
+    >
       <AlertDialogContent size="sm">
         <AlertDialogHeader>
           <AlertDialogMedia
@@ -57,7 +62,7 @@ export function BranchConfirmDialog({
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>取消</AlertDialogCancel>
+          <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
           <Button
             variant={destructive ? "destructive" : "default"}
             disabled={busy}

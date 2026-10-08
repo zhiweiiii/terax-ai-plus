@@ -31,16 +31,39 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$target = Join-Path $PSScriptRoot 'src-tauri/target'
+$projectRoot = [IO.Path]::GetFullPath($PSScriptRoot)
+$target = [IO.Path]::GetFullPath((Join-Path $projectRoot 'src-tauri/target'))
 
-if (-not (Test-Path $target)) {
+function Assert-BuildDirectory([string]$path) {
+  $absolute = [IO.Path]::GetFullPath($path)
+  if ($absolute -ne $target -and
+      -not $absolute.StartsWith("$target\", [StringComparison]::OrdinalIgnoreCase)) {
+    throw "拒绝清理 target 以外的路径: $absolute"
+  }
+  $current = $absolute
+  while ($current -and $current -ne $projectRoot) {
+    if (Test-Path -LiteralPath $current) {
+      $item = Get-Item -LiteralPath $current -Force
+      if (-not $item.PSIsContainer -or
+          ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "拒绝清理非目录或链接路径: $current"
+      }
+    }
+    $current = Split-Path -Parent $current
+  }
+  return $absolute
+}
+
+$target = Assert-BuildDirectory $target
+
+if (-not (Test-Path -LiteralPath $target)) {
   Write-Host "没有 target 目录，无需清理。"
   return
 }
 
 function Get-DirSize([string]$path) {
-  if (-not (Test-Path $path)) { return 0 }
-  $sum = (Get-ChildItem -Recurse -File $path -ErrorAction SilentlyContinue |
+  if (-not (Test-Path -LiteralPath $path)) { return 0 }
+  $sum = (Get-ChildItem -LiteralPath $path -Recurse -File -ErrorAction SilentlyContinue |
     Measure-Object -Property Length -Sum).Sum
   if ($null -eq $sum) { return 0 }
   return $sum
@@ -66,24 +89,27 @@ if ($running) {
 if ($All) {
   Write-Host '执行 cargo clean（两个 profile 全部重建）…'
   Push-Location (Join-Path $PSScriptRoot 'src-tauri')
-  try { cargo clean } finally { Pop-Location }
+  try {
+    cargo clean --target-dir $target
+    if ($LASTEXITCODE -ne 0) { throw "cargo clean 失败" }
+  } finally { Pop-Location }
 }
 else {
   foreach ($p in @('debug/incremental', 'release/incremental')) {
-    $full = Join-Path $target $p
+    $full = Assert-BuildDirectory (Join-Path $target $p)
     $size = Get-DirSize $full
     if ($size -gt 0) {
       Write-Host (Show-Size "删除 $p" $size)
-      Remove-Item -Recurse -Force $full
+      Remove-Item -LiteralPath $full -Recurse -Force
     }
   }
 
   if ($Deep) {
-    $full = Join-Path $target 'debug'
+    $full = Assert-BuildDirectory (Join-Path $target 'debug')
     $size = Get-DirSize $full
     if ($size -gt 0) {
       Write-Host (Show-Size '删除 debug（release 保留）' $size)
-      Remove-Item -Recurse -Force $full
+      Remove-Item -LiteralPath $full -Recurse -Force
     }
   }
 }

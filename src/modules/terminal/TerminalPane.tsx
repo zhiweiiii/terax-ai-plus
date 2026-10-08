@@ -2,8 +2,9 @@ import {
   FindBox,
   type FindBoxHandle,
   type FindMatch,
-} from "@/components/ui/find-box";
+} from "@/components/FindBox";
 import { useTheme } from "@/modules/theme";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import {
   forwardRef,
   memo,
@@ -31,6 +32,7 @@ export type TerminalPaneHandle = {
 };
 
 type Props = {
+  workspace: WorkspaceEnv;
   /** Stable identifier for this leaf (passed back through callbacks). */
   leafId: number;
   /** Tab containing this pane is on screen. */
@@ -47,6 +49,7 @@ type Props = {
 export const TerminalPane = memo(
   forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
     {
+      workspace,
       leafId,
       visible,
       focused = true,
@@ -65,6 +68,7 @@ export const TerminalPane = memo(
     const findBoxRef = useRef<FindBoxHandle>(null);
 
     const session = useTerminalSession({
+      workspace,
       leafId,
       container: containerRef,
       visible,
@@ -75,6 +79,7 @@ export const TerminalPane = memo(
       onCwd: (c) => onCwd?.(leafId, c),
     });
 
+    // biome-ignore lint/correctness/useExhaustiveDependencies: Theme tokens are read from CSS by applyTheme, so mode and theme changes trigger it.
     useEffect(() => {
       // Defer one frame so CSS-variable token resolution sees the new class.
       const id = requestAnimationFrame(() => session.applyTheme());

@@ -15,9 +15,9 @@ use crate::modules::git::types::{
     GitOutput, TextSource, DEFAULT_TIMEOUT_SECS, MAX_FILE_BYTES, MAX_OUTPUT_BYTES,
     MAX_TIMEOUT_SECS, MIN_GIT_VERSION,
 };
-use crate::modules::workspace::WorkspaceEnv;
 #[cfg(windows)]
 use crate::modules::workspace::validate_wsl_distro_name;
+use crate::modules::workspace::WorkspaceEnv;
 
 #[derive(Clone)]
 enum Availability {
@@ -91,7 +91,7 @@ pub fn ensure_git_available(workspace: &WorkspaceEnv) -> Result<()> {
 }
 
 fn check_git_availability(workspace: &WorkspaceEnv) -> Availability {
-    let output = match run_git_uncached(workspace, None, ["--version"], &[], None, 10) {
+    let output = match run_git_uncached(workspace, None, ["--version"], None, 10) {
         Ok(o) => o,
         Err(_) => return Availability::NotInstalled,
     };
@@ -148,6 +148,12 @@ pub fn git_show_text(workspace: &WorkspaceEnv, repo_root: &str, spec: &str) -> R
     }
     if output.exit_code != Some(0) {
         return Ok(TextSource::Missing);
+    }
+    if output.truncated {
+        return Err(GitError::command(
+            "git show",
+            "file content exceeds the output limit",
+        ));
     }
     Ok(decode_text(output.stdout))
 }
@@ -217,7 +223,17 @@ pub fn read_text_file(path: &Path) -> Result<TextSource> {
             max: MAX_FILE_BYTES,
         });
     }
-    let bytes = std::fs::read(path)?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    std::fs::File::open(path)?
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(GitError::FileTooLarge {
+            path: path.to_path_buf(),
+            size: bytes.len() as u64,
+            max: MAX_FILE_BYTES,
+        });
+    }
     Ok(decode_text(bytes))
 }
 
@@ -231,30 +247,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_git_uncached(workspace, cwd, args, &[], None, timeout_secs)
-}
-
-/// Like `run_git`, with extra environment variables. Used for editor hooks
-/// (GIT_SEQUENCE_EDITOR / GIT_EDITOR) in scripted rebases.
-pub fn run_git_with_env<I, S, E, K, V>(
-    workspace: &WorkspaceEnv,
-    cwd: Option<&str>,
-    args: I,
-    envs: E,
-    timeout_secs: u64,
-) -> Result<GitOutput>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-    E: IntoIterator<Item = (K, V)>,
-    K: AsRef<OsStr>,
-    V: AsRef<OsStr>,
-{
-    let envs: Vec<(OsString, OsString)> = envs
-        .into_iter()
-        .map(|(k, v)| (k.as_ref().to_os_string(), v.as_ref().to_os_string()))
-        .collect();
-    run_git_uncached(workspace, cwd, args, &envs, None, timeout_secs)
+    run_git_uncached(workspace, cwd, args, None, timeout_secs)
 }
 
 /// Like `run_git`, with bytes piped to stdin (e.g. `git cat-file --batch-check`).
@@ -269,14 +262,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_git_uncached(workspace, cwd, args, &[], Some(stdin), timeout_secs)
+    run_git_uncached(workspace, cwd, args, Some(stdin), timeout_secs)
 }
 
 fn run_git_uncached<I, S>(
     workspace: &WorkspaceEnv,
     cwd: Option<&str>,
     args: I,
-    extra_env: &[(OsString, OsString)],
     stdin: Option<&[u8]>,
     timeout_secs: u64,
 ) -> Result<GitOutput>
@@ -297,7 +289,6 @@ where
         .env("GCM_INTERACTIVE", "Never")
         .env("GCM_PROVIDER", "")
         .env("LC_ALL", "C")
-        .envs(extra_env.iter().cloned())
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -308,13 +299,21 @@ where
     crate::modules::proc::hide_console(&mut cmd);
 
     let child = Arc::new(SharedChild::spawn(&mut cmd).map_err(|e| GitError::Spawn(e.to_string()))?);
-    if let Some(bytes) = stdin {
-        if let Some(mut pipe) = child.take_stdin() {
+    let process_job =
+        crate::modules::proc::job::ProcessJob::create_for(child.id()).map_err(|e| {
+            let _ = child.kill();
+            let _ = child.wait();
+            GitError::Io(e)
+        })?;
+    let input_handle = stdin.map(|bytes| {
+        let bytes = bytes.to_vec();
+        let pipe = child.take_stdin();
+        thread::spawn(move || -> std::io::Result<()> {
             use std::io::Write;
-            let _ = pipe.write_all(bytes);
-            drop(pipe);
-        }
-    }
+            let mut pipe = pipe.ok_or_else(|| std::io::Error::other("no stdin pipe"))?;
+            pipe.write_all(&bytes)
+        })
+    });
     let mut stdout_pipe = child
         .take_stdout()
         .ok_or_else(|| GitError::Spawn("no stdout pipe".into()))?;
@@ -331,18 +330,34 @@ where
         let _ = tx.send(waiter.wait());
     });
 
-    let (exit_code, timed_out) = match rx.recv_timeout(dur) {
+    let waited = rx.recv_timeout(dur);
+    drop(process_job);
+    let (exit_code, timed_out) = match waited {
         Ok(Ok(status)) => (status.code(), false),
-        Ok(Err(e)) => return Err(GitError::Io(e)),
+        Ok(Err(e)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GitError::Io(e));
+        }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             let _ = child.kill();
             let _ = child.wait();
             (None, true)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            let _ = child.wait();
             return Err(GitError::Spawn("git wait thread disconnected".into()));
         }
     };
+    if let Some(input) = input_handle {
+        let result = input
+            .join()
+            .map_err(|_| GitError::Spawn("git input worker failed".into()))?;
+        if !timed_out && exit_code == Some(0) {
+            result.map_err(GitError::Io)?;
+        }
+    }
 
     let (stdout, stdout_truncated) = stdout_handle.join().unwrap_or((Vec::new(), false));
     let (stderr, _stderr_truncated) = stderr_handle.join().unwrap_or((Vec::new(), false));
@@ -457,5 +472,3 @@ fn drain<R: Read>(reader: &mut R, prealloc: usize) -> (Vec<u8>, bool) {
     }
     (out, truncated)
 }
-
-

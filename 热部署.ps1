@@ -19,7 +19,6 @@ $root = $PSScriptRoot
 Set-Location $root
 
 $debugExe = Join-Path $root "src-tauri\target\debug\terax-prod.exe"
-$releaseExe = Join-Path $root "src-tauri\target\release\terax-prod.exe"
 $pidFile = Join-Path $root ".terax-dev.pid"
 $logFile = Join-Path $root "dev.log"
 
@@ -30,17 +29,24 @@ function Stop-DevInstance {
     # 首选入口: 上次启动时记下的后台进程树 (pwsh -> pnpm -> node -> cargo -> terax),
     # taskkill /T 连整个子树一起杀, 避免 pnpm/node 残留占着端口
     if (Test-Path -LiteralPath $pidFile) {
-        $oldText = Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($oldText -match '^\d+$') {
-            $oldPid = [int]$oldText
-            if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
-                & taskkill.exe /PID $oldPid /T /F 2>$null | Out-Null
-                Start-Sleep -Milliseconds 500
-                Write-Host "  已关闭旧实例 (PID $oldPid)" -ForegroundColor Gray
-            } else {
-                Write-Host "  旧实例已不在运行" -ForegroundColor Gray
+        try {
+            $record = Get-Content -LiteralPath $pidFile -Raw | ConvertFrom-Json
+            if ($record -is [long] -or $record -is [int]) {
+                Write-Warning "旧 PID 记录缺少进程身份，跳过进程树终止。"
+            } elseif ($record.pid -and $record.started -and $record.path) {
+                $oldProc = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+                if ($oldProc -and $oldProc.Path -eq $record.path -and
+                    $oldProc.StartTime.ToUniversalTime().Ticks -eq $record.started) {
+                    & taskkill.exe /PID $oldProc.Id /T /F 2>$null | Out-Null
+                    if ($LASTEXITCODE -ne 0) { throw "无法终止已记录的开发进程树" }
+                    Start-Sleep -Milliseconds 500
+                    Write-Host "  已关闭旧实例 (PID $($oldProc.Id))" -ForegroundColor Gray
+                } else {
+                    Write-Host "  旧进程身份不匹配或已退出，跳过" -ForegroundColor Gray
+                }
             }
+        } catch {
+            throw "开发实例记录无法安全处理: $_"
         }
         Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
     } else {
@@ -59,6 +65,7 @@ function Stop-DevInstance {
     # 等旧实例把 exe 让出来。cargo 要覆盖 terax-prod.exe, 进程虽然杀了,
     # 文件句柄还要一会儿才释放, 立刻编译会 "failed to remove ... 拒绝访问"
     for ($i = 0; $i -lt 20; $i++) {
+        if (-not (Test-Path -LiteralPath $debugExe)) { break }
         try {
             $fs = [System.IO.File]::Open(
                 $debugExe,
@@ -70,7 +77,7 @@ function Stop-DevInstance {
             break
         } catch {
             if ($i -eq 19) {
-                Write-Host "  等不到 terax-prod.exe 解锁, 可能还在被占用" -ForegroundColor Red
+                throw "等不到 terax-prod.exe 解锁，停止启动"
             }
             Start-Sleep -Milliseconds 500
         }
@@ -122,16 +129,14 @@ function Clear-DevPort {
         if ([int]$owner -le 4) { continue }
         $proc = Get-Process -Id $owner -ErrorAction SilentlyContinue
         if (-not $proc) { continue }
-        # 兜底: 正式版在跑的话放过它, 宁可这次启动失败也不打断你正在用的窗口
-        if ($proc.Path -and $proc.Path -eq $releaseExe) {
-            Write-Host "  $Port 被正式版占用, 跳过 (PID $owner)" -ForegroundColor Yellow
-            continue
+        if (-not $proc.Path -or $proc.Path -ne $debugExe) {
+            throw "端口 $Port 被非本项目开发实例占用 (PID $owner)，请手动确认，不自动终止"
         }
         try {
             Stop-Process -Id $owner -Force -ErrorAction Stop
             Write-Host "  $Port 已释放 (杀掉 $($proc.ProcessName) PID $owner)" -ForegroundColor Gray
         } catch {
-            Write-Host "  $Port 杀不掉 $($proc.ProcessName) PID $owner : $_" -ForegroundColor Red
+            throw "端口 $Port 无法安全释放: $_"
         }
     }
 }
@@ -147,8 +152,7 @@ for ($i = 0; $i -lt 20; $i++) {
     }
     if (-not $stillBusy) { break }
     if ($i -eq 19) {
-        Write-Host "  端口仍被占用: $($stillBusy -join ', ')" -ForegroundColor Red
-        Write-Host "  这次启动多半还会失败, 先确认这些端口上跑的是什么" -ForegroundColor Red
+        throw "端口仍被占用: $($stillBusy -join ', ')，停止启动"
     }
     Start-Sleep -Milliseconds 500
 }
@@ -172,13 +176,16 @@ Write-Host ""
 Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
 # 后台无窗口运行: 隐藏的 pwsh 把 pnpm tauri dev 的输出全写进 dev.log,
 # 本脚本退出不影响它。PID 记下来, 下次运行靠它连树一起杀。
-$inner = "pnpm tauri dev *>> '$logFile'"
+$escapedLog = $logFile.Replace("'", "''")
+$inner = "pnpm tauri dev *>> '$escapedLog'"
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
 $proc = Start-Process -FilePath "pwsh" `
-    -ArgumentList @("-NoLogo", "-NoProfile", "-Command", $inner) `
+    -ArgumentList @("-NoLogo", "-NoProfile", "-EncodedCommand", $encoded) `
     -WorkingDirectory $root `
     -WindowStyle Hidden `
     -PassThru
-Set-Content -LiteralPath $pidFile -Value $proc.Id
+@{ pid = $proc.Id; started = $proc.StartTime.ToUniversalTime().Ticks; path = $proc.Path } |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath $pidFile
 
 # 等 vite 起来 (tauri dev 先起 vite 再编 Rust), 起不来就把日志尾巴端出来
 $up = $false

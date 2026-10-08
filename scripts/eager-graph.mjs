@@ -6,15 +6,15 @@
 // the eager graph and the first local file that pulls each.
 //
 // CLI:  node scripts/eager-graph.mjs [entry] [comma,separated,watchlist]
-// Used as a library by scripts/eager-graph.test.ts to lock the startup budget.
 import { readFileSync, existsSync, statSync } from "node:fs";
-import { dirname, resolve, join } from "node:path";
+import { dirname, resolve, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const srcAlias = join(root, "src");
 
-export const DEFAULT_WATCH = [
+const DEFAULT_WATCH = [
   "@ai-sdk",
   "ai",
   "streamdown",
@@ -31,6 +31,7 @@ function resolveLocal(spec, fromFile) {
   if (spec.startsWith("@/")) base = join(srcAlias, spec.slice(2));
   else if (spec.startsWith(".")) base = resolve(dirname(fromFile), spec);
   else return null; // bare package
+  if (existsSync(base) && statSync(base).isFile()) return base;
   for (const e of exts) {
     const p = base + e;
     if (e && existsSync(p) && statSync(p).isFile()) return p;
@@ -42,17 +43,19 @@ function resolveLocal(spec, fromFile) {
   return null;
 }
 
-const STATIC_IMPORT =
-  /(?:^|\n)\s*import\s+(?!type[\s{])(?:[^"';]*?from\s*)?["']([^"']+)["']/g;
-const STATIC_EXPORT_FROM =
-  /(?:^|\n)\s*export\s+(?!type[\s{])[^"';]*?from\s*["']([^"']+)["']/g;
-
-function staticSpecs(code) {
+function staticSpecs(code, file) {
   const specs = new Set();
-  for (const re of [STATIC_IMPORT, STATIC_EXPORT_FROM]) {
-    re.lastIndex = 0;
-    let m;
-    while ((m = re.exec(code))) specs.add(m[1]);
+  const source = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false);
+  for (const node of source.statements) {
+    if (ts.isImportDeclaration(node)) {
+      const clause = node.importClause;
+      if (clause?.isTypeOnly) continue;
+      if (clause && !clause.name && clause.namedBindings && ts.isNamedImports(clause.namedBindings) && clause.namedBindings.elements.length && clause.namedBindings.elements.every((item) => item.isTypeOnly)) continue;
+      if (ts.isStringLiteral(node.moduleSpecifier)) specs.add(node.moduleSpecifier.text);
+    } else if (ts.isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      if (node.exportClause && ts.isNamedExports(node.exportClause) && node.exportClause.elements.every((item) => item.isTypeOnly)) continue;
+      specs.add(node.moduleSpecifier.text);
+    }
   }
   return [...specs];
 }
@@ -62,13 +65,13 @@ function pkgOf(spec, watch) {
 }
 
 /** @returns {{ moduleCount: number, hits: Map<string, {spec:string, file:string}> }} */
-export function traceEager(entry, watch = DEFAULT_WATCH) {
+function traceEager(entry, watch = DEFAULT_WATCH) {
   const entryFile = resolve(root, entry);
   const seen = new Set();
   const queue = [entryFile];
   const hits = new Map();
-  while (queue.length) {
-    const file = queue.shift();
+  for (let index = 0; index < queue.length; index++) {
+    const file = queue[index];
     if (seen.has(file)) continue;
     seen.add(file);
     let code;
@@ -77,7 +80,7 @@ export function traceEager(entry, watch = DEFAULT_WATCH) {
     } catch {
       continue;
     }
-    for (const spec of staticSpecs(code)) {
+    for (const spec of staticSpecs(code, file)) {
       const local = resolveLocal(spec, file);
       if (local) {
         queue.push(local);
@@ -85,7 +88,7 @@ export function traceEager(entry, watch = DEFAULT_WATCH) {
       }
       const pkg = pkgOf(spec, watch);
       if (pkg && !hits.has(pkg)) {
-        hits.set(pkg, { spec, file: file.replace(root + "/", "") });
+        hits.set(pkg, { spec, file: relative(root, file).replace(/\\/g, "/") });
       }
     }
   }

@@ -7,7 +7,8 @@ import { getName, getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { arch, platform } from "@tauri-apps/plugin-os";
 import { useEffect, useState } from "react";
-import { SectionHeader } from "../components/SectionHeader";
+import { SectionHeader } from "@/settings/components/SectionHeader";
+import { errorToast } from "@/lib/errorToast";
 
 // This fork. The upstream project keeps its own repo and site; pointing at
 // them here would show someone else's releases and issues as if they were
@@ -53,8 +54,21 @@ export function AboutSection() {
   };
 
   useEffect(() => {
-    void getVersion().then(setVersion);
-    void getName().then(setName);
+    let alive = true;
+    void getVersion()
+      .then((value) => {
+        if (alive) setVersion(value);
+      })
+      .catch((error) => {
+        if (alive) errorToast("读取版本失败", error);
+      });
+    void getName()
+      .then((value) => {
+        if (alive) setName(value);
+      })
+      .catch((error) => {
+        if (alive) errorToast("读取应用名称失败", error);
+      });
     try {
       const p = platform();
       const a = arch();
@@ -63,7 +77,14 @@ export function AboutSection() {
     } catch {
       setBuild("");
     }
+    return () => {
+      alive = false;
+    };
   }, []);
+
+  const openLink = (url: string) => {
+    void openUrl(url).catch((error) => errorToast("打开链接失败", error));
+  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -79,7 +100,7 @@ export function AboutSection() {
             开源的 AI 原生终端模拟器
           </span>
           <span className="mt-1 font-mono text-[11px] text-muted-foreground">
-            v{version || "—"}
+            v{version || "..."}
           </span>
         </div>
       </div>
@@ -100,7 +121,7 @@ export function AboutSection() {
         <dd>
           <button
             type="button"
-            onClick={() => void openUrl(REPO_URL)}
+            onClick={() => openLink(REPO_URL)}
             className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
           >
             <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
@@ -111,7 +132,7 @@ export function AboutSection() {
         <dd>
           <button
             type="button"
-            onClick={() => void openUrl(UPSTREAM_URL)}
+            onClick={() => openLink(UPSTREAM_URL)}
             className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
           >
             <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
@@ -132,7 +153,7 @@ export function AboutSection() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => void openUrl(REPO_URL)}
+            onClick={() => openLink(REPO_URL)}
             className="gap-1.5"
           >
             <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />在
@@ -141,7 +162,7 @@ export function AboutSection() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => void openUrl(`${REPO_URL}/issues/new`)}
+            onClick={() => openLink(`${REPO_URL}/issues/new`)}
           >
             反馈问题
           </Button>

@@ -5,7 +5,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { fmtShortcut, MOD_KEY, SHIFT_KEY } from "@/lib/platform";
+import { useShortcutLabel } from "@/modules/shortcuts/lib/useShortcutLabel";
 import {
   ComputerTerminal02Icon,
   GitBranchIcon,
@@ -35,6 +35,11 @@ export function NewTabMenu({
   onNewGitGraph,
 }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const newTerminalLabel = useShortcutLabel("tab.new");
+  const newBlockLabel = useShortcutLabel("tab.newBlock");
+  const newPrivateLabel = useShortcutLabel("tab.newPrivate");
+  const newEditorLabel = useShortcutLabel("tab.newEditor");
+  const newPreviewLabel = useShortcutLabel("tab.newPreview");
 
   return (
     <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
@@ -44,6 +49,7 @@ export function NewTabMenu({
           size="icon"
           className="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
           title="New tab"
+          aria-label="New tab"
         >
           <HugeiconsIcon icon={PlusSignIcon} size={14} strokeWidth={2} />
         </Button>
@@ -57,7 +63,7 @@ export function NewTabMenu({
           />
           <span className="flex-1">Terminal</span>
           <span className="text-xs text-muted-foreground">
-            {fmtShortcut(MOD_KEY, "T")}
+            {newTerminalLabel}
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onNewBlock}>
@@ -67,49 +73,31 @@ export function NewTabMenu({
             strokeWidth={1.75}
           />
           <span className="flex-1">Blocks</span>
-          <span className="text-xs text-muted-foreground">
-            {fmtShortcut(MOD_KEY, SHIFT_KEY, "T")}
-          </span>
+          <span className="text-xs text-muted-foreground">{newBlockLabel}</span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onNewPrivate}>
-          <HugeiconsIcon
-            icon={IncognitoIcon}
-            size={14}
-            strokeWidth={1.75}
-          />
+          <HugeiconsIcon icon={IncognitoIcon} size={14} strokeWidth={1.75} />
           <span className="flex-1">Privacy</span>
           <span className="text-xs text-muted-foreground">
-            {fmtShortcut(MOD_KEY, "R")}
+            {newPrivateLabel}
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onNewEditor}>
-          <HugeiconsIcon
-            icon={PencilEdit02Icon}
-            size={14}
-            strokeWidth={1.75}
-          />
+          <HugeiconsIcon icon={PencilEdit02Icon} size={14} strokeWidth={1.75} />
           <span className="flex-1">Editor</span>
           <span className="text-xs text-muted-foreground">
-            {fmtShortcut(MOD_KEY, "E")}
+            {newEditorLabel}
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onNewPreview}>
-          <HugeiconsIcon
-            icon={Globe02Icon}
-            size={14}
-            strokeWidth={1.75}
-          />
+          <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} />
           <span className="flex-1">Preview</span>
           <span className="text-xs text-muted-foreground">
-            {fmtShortcut(MOD_KEY, "P")}
+            {newPreviewLabel}
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onNewGitGraph}>
-          <HugeiconsIcon
-            icon={GitBranchIcon}
-            size={14}
-            strokeWidth={1.75}
-          />
+          <HugeiconsIcon icon={GitBranchIcon} size={14} strokeWidth={1.75} />
           <span className="flex-1">Git Graph</span>
         </DropdownMenuItem>
       </DropdownMenuContent>

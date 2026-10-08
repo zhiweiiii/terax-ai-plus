@@ -14,7 +14,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceEnv,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
 import {
   ArrowDown01Icon,
   Folder01Icon,
@@ -23,7 +28,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { segmentsFromCwd } from "./lib/pathUtils";
 
 type Props = {
@@ -173,33 +178,45 @@ function CurrentSegmentDropdown({
   onCd: (p: string) => void;
 }) {
   const showHidden = usePreferencesStore((s) => s.showHidden);
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const workspaceKey = workspaceScopeKey(workspace);
   const [open, setOpen] = useState(false);
-  const [children, setChildren] = useState<string[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setError(null);
-    try {
-      const dirs = await invoke<string[]>("list_subdirs", {
-        path,
-        showHidden,
-        workspace: currentWorkspaceEnv(),
-      });
-      setChildren(dirs);
-    } catch (e) {
-      setError(String(e));
-      setChildren([]);
-    }
-  }, [path, showHidden]);
-
-  useEffect(() => {
-    if (open) load();
-  }, [open, load]);
+    if (workspaceScopeKey(currentWorkspaceEnv()) !== workspaceKey)
+      throw new Error("Workspace changed");
+    const dirs = await invoke<string[]>("list_subdirs", {
+      path,
+      showHidden,
+      workspace,
+    });
+    if (workspaceScopeKey(currentWorkspaceEnv()) !== workspaceKey)
+      throw new Error("Workspace changed");
+    return dirs;
+  }, [path, showHidden, workspace, workspaceKey]);
+  const {
+    results: children,
+    loading,
+    error,
+    retry,
+  } = useAsyncQuery({
+    enabled: open,
+    term: "",
+    minLength: 0,
+    debounceMs: 0,
+    run: load,
+    scopeKey: JSON.stringify([workspaceKey, path, showHidden]),
+  });
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <BreadcrumbPage className="flex cursor-pointer items-center gap-1 rounded-sm px-1 py-0.5 text-foreground hover:bg-accent">
+        <button
+          type="button"
+          aria-current="page"
+          aria-label={`浏览 ${path} 的子目录`}
+          className="flex cursor-pointer items-center gap-1 rounded-sm px-1 py-0.5 text-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+        >
           {label === "~" ? (
             <>
               <HugeiconsIcon
@@ -217,10 +234,10 @@ function CurrentSegmentDropdown({
             className="size-3 opacity-70"
             strokeWidth={2}
           />
-        </BreadcrumbPage>
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-72 overflow-y-auto">
-        {children === null ? (
+        {loading && children.length === 0 ? (
           <div className="px-2 py-1.5 text-xs text-muted-foreground">
             Loading…
           </div>
@@ -245,6 +262,16 @@ function CurrentSegmentDropdown({
             </DropdownMenuItem>
           ))
         )}
+        {error ? (
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault();
+              retry();
+            }}
+          >
+            重试
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

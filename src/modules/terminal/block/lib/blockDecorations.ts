@@ -3,6 +3,7 @@ import {
   registerCwdHandler,
 } from "@/modules/terminal/lib/osc-handlers";
 import type { IDecoration, IMarker, Terminal } from "@xterm/xterm";
+import { searchBufferLine } from "@/modules/terminal/lib/searchBufferLine";
 import { blockIndexAt, computeRange, type LineRange } from "./blockRange";
 import {
   type BlockMode,
@@ -188,19 +189,14 @@ export class BlockDecorations {
     if (!e || !query) return [];
     const r = this.rangeOf(e);
     if (!r) return [];
-    const q = query.toLowerCase();
     const buf = this.term.buffer.active;
     const last = Math.min(r.end, buf.length - 1);
     const out: BlockMatch[] = [];
     for (let i = r.start; i <= last && out.length < 500; i++) {
-      const lower = buf.getLine(i)?.translateToString(true).toLowerCase() ?? "";
-      let from = 0;
-      while (out.length < 500) {
-        const idx = lower.indexOf(q, from);
-        if (idx < 0) break;
-        out.push({ line: i, col: idx, len: query.length });
-        from = idx + Math.max(1, query.length);
-      }
+      const line = buf.getLine(i);
+      if (!line) continue;
+      for (const match of searchBufferLine(line, query, 500 - out.length))
+        out.push({ line: i, ...match });
     }
     return out;
   }

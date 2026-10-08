@@ -129,7 +129,7 @@ fn search_with_cancel(
         .filter_entry(|dent| {
             // Prune known-heavy dirs even when no .gitignore is present (e.g.
             // searching from $HOME).
-            if dent.depth() == 0 {
+            if dent.depth() == 0 || !dent.file_type().is_some_and(|kind| kind.is_dir()) {
                 return true;
             }
             match dent.file_name().to_str() {
@@ -178,7 +178,11 @@ fn search_with_cancel(
     }
 
     // Best score first; ties break toward shorter relative paths.
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.rel.len().cmp(&b.1.rel.len())));
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.rel.len().cmp(&b.1.rel.len()))
+    });
+    truncated |= scored.len() > cap;
     let hits = scored.into_iter().take(cap).map(|(_, h)| h).collect();
     Ok(SearchResult { hits, truncated })
 }
@@ -231,7 +235,7 @@ pub fn fs_list_files_impl(
         .follow_links(false)
         .max_depth(Some(depth))
         .filter_entry(|dent| {
-            if dent.depth() == 0 {
+            if dent.depth() == 0 || !dent.file_type().is_some_and(|kind| kind.is_dir()) {
                 return true;
             }
             match dent.file_name().to_str() {
@@ -294,5 +298,3 @@ fn display_path(
     }
     to_canon(path)
 }
-
-

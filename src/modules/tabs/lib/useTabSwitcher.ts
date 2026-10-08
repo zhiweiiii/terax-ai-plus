@@ -17,26 +17,35 @@ export function useTabSwitcher({ getOrder, onCommit }: Options) {
   cb.current = { getOrder, onCommit };
 
   const step = useCallback((delta: 1 | -1) => {
-    setState((prev) => {
-      if (prev) {
-        const len = prev.order.length;
-        return { ...prev, index: (prev.index + delta + len) % len };
-      }
-      const order = cb.current.getOrder();
-      if (order.length < 2) return null;
-      return { order, index: (delta + order.length) % order.length };
-    });
+    const prev = stateRef.current;
+    const order = prev?.order ?? cb.current.getOrder();
+    if (order.length < 2) return;
+    const next = {
+      order,
+      index: ((prev?.index ?? 0) + delta + order.length) % order.length,
+    };
+    stateRef.current = next;
+    setState(next);
   }, []);
 
   const commit = useCallback(() => {
     const s = stateRef.current;
     if (!s) return;
+    stateRef.current = null;
     setState(null);
     const id = s.order[s.index];
-    if (id !== undefined && id !== s.order[0]) cb.current.onCommit(id);
+    if (
+      id !== undefined &&
+      id !== s.order[0] &&
+      cb.current.getOrder().includes(id)
+    )
+      cb.current.onCommit(id);
   }, []);
 
-  const cancel = useCallback(() => setState(null), []);
+  const cancel = useCallback(() => {
+    stateRef.current = null;
+    setState(null);
+  }, []);
 
   useEffect(() => {
     const onKeyUp = (e: KeyboardEvent) => {
@@ -44,6 +53,7 @@ export function useTabSwitcher({ getOrder, onCommit }: Options) {
       if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) commit();
     };
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (stateRef.current && e.key === "Escape") {
         e.preventDefault();
         e.stopImmediatePropagation();

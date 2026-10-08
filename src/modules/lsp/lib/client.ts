@@ -24,6 +24,7 @@ import {
   openLocationsPanel,
 } from "./locationsPanel";
 import { fileUriToPath } from "./uri";
+import { errorToast } from "@/lib/errorToast";
 
 export {
   languageServerWithTransport,
@@ -50,20 +51,37 @@ function normalizeLocations(result: DefinitionResult): LspLocation[] {
   if (!result) return [];
   const list = Array.isArray(result) ? result : [result];
   const out: LspLocation[] = [];
-  for (const loc of list) {
+  for (const loc of list.slice(0, 10000)) {
+    if (!loc || typeof loc !== "object") continue;
     if ("uri" in loc) {
-      out.push(loc);
+      if (typeof loc.uri === "string" && validPosition(loc.range?.start))
+        out.push(loc);
     } else if (loc.targetUri) {
+      const range = loc.targetSelectionRange ?? loc.targetRange;
+      if (typeof loc.targetUri !== "string" || !validPosition(range?.start))
+        continue;
       out.push({
         uri: loc.targetUri,
-        range: loc.targetSelectionRange ?? loc.targetRange,
+        range,
       });
     }
   }
   return out;
 }
 
+function validPosition(pos: LspPos | null | undefined): pos is LspPos {
+  return (
+    !!pos &&
+    Number.isSafeInteger(pos.line) &&
+    pos.line >= 0 &&
+    Number.isSafeInteger(pos.character) &&
+    pos.character >= 0
+  );
+}
+
 function offsetOf(doc: Text, pos: LspPos): number {
+  if (!validPosition(pos))
+    throw new Error("Language server returned an invalid document position");
   if (pos.line >= doc.lines) return doc.length;
   const line = doc.line(pos.line + 1);
   return Math.min(line.from + pos.character, line.to);
@@ -85,6 +103,8 @@ export async function formatDocumentAndWait(
     return "unsupported";
   }
   const doc = view.state.doc;
+  if (view.state.readOnly) return "unsupported";
+  const pluginIdentity = plugin;
   const edits = await client.textDocumentFormatting({
     textDocument: { uri: plugin.documentUri },
     options: {
@@ -95,21 +115,32 @@ export async function formatDocumentAndWait(
   if (!edits || edits.length === 0) return "done";
   // Edits are offsets into the requested snapshot; typing during the
   // round-trip would corrupt the document.
-  if (view.state.doc !== doc) return "done";
-  view.dispatch({
-    changes: edits.map((e) => ({
-      from: offsetOf(doc, e.range.start),
-      to: offsetOf(doc, e.range.end),
-      insert: e.newText,
-    })),
+  if (
+    view.state.doc !== doc ||
+    view.state.readOnly ||
+    view.plugin(languageServerPlugin) !== pluginIdentity ||
+    !view.dom.isConnected
+  )
+    return "done";
+  if (!Array.isArray(edits) || edits.length > 10000)
+    throw new Error("Language server returned an invalid formatting response");
+  const changes = edits.map((edit) => {
+    if (!edit || typeof edit.newText !== "string")
+      throw new Error("Language server returned invalid formatting text");
+    return {
+      from: offsetOf(doc, edit.range.start),
+      to: offsetOf(doc, edit.range.end),
+      insert: edit.newText,
+    };
   });
+  view.dispatch({ changes });
   return "done";
 }
 
 function highlightBlock(el: HTMLElement, view: EditorView): void {
   const lang = view.state.facet(language);
   const code = el.textContent;
-  if (!lang || !code) return;
+  if (!lang || !code || code.length > 16384) return;
   const frag = document.createDocumentFragment();
   highlightCode(
     code,
@@ -135,7 +166,7 @@ function highlightBlock(el: HTMLElement, view: EditorView): void {
 // direct children of the editor DOM, so the outer observer never fires on
 // typing; the subtree observer lives only while a tooltip is mounted.
 const hoverCodeHighlight = ViewPlugin.define((view) => {
-  const seen = new WeakSet<HTMLElement>();
+  const seen = new WeakMap<HTMLElement, string>();
   const inner = new Map<Element, MutationObserver>();
 
   const scan = (root: Element) => {
@@ -143,8 +174,9 @@ const hoverCodeHighlight = ViewPlugin.define((view) => {
       ".documentation pre code",
     );
     for (const el of blocks) {
-      if (seen.has(el)) continue;
-      seen.add(el);
+      const code = el.textContent ?? "";
+      if (seen.get(el) === code) continue;
+      seen.set(el, code);
       highlightBlock(el, view);
     }
   };
@@ -244,7 +276,19 @@ export function lspInteractions(opts: {
   rootPath: string;
   onExternal: (uri: string, line: number) => void;
 }): Extension {
+  let requestId = 0;
+  const currentView = (view: EditorView) => {
+    const window = view.dom.ownerDocument.defaultView;
+    return (
+      view.dom.isConnected &&
+      view.plugin(languageServerPlugin)?.client === opts.client &&
+      !!window &&
+      window.getComputedStyle(view.dom).visibility === "visible" &&
+      view.dom.getClientRects().length > 0
+    );
+  };
   const navigate = (view: EditorView, loc: LspLocation): void => {
+    if (!currentView(view) || !validPosition(loc.range.start)) return;
     if (loc.uri === opts.documentUri) {
       const targetLine = Math.min(
         loc.range.start.line + 1,
@@ -284,13 +328,21 @@ export function lspInteractions(opts: {
       return;
     }
     const byLoc = new Map<string, LspLocation>();
-    for (const loc of locs) byLoc.set(label(loc), loc);
+    for (const loc of locs)
+      byLoc.set(
+        JSON.stringify([
+          loc.uri,
+          loc.range.start.line,
+          loc.range.start.character,
+        ]),
+        loc,
+      );
     const items: LocationItem[] = [...byLoc.entries()]
-      .map(([text, loc]) => ({
+      .map(([, loc]) => ({
         uri: loc.uri,
         line: loc.range.start.line,
         character: loc.range.start.character,
-        label: text,
+        label: `${label(loc)}:${loc.range.start.character + 1}`,
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
     openLocationsPanel(view, {
@@ -313,15 +365,25 @@ export function lspInteractions(opts: {
     view: EditorView,
     pos: number,
   ): Promise<void> => {
+    const request = ++requestId;
+    const document = view.state.doc;
     let result: DefinitionResult;
     try {
       result = await opts.client.textDocumentDefinition({
         textDocument: { uri: opts.documentUri },
         position: positionAt(view, pos),
       });
-    } catch {
+    } catch (error) {
+      if (request === requestId && currentView(view))
+        errorToast("Could not find definition", error);
       return;
     }
+    if (
+      request !== requestId ||
+      !currentView(view) ||
+      view.state.doc !== document
+    )
+      return;
     showResults(view, "Definitions", normalizeLocations(result));
   };
 
@@ -329,6 +391,8 @@ export function lspInteractions(opts: {
     view: EditorView,
     pos: number,
   ): Promise<void> => {
+    const request = ++requestId;
+    const document = view.state.doc;
     let result: LspLocation[] | null;
     try {
       result = await opts.client.textDocumentReferences({
@@ -336,10 +400,18 @@ export function lspInteractions(opts: {
         position: positionAt(view, pos),
         context: { includeDeclaration: true },
       });
-    } catch {
+    } catch (error) {
+      if (request === requestId && currentView(view))
+        errorToast("Could not find references", error);
       return;
     }
-    showResults(view, "References", result ?? []);
+    if (
+      request !== requestId ||
+      !currentView(view) ||
+      view.state.doc !== document
+    )
+      return;
+    showResults(view, "References", normalizeLocations(result));
   };
 
   return [
@@ -372,7 +444,9 @@ export function lspInteractions(opts: {
         key: "Shift-Alt-f",
         preventDefault: true,
         run: (view) => {
-          void formatDocumentAndWait(view);
+          void formatDocumentAndWait(view).catch((error) =>
+            errorToast("Could not format document", error),
+          );
           return true;
         },
       },
@@ -420,16 +494,23 @@ export class TeraxLspClient extends LanguageServerClient {
     position: LspPos;
     context: { includeDeclaration: boolean };
   }): Promise<LspLocation[] | null> {
-    return this.raw.request("textDocument/references", params, 10_000) as
-      Promise<LspLocation[] | null>;
+    return this.raw.request(
+      "textDocument/references",
+      params,
+      10_000,
+    ) as Promise<LspLocation[] | null>;
   }
 
   textDocumentDidClose(uri: string): void {
-    void this.raw.notify("textDocument/didClose", { textDocument: { uri } });
+    void this.raw
+      .notify("textDocument/didClose", { textDocument: { uri } })
+      .catch((error) => console.warn("[terax] LSP didClose failed", error));
   }
 
   textDocumentDidSave(uri: string): void {
-    void this.raw.notify("textDocument/didSave", { textDocument: { uri } });
+    void this.raw
+      .notify("textDocument/didSave", { textDocument: { uri } })
+      .catch((error) => console.warn("[terax] LSP didSave failed", error));
   }
 
   async shutdownGracefully(timeoutMs = 2000): Promise<void> {

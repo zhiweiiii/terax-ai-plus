@@ -4,6 +4,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { Fragment } from "react";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import { useTerminalDropStore } from "./lib/dropStore";
 import { focusSlot } from "./lib/rendererPool";
 import { firstLeafSlotId, type PaneNode } from "./lib/panes";
@@ -16,6 +17,7 @@ type LeafBundle = {
 };
 
 type Props = {
+  workspace: WorkspaceEnv;
   node: PaneNode;
   tabVisible: boolean;
   activeLeafId: number;
@@ -31,7 +33,8 @@ export function PaneTreeView(props: Props) {
     const focused = node.id === activeLeafId;
     const b = getBundle(node.id);
     return (
-      <div
+      <section
+        aria-label="Terminal pane"
         onMouseDownCapture={() => {
           if (!focused) onFocusLeaf(node.id);
           // Take DOM focus every time, not only when the ACTIVE leaf changes.
@@ -50,6 +53,7 @@ export function PaneTreeView(props: Props) {
         className="relative h-full w-full"
       >
         <TerminalPane
+          workspace={props.workspace}
           leafId={node.id}
           visible={tabVisible}
           focused={focused}
@@ -60,7 +64,7 @@ export function PaneTreeView(props: Props) {
           onExit={b.onExit}
         />
         <DropOverlay leafId={node.id} />
-      </div>
+      </section>
     );
   }
 

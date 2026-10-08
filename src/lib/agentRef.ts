@@ -1,5 +1,3 @@
-import { quoteShellArg } from "@/lib/shellQuote";
-
 /**
  * How a file is named to a coding agent. Claude Code and opencode both expand
  * `@path` in a submitted prompt into a real attachment, so that is the form to
@@ -14,7 +12,7 @@ export function agentFileRef(absolutePath: string, cwd: string | null): string {
   const rel = relativeTo(absolutePath, cwd);
   // A path with whitespace would end the mention at the first space, so it
   // cannot be sent as `@`; the quoted absolute form stays readable instead.
-  if (!rel || /\s/.test(rel)) return quoteShellArg(absolutePath);
+  if (!rel || /\s/.test(rel)) return JSON.stringify(absolutePath);
   return `@${rel}`;
 }
 
@@ -25,8 +23,9 @@ function relativeTo(absolutePath: string, cwd: string | null): string | null {
   const root = norm(cwd);
   // Windows paths are case-insensitive, so compare folded but slice the
   // original: the agent should see the file's real capitalisation.
-  const foldedFile = file.toLowerCase();
-  const foldedRoot = root.toLowerCase();
+  const windowsPath = /^[A-Za-z]:\//.test(root) || root.startsWith("//");
+  const foldedFile = windowsPath ? file.toLowerCase() : file;
+  const foldedRoot = windowsPath ? root.toLowerCase() : root;
   if (foldedFile === foldedRoot) return null;
   if (!foldedFile.startsWith(`${foldedRoot}/`)) return null;
   return file.slice(root.length + 1) || null;

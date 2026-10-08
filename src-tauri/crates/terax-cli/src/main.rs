@@ -5,7 +5,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use terax_control_protocol::{
@@ -288,13 +288,23 @@ fn load_endpoint() -> Result<ControlDescriptor, CliError> {
                         EXIT_UNAVAILABLE,
                     )
                 })?;
-            let bytes = std::fs::read(&path).map_err(|_| {
-                CliError::new(
-                    "app_unavailable",
-                    "Terax is not running; start the app and try again",
-                    EXIT_UNAVAILABLE,
-                )
-            })?;
+            let bytes = std::fs::File::open(&path)
+                .and_then(|file| {
+                    let mut bytes = Vec::new();
+                    file.take(MAX_MESSAGE_BYTES as u64 + 1)
+                        .read_to_end(&mut bytes)?;
+                    if bytes.len() > MAX_MESSAGE_BYTES {
+                        return Err(std::io::Error::other("control descriptor too large"));
+                    }
+                    Ok(bytes)
+                })
+                .map_err(|_| {
+                    CliError::new(
+                        "app_unavailable",
+                        "Terax is not running; start the app and try again",
+                        EXIT_UNAVAILABLE,
+                    )
+                })?;
             let descriptor = serde_json::from_slice(&bytes).map_err(|error| {
                 CliError::new(
                     "invalid_descriptor",
@@ -396,8 +406,30 @@ fn send_request(address: &str, request: &ControlRequest) -> Result<ControlRespon
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
     write_request(&mut stream, request)?;
 
-    let mut reader = BufReader::new(stream);
+    let mut reader = BufReader::new(DeadlineReader {
+        stream,
+        deadline: Instant::now() + IO_TIMEOUT,
+    });
     read_response(&mut reader, request)
+}
+
+struct DeadlineReader {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "control response timed out",
+            ));
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(bytes)
+    }
 }
 
 fn parse_loopback_address(address: &str) -> Result<SocketAddr, CliError> {
@@ -545,5 +577,3 @@ Usage:\n  terax <file> [--line <n>] [--no-focus] [--json]\n  terax open <file> [
 The app must be running. Commands launched in a Terax pane target that pane's space."
     );
 }
-
-

@@ -6,10 +6,25 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
 import { type GitBranchEntry, native } from "@/lib/native";
+import { cn } from "@/lib/utils";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
+import {
+  DATE_PRESETS,
+  type DatePreset,
+  EMPTY_HISTORY_FILTERS,
+  type HistoryFilters,
+  hasServerFilters,
+  type SearchOptions,
+} from "@/modules/git-history/lib/filters";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace/env";
 import {
   ArrowDown01Icon,
   Calendar03Icon,
@@ -21,16 +36,7 @@ import {
   UserIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useRef, useState } from "react";
-import { errorToast } from "@/lib/errorToast";
-import {
-  DATE_PRESETS,
-  EMPTY_HISTORY_FILTERS,
-  hasServerFilters,
-  type DatePreset,
-  type HistoryFilters,
-  type SearchOptions,
-} from "./lib/filters";
+import { useCallback, useId, useState } from "react";
 
 export type HistoryFilterState = {
   filters: HistoryFilters;
@@ -47,12 +53,9 @@ export function useHistoryFilters(): HistoryFilterState {
   const updateFilters = useCallback((patch: Partial<HistoryFilters>) => {
     setFilters((current) => ({ ...current, ...patch }));
   }, []);
-  const updateSearchOptions = useCallback(
-    (patch: Partial<SearchOptions>) => {
-      setSearchOptions((current) => ({ ...current, ...patch }));
-    },
-    [],
-  );
+  const updateSearchOptions = useCallback((patch: Partial<SearchOptions>) => {
+    setSearchOptions((current) => ({ ...current, ...patch }));
+  }, []);
   const clearFilters = useCallback(() => setFilters(EMPTY_HISTORY_FILTERS), []);
   return {
     filters,
@@ -72,6 +75,8 @@ type Props = {
   /** Authors present in the currently loaded commits. */
   authors: string[];
   hasSearchQuery: boolean;
+  searchInput: string;
+  onSearchChange: (value: string) => void;
   onClearSearch: () => void;
 };
 
@@ -81,6 +86,8 @@ export function HistoryFilterBar({
   multiRepo,
   authors,
   hasSearchQuery,
+  searchInput,
+  onSearchChange,
   onClearSearch,
 }: Props) {
   const {
@@ -91,11 +98,22 @@ export function HistoryFilterBar({
     clearFilters,
     serverActive,
   } = state;
-  const hasActiveOptions = !!searchOptions.regex || !!searchOptions.caseSensitive;
-  const showClear = serverActive || hasActiveOptions || hasSearchQuery;
+  const hasActiveOptions =
+    !!searchOptions.regex || !!searchOptions.caseSensitive;
+  const showClear =
+    serverActive || filters.firstParent || hasActiveOptions || hasSearchQuery;
+  const filterId = useId();
 
   return (
     <div className="flex min-h-7 shrink-0 flex-wrap items-center gap-1 border-b border-border/40 bg-card/40 px-2 py-1">
+      <Input
+        value={searchInput}
+        onChange={(event) => onSearchChange(event.target.value)}
+        aria-label="Search loaded commits"
+        placeholder="Search loaded commits"
+        maxLength={1024}
+        className="h-7 min-w-32 flex-1 text-[11px]"
+      />
       <ToggleButton
         title="Regular expression search"
         active={!!searchOptions.regex}
@@ -128,12 +146,12 @@ export function HistoryFilterBar({
       />
       <FilterSeparator />
       <label
-        htmlFor="history-filter-no-merges"
+        htmlFor={`${filterId}-no-merges`}
         className="flex cursor-pointer items-center gap-1.5 text-[10.5px] text-muted-foreground"
         title="Hide merge commits"
       >
         <Switch
-          id="history-filter-no-merges"
+          id={`${filterId}-no-merges`}
           size="sm"
           checked={filters.noMerges}
           onCheckedChange={(checked) => updateFilters({ noMerges: checked })}
@@ -141,12 +159,12 @@ export function HistoryFilterBar({
         No merges
       </label>
       <label
-        htmlFor="history-filter-first-parent"
+        htmlFor={`${filterId}-first-parent`}
         className="flex cursor-pointer items-center gap-1.5 text-[10.5px] text-muted-foreground"
         title="Show only the first parent of each merge commit"
       >
         <Switch
-          id="history-filter-first-parent"
+          id={`${filterId}-first-parent`}
           size="sm"
           checked={filters.firstParent}
           onCheckedChange={(checked) => updateFilters({ firstParent: checked })}
@@ -192,6 +210,8 @@ function ToggleButton({
       size="icon-xs"
       variant="ghost"
       title={title}
+      aria-label={title}
+      aria-pressed={active}
       onClick={onClick}
       className={cn("cursor-pointer", active && "bg-accent text-foreground")}
     >
@@ -349,34 +369,31 @@ function BranchFilter({
   value: string | null;
   onSelect: (branch: string | null) => void;
 }) {
-  const [branches, setBranches] = useState<GitBranchEntry[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const loadedForRef = useRef<string | null>(null);
-
-  // The pane may be retargeted to another repo without unmounting this
-  // component; cache per repo so the list reloads for the new one.
-  const load = useCallback(async () => {
-    if (loadedForRef.current === repoRoot) return;
-    loadedForRef.current = repoRoot;
-    setBranches(null);
-    setLoading(true);
-    try {
-      const result = await native.gitListBranches(repoRoot);
-      setBranches(result.branches.filter((branch) => branch.kind !== "remote"));
-    } catch (e) {
-      loadedForRef.current = null;
-      errorToast("Could not list branches", e);
-    } finally {
-      setLoading(false);
-    }
-  }, [repoRoot]);
+  const [open, setOpen] = useState(false);
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const environmentKey = workspaceScopeKey(workspace);
+  const run = useCallback(async () => {
+    if (currentWorkspaceScopeKey() !== environmentKey) return [];
+    const result = await native.gitListBranches(repoRoot, workspace);
+    if (currentWorkspaceScopeKey() !== environmentKey) return [];
+    return result.branches.filter((branch) => branch.kind !== "remote");
+  }, [repoRoot, workspace, environmentKey]);
+  const {
+    results: branches,
+    loading,
+    error,
+    retry,
+  } = useAsyncQuery<GitBranchEntry>({
+    enabled: open,
+    term: repoRoot,
+    minLength: 1,
+    debounceMs: 0,
+    scopeKey: JSON.stringify([repoRoot, environmentKey]),
+    run,
+  });
 
   return (
-    <DropdownMenu
-      onOpenChange={(open) => {
-        if (open) void load();
-      }}
-    >
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
           size="xs"
@@ -422,18 +439,29 @@ function BranchFilter({
           All branches
         </DropdownMenuItem>
         <DropdownMenuSeparator className="my-0.5 border-t border-border/30" />
-        {loading && !branches ? (
+        {loading && branches.length === 0 ? (
           <div className="flex items-center gap-2 px-2.5 py-2 text-[11px] text-muted-foreground">
             <Spinner className="size-3" />
             Loading branches…
           </div>
         ) : null}
-        {branches && branches.length === 0 ? (
+        {error ? (
+          <div
+            role="alert"
+            className="px-2.5 py-2 text-[11px] text-destructive"
+          >
+            Could not list branches.
+            <Button size="xs" variant="ghost" onClick={retry}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
+        {!loading && !error && branches.length === 0 ? (
           <div className="px-2.5 py-2 text-[11px] text-muted-foreground">
             No branches
           </div>
         ) : null}
-        {branches?.map((branch) => (
+        {branches.map((branch) => (
           <DropdownMenuItem
             key={branch.name}
             onSelect={() => onSelect(branch.name)}
@@ -461,7 +489,7 @@ function BranchFilter({
           <>
             <DropdownMenuSeparator className="my-0.5 border-t border-border/30" />
             <div className="px-2.5 py-1.5 text-[10px] leading-snug text-muted-foreground/75">
-              Branch list is per-repo. Cross-repo filtering is not supported —
+              Branch list is per-repo. Cross-repo filtering is not supported;
               each repo is queried separately.
             </div>
           </>

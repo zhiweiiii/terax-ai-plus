@@ -9,10 +9,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import type { AppCloseBlocker } from "@/app/hooks/useAppCloseGuard";
+import type { GroupDeleteBlocker } from "@/app/hooks/useGroupDeleteGuard";
 import type { Tab } from "@/modules/tabs";
 
 type Props = {
   tabs: Tab[];
+  pendingGroupDelete: GroupDeleteBlocker | null;
+  onCancelGroupDelete: () => void;
+  onConfirmGroupDelete: () => void;
   pendingCloseTab: number | null;
   onCancelClose: () => void;
   onConfirmClose: () => void;
@@ -44,6 +48,9 @@ function appCloseMessage(blocker: AppCloseBlocker): string {
 /** Confirmation dialogs for closing dirty editors and terminals with live processes. */
 export function CloseDialogs({
   tabs,
+  pendingGroupDelete,
+  onCancelGroupDelete,
+  onConfirmGroupDelete,
   pendingCloseTab,
   onCancelClose,
   onConfirmClose,
@@ -59,6 +66,30 @@ export function CloseDialogs({
 }: Props) {
   return (
     <>
+      <AlertDialog
+        open={pendingGroupDelete !== null}
+        onOpenChange={(open) => !open && onCancelGroupDelete()}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Group?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Deleting "{pendingGroupDelete?.name}" closes its tabs, discards
+              unsaved changes, and terminates running processes. Project files
+              on disk are not deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={onCancelGroupDelete}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={onConfirmGroupDelete}>
+              Delete Anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <AlertDialog
         open={pendingCloseTab !== null}
         onOpenChange={(open) => !open && onCancelClose()}

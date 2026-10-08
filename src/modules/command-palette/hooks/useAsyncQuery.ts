@@ -6,6 +6,7 @@ type Params<T> = {
   minLength: number;
   debounceMs: number;
   run: (term: string) => Promise<T[]>;
+  scopeKey?: string;
 };
 
 export type AsyncQueryState<T> = {
@@ -21,33 +22,60 @@ export function useAsyncQuery<T>({
   minLength,
   debounceMs,
   run,
+  scopeKey = "",
 }: Params<T>): AsyncQueryState<T> {
   const [results, setResults] = useState<T[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
-  const runRef = useRef(run);
-  runRef.current = run;
-
-  const execute = useCallback((q: string) => {
-    const requestId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    runRef
-      .current(q)
-      .then((hits) => {
-        if (requestId !== requestIdRef.current) return;
-        setResults(hits);
-      })
-      .catch((e) => {
-        if (requestId !== requestIdRef.current) return;
-        setResults([]);
-        setError(String(e));
-      })
-      .finally(() => {
-        if (requestId === requestIdRef.current) setLoading(false);
-      });
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current++;
+    };
   }, []);
+  const [resultsScope, setResultsScope] = useState(scopeKey);
+  const configKey = JSON.stringify([
+    scopeKey,
+    enabled,
+    minLength,
+    debounceMs,
+    term,
+  ]);
+  const configRef = useRef({ key: configKey, run });
+  if (configRef.current.key !== configKey || configRef.current.run !== run) {
+    configRef.current = { key: configKey, run };
+    requestIdRef.current++;
+  }
+  const config = configRef.current;
+
+  const execute = useCallback(
+    (q: string) => {
+      if (!mountedRef.current || configRef.current !== config) return;
+      const requestId = ++requestIdRef.current;
+      setLoading(true);
+      setError(null);
+      Promise.resolve()
+        .then(() => (requestId === requestIdRef.current ? config.run(q) : []))
+        .then((hits) => {
+          if (requestId !== requestIdRef.current) return;
+          setResults(hits);
+          setResultsScope(scopeKey);
+        })
+        .catch((e) => {
+          if (requestId !== requestIdRef.current) return;
+          setResults([]);
+          setResultsScope(scopeKey);
+          setError(String(e));
+        })
+        .finally(() => {
+          if (requestId === requestIdRef.current) setLoading(false);
+        });
+    },
+    [config, scopeKey],
+  );
 
   useEffect(() => {
     requestIdRef.current += 1;
@@ -63,12 +91,22 @@ export function useAsyncQuery<T>({
     setLoading(true);
     setError(null);
     const handle = window.setTimeout(() => execute(term), debounceMs);
-    return () => window.clearTimeout(handle);
+    return () => {
+      requestIdRef.current++;
+      window.clearTimeout(handle);
+    };
   }, [enabled, term, minLength, debounceMs, execute]);
 
   const retry = useCallback(() => {
     if (enabled && term.length >= minLength) execute(term);
   }, [enabled, term, minLength, execute]);
 
-  return { results, loading, error, retry };
+  const active = enabled && term.length >= minLength;
+  const sameScope = resultsScope === scopeKey;
+  return {
+    results: active && sameScope ? results : [],
+    loading: active && (loading || !sameScope),
+    error: active && sameScope ? error : null,
+    retry,
+  };
 }

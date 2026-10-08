@@ -8,6 +8,10 @@ import App from "./app/App";
 import { initLaunchDir } from "./lib/launchDir";
 import { USE_CUSTOM_WINDOW_CONTROLS } from "./lib/platform";
 
+// A redirected preview must not start a second app or reap the parent's PTYs.
+if (window.top !== window.self)
+  throw new Error("Terax cannot run inside a frame");
+
 if (USE_CUSTOM_WINDOW_CONTROLS) {
   document.documentElement.dataset.chrome = "borderless";
 }

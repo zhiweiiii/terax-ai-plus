@@ -29,11 +29,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  type GitDiffResult,
-  type GitLogEntry,
-  native,
-} from "@/lib/native";
+import { type GitDiffResult, type GitLogEntry, native } from "@/lib/native";
 import {
   Copy01Icon,
   GitBranchIcon,
@@ -45,9 +41,21 @@ import {
   UndoIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace/env";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
 
 type ConfirmSpec = {
   title: string;
@@ -90,7 +98,21 @@ type Props = {
   children: ReactNode;
 };
 
-export function CommitContextMenu({
+export function CommitContextMenu(props: Props) {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  return (
+    <ScopedCommitContextMenu
+      key={JSON.stringify([
+        props.repoRoot,
+        props.commit.sha,
+        workspaceScopeKey(workspace),
+      ])}
+      {...props}
+    />
+  );
+}
+
+function ScopedCommitContextMenu({
   repoRoot,
   commit,
   onRefresh,
@@ -98,28 +120,51 @@ export function CommitContextMenu({
 }: Props) {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const environmentKey = currentWorkspaceScopeKey();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const run = useCallback(
     async (action: () => Promise<void>, success: string) => {
+      if (
+        !mountedRef.current ||
+        busyRef.current ||
+        currentWorkspaceScopeKey() !== environmentKey
+      )
+        return;
+      busyRef.current = true;
       setBusy(true);
       try {
         await action();
         toast.success(success);
-        onRefresh();
+        if (
+          mountedRef.current &&
+          currentWorkspaceScopeKey() === environmentKey
+        ) {
+          setDialog(null);
+          onRefresh();
+        }
       } catch (e) {
         errorToast("Git 操作失败", e);
       } finally {
-        setBusy(false);
+        busyRef.current = false;
+        if (mountedRef.current) setBusy(false);
       }
     },
-    [onRefresh],
+    [onRefresh, environmentKey],
   );
 
   const copy = useCallback(async (value: string) => {
     try {
       await navigator.clipboard.writeText(value);
-    } catch {
-      /* noop */
+    } catch (error) {
+      errorToast("Could not copy commit information", error);
     }
   }, []);
 
@@ -180,9 +225,7 @@ export function CommitContextMenu({
       description: `在 ${commit.shortSha} 处创建并检出新分支。`,
       confirmLabel: "创建分支",
       success: `已从 ${commit.shortSha} 创建分支`,
-      fields: [
-        { label: "分支名称", placeholder: "feature/…", required: true },
-      ],
+      fields: [{ label: "分支名称", placeholder: "feature/…", required: true }],
       action: (values) =>
         native.gitCreateBranch(repoRoot, values[0] ?? "", {
           startPoint: commit.sha,
@@ -382,7 +425,10 @@ function ConfirmDialog({
           <AlertDialogAction
             variant={spec.destructive ? "destructive" : "default"}
             disabled={busy || !canConfirm}
-            onClick={onConfirm}
+            onClick={(event) => {
+              event.preventDefault();
+              onConfirm();
+            }}
           >
             {busy ? <Spinner className="size-3.5" /> : null}
             {spec.confirmLabel}
@@ -453,7 +499,10 @@ function PromptDialog({
           </AlertDialogCancel>
           <AlertDialogAction
             disabled={busy || !canConfirm}
-            onClick={() => onConfirm(values)}
+            onClick={(event) => {
+              event.preventDefault();
+              onConfirm(values);
+            }}
           >
             {busy ? <Spinner className="size-3.5" /> : null}
             {spec.confirmLabel}
@@ -475,25 +524,23 @@ function CommitDiffDialog({
   subject: string;
   onClose: () => void;
 }) {
-  const [state, setState] = useState<
-    | { status: "loading" }
-    | { status: "loaded"; diff: GitDiffResult }
-    | { status: "error"; error: string }
-  >({ status: "loading" });
-
-  const load = useCallback(async () => {
-    setState({ status: "loading" });
-    try {
-      const diff = await native.gitDiffCommitVsWorktree(repoRoot, sha);
-      setState({ status: "loaded", diff });
-    } catch (e) {
-      setState({ status: "error", error: String(e) });
-    }
-  }, [repoRoot, sha]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const workspace = useWorkspaceEnvStore((value) => value.env);
+  const environmentKey = workspaceScopeKey(workspace);
+  const run = useCallback(async () => {
+    if (currentWorkspaceScopeKey() !== environmentKey) return [];
+    const diff = await native.gitDiffCommitVsWorktree(repoRoot, sha, workspace);
+    if (currentWorkspaceScopeKey() !== environmentKey) return [];
+    return [diff];
+  }, [repoRoot, sha, workspace, environmentKey]);
+  const query = useAsyncQuery<GitDiffResult>({
+    enabled: true,
+    term: sha,
+    minLength: 1,
+    debounceMs: 0,
+    scopeKey: JSON.stringify([repoRoot, sha, environmentKey]),
+    run,
+  });
+  const diff = query.results[0];
 
   return (
     <Dialog
@@ -505,25 +552,25 @@ function CommitDiffDialog({
       <DialogContent className="flex max-h-[70vh] flex-col sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="pr-8">
-            与工作区比较 — {sha.slice(0, 7)}
+            与工作区比较 - {sha.slice(0, 7)}
           </DialogTitle>
           <DialogDescription className="truncate">
             {subject || "（无主题）"}
           </DialogDescription>
         </DialogHeader>
-        {state.status === "loading" ? (
+        {query.loading ? (
           <div className="flex items-center gap-2 py-6 text-[11.5px] text-muted-foreground">
             <Spinner className="size-3.5" />
             正在加载差异…
           </div>
-        ) : state.status === "error" ? (
+        ) : query.error ? (
           <div className="flex items-center justify-between gap-2 py-6 text-[11.5px] text-destructive">
-            <span className="truncate">{state.error}</span>
+            <span className="truncate">{query.error}</span>
             <Button
               size="xs"
               variant="ghost"
               className="h-6 cursor-pointer"
-              onClick={() => void load()}
+              onClick={query.retry}
             >
               重试
             </Button>
@@ -531,9 +578,9 @@ function CommitDiffDialog({
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
             <pre className="min-h-0 flex-1 overflow-auto rounded-xl bg-muted/40 p-3 font-mono text-[10.5px] leading-relaxed text-foreground/90 [scrollbar-gutter:stable]">
-              {state.diff.diffText || "（无更改）"}
+              {diff?.diffText || "（无更改）"}
             </pre>
-            {state.diff.truncated ? (
+            {diff?.truncated ? (
               <div className="shrink-0 pt-2 text-[10.5px] text-muted-foreground">
                 差异已截断
               </div>

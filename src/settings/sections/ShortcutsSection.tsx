@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { errorToast } from "@/lib/errorToast";
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setShortcuts } from "@/modules/settings/store";
@@ -28,7 +29,7 @@ import {
   Search01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 
 export function ShortcutsSection() {
@@ -52,33 +53,36 @@ export function ShortcutsSection() {
 
   const onRecord = (id: ShortcutId, binding: KeyBinding) => {
     const next = { ...userShortcuts, [id]: [binding] };
-    void setShortcuts(next);
+    void setShortcuts(next).catch((error) =>
+      errorToast("保存快捷键失败", error),
+    );
     setRecordingId(null);
   };
 
   const onClear = (id: ShortcutId) => {
     const next = { ...userShortcuts, [id]: [] };
-    void setShortcuts(next);
+    void setShortcuts(next).catch((error) =>
+      errorToast("清除快捷键失败", error),
+    );
   };
 
   const onResetShortcut = (id: ShortcutId) => {
     const next = { ...userShortcuts };
     delete next[id];
-    void setShortcuts(next);
+    void setShortcuts(next).catch((error) =>
+      errorToast("恢复快捷键失败", error),
+    );
   };
 
   const onResetAll = () => {
-    void setShortcuts({});
+    void setShortcuts({}).catch((error) => errorToast("重置快捷键失败", error));
     setResetDialogOpen(false);
   };
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
-        <SectionHeader
-          title="快捷键"
-          description="查看并自定义键盘快捷键。"
-        />
+        <SectionHeader title="快捷键" description="查看并自定义键盘快捷键。" />
         <Button
           variant="outline"
           size="sm"
@@ -181,9 +185,12 @@ function ShortcutRow({
   onReset: () => void;
   userBindings?: KeyBinding[];
 }) {
+  const readOnly = shortcut.group === "Editor";
   const bindings =
-    userBindings !== undefined ? userBindings : shortcut.defaultBindings;
-  const isModified = userBindings !== undefined;
+    !readOnly && userBindings !== undefined
+      ? userBindings
+      : shortcut.defaultBindings;
+  const isModified = !readOnly && userBindings !== undefined;
   const hasBindings = bindings && bindings.length > 0;
 
   return (
@@ -193,19 +200,26 @@ function ShortcutRow({
       </div>
 
       <div className="flex items-center gap-2">
-        {isRecording ? (
+        {isRecording && !readOnly ? (
           <Recorder onRecord={onRecord} onCancel={onStopRecording} />
         ) : (
           <>
-            <div
+            <button
+              type="button"
+              disabled={readOnly}
+              aria-label={
+                readOnly
+                  ? `${shortcut.label}: 编辑器内置快捷键`
+                  : `修改 ${shortcut.label} 快捷键`
+              }
               onClick={onStartRecording}
-              className="flex min-w-[100px] cursor-pointer items-center justify-end gap-1"
+              className="flex min-w-[100px] items-center justify-end gap-1 rounded outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default"
             >
               {hasBindings ? (
                 <KbdGroup>
-                  {getBindingTokens(bindings[0]).map((t, i) => (
+                  {getBindingTokens(bindings[0]).map((t) => (
                     <Kbd
-                      key={i}
+                      key={t}
                       className="group-hover:bg-accent group-hover:text-accent-foreground transition-colors"
                     >
                       {t}
@@ -217,30 +231,36 @@ function ShortcutRow({
                   未分配
                 </span>
               )}
-            </div>
+            </button>
 
-            <div className="flex items-center gap-1">
-              {isModified && (
+            {!readOnly ? (
+              <div className="flex items-center gap-1">
+                {isModified && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 text-muted-foreground hover:text-foreground"
+                    onClick={onReset}
+                    title="恢复默认"
+                  >
+                    <HugeiconsIcon icon={ArrowTurnBackwardIcon} size={12} />
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="size-7 text-muted-foreground hover:text-foreground"
-                  onClick={onReset}
-                  title="恢复默认"
+                  className="size-7 text-muted-foreground hover:text-destructive opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                  onClick={onClear}
+                  title="清除快捷键"
                 >
-                  <HugeiconsIcon icon={ArrowTurnBackwardIcon} size={12} />
+                  <HugeiconsIcon icon={Delete02Icon} size={12} />
                 </Button>
-              )}
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 text-muted-foreground hover:text-destructive opacity-0 transition-opacity group-hover:opacity-100"
-                onClick={onClear}
-                title="清除快捷键"
-              >
-                <HugeiconsIcon icon={Delete02Icon} size={12} />
-              </Button>
-            </div>
+              </div>
+            ) : (
+              <span className="text-[11px] text-muted-foreground">
+                编辑器内置
+              </span>
+            )}
           </>
         )}
       </div>
@@ -255,33 +275,24 @@ function Recorder({
   onRecord: (b: KeyBinding) => void;
   onCancel: () => void;
 }) {
-  const [_mods, setMods] = useState({
-    ctrl: false,
-    shift: false,
-    alt: false,
-    meta: false,
-  });
+  const finished = useRef(false);
 
   useEffect(() => {
+    finished.current = false;
     const onDown = (e: KeyboardEvent) => {
+      if (e.isComposing || e.keyCode === 229 || e.repeat || finished.current)
+        return;
       e.preventDefault();
-      e.stopPropagation();
+      e.stopImmediatePropagation();
 
       if (e.key === "Escape") {
+        finished.current = true;
         onCancel();
         return;
       }
 
       const isMod = ["Control", "Shift", "Alt", "Meta"].includes(e.key);
-      if (isMod) {
-        setMods({
-          ctrl: e.ctrlKey,
-          shift: e.shiftKey,
-          alt: e.altKey,
-          meta: e.metaKey,
-        });
-        return;
-      }
+      if (isMod) return;
 
       // Require at least one primary modifier (Ctrl, Alt, Meta).
       // Reject Shift‑only shortcuts that would insert a character.
@@ -291,6 +302,7 @@ function Recorder({
       if (!hasPrimaryModifier && (!e.shiftKey || isCharacterKey)) {
         return;
       }
+      finished.current = true;
       onRecord({
         key: e.key,
         ctrl: e.ctrlKey,
@@ -300,23 +312,9 @@ function Recorder({
       });
     };
 
-    const onUp = (e: KeyboardEvent) => {
-      const isMod = ["Control", "Shift", "Alt", "Meta"].includes(e.key);
-      if (isMod) {
-        setMods({
-          ctrl: e.ctrlKey,
-          shift: e.shiftKey,
-          alt: e.altKey,
-          meta: e.metaKey,
-        });
-      }
-    };
-
     window.addEventListener("keydown", onDown, { capture: true });
-    window.addEventListener("keyup", onUp, { capture: true });
     return () => {
       window.removeEventListener("keydown", onDown, { capture: true });
-      window.removeEventListener("keyup", onUp, { capture: true });
     };
   }, [onRecord, onCancel]);
 

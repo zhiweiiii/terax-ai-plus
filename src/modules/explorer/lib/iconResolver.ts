@@ -1,7 +1,7 @@
 import catppuccinIcons from "@iconify-json/catppuccin/icons.json";
-import { EXT_TO_LANGUAGE_ID } from "./constants";
-import * as fileIconsMod from "./fileIcons";
-import * as folderIconsMod from "./folderIcons";
+import { EXT_TO_LANGUAGE_ID } from "@/modules/explorer/lib/constants";
+import * as fileIconsMod from "@/modules/explorer/lib/fileIcons";
+import * as folderIconsMod from "@/modules/explorer/lib/folderIcons";
 
 const catFileNames = fileIconsMod.fileNames as Record<string, string>;
 const catFileExtensions = fileIconsMod.fileExtensions as Record<string, string>;
@@ -33,11 +33,16 @@ function toIconifySlug(name: string): string {
 
 function catBody(iconName: string): string | null {
   const slug = toIconifySlug(iconName);
-  const direct = cat.icons[slug];
+  const direct = Object.getOwnPropertyDescriptor(cat.icons, slug)?.value;
   if (direct) return direct.body;
-  const alias = cat.aliases?.[slug];
+  const alias = cat.aliases
+    ? Object.getOwnPropertyDescriptor(cat.aliases, slug)?.value
+    : undefined;
   if (alias) {
-    const parent = cat.icons[alias.parent];
+    const parent = Object.getOwnPropertyDescriptor(
+      cat.icons,
+      alias.parent,
+    )?.value;
     if (parent) return parent.body;
   }
   return null;
@@ -80,7 +85,10 @@ export function fileIconUrl(name: string): string {
       const url = buildDataUrl(iconName);
       if (url) return url;
     }
-    const langId = EXT_TO_LANGUAGE_ID[ext];
+    const langId: string | undefined = Object.getOwnPropertyDescriptor(
+      EXT_TO_LANGUAGE_ID,
+      ext,
+    )?.value;
     if (langId) {
       const iconByLang = catLanguageIds[langId];
       if (iconByLang) {

@@ -1,6 +1,5 @@
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
-import type { ReactNode } from "react";
 import type { RepoSyncItem, SyncProgress } from "./useMultiRepoSourceControl";
 
 function phaseText(phase: RepoSyncItem["phase"]): {
@@ -24,7 +23,7 @@ function phaseText(phase: RepoSyncItem["phase"]): {
     case "no-upstream":
       return { text: "No upstream", tone: "warn" };
     case "diverged":
-      return { text: "Diverged — resolve manually", tone: "warn" };
+      return { text: "Diverged, resolve manually", tone: "warn" };
     case "failed":
       return { text: phase.error, tone: "bad" };
   }
@@ -40,15 +39,12 @@ const TONE_CLASS = {
 
 /**
  * Inline per-repo progress for the remote-action dialogs, mirroring the
- * panel's SyncProgressList. `renderFailed` lets the caller attach an action
- * (e.g. a force retry) to failed rows.
+ * panel's SyncProgressList.
  */
 export function DialogSyncProgress({
   progress,
-  renderFailed,
 }: {
   progress: SyncProgress;
-  renderFailed?: (item: RepoSyncItem) => ReactNode;
 }) {
   const done = progress.items.filter(
     (i) =>
@@ -62,7 +58,7 @@ export function DialogSyncProgress({
         {progress.running ? <Spinner className="size-3" /> : null}
         <span className="text-[10.5px] font-medium text-foreground/85">
           {progress.running
-            ? `Working on ${done + 1}/${progress.items.length}`
+            ? `Working on ${Math.min(done + 1, progress.items.length)}/${progress.items.length}`
             : `${progress.items.length} ${progress.items.length === 1 ? "repo" : "repos"} finished`}
         </span>
       </div>
@@ -77,10 +73,12 @@ export function DialogSyncProgress({
               <span className="min-w-0 flex-1 truncate text-muted-foreground">
                 {item.name}
               </span>
-              <span className={cn("shrink-0 truncate", TONE_CLASS[tone])}>
+              <span
+                title={text}
+                className={cn("max-w-[55%] truncate", TONE_CLASS[tone])}
+              >
                 {text}
               </span>
-              {item.phase.kind === "failed" ? renderFailed?.(item) : null}
             </li>
           );
         })}

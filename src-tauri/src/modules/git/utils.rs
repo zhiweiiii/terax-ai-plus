@@ -67,12 +67,15 @@ pub fn resolve_within_repo(repo_root: &Path, rel: &str) -> Result<PathBuf> {
         return Err(GitError::InvalidPath(rel.into()));
     }
     let joined = repo_root.join(rel);
+    if std::fs::symlink_metadata(&joined).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return resolve_deleted_within_repo(repo_root, &joined, rel);
+    }
     match std::fs::canonicalize(&joined) {
         Ok(canonical) => {
             if !canonical.starts_with(repo_root) {
                 return Err(GitError::PathOutsideWorkspace(canonical));
             }
-            Ok(canonical)
+            Ok(joined)
         }
         // Deleted path (staging a removal): validate via nearest existing ancestor.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -122,5 +125,3 @@ fn resolve_deleted_within_repo(repo_root: &Path, joined: &Path, rel: &str) -> Re
         }
     }
 }
-
-

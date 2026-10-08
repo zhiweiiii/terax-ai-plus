@@ -1,6 +1,5 @@
 import { type GitBranchEntry, native } from "@/lib/native";
-import { useState } from "react";
-import { errorToast } from "@/lib/errorToast";
+import { useRepositoryOperation } from "@/modules/source-control/useRepositoryOperation";
 import { toast } from "sonner";
 import { BranchConfirmDialog } from "./BranchConfirmDialog";
 
@@ -23,26 +22,28 @@ export function DeleteBranchDialog({
   branch: GitBranchEntry | null;
   onDeleted: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const { busy, run } = useRepositoryOperation(
+    open,
+    JSON.stringify([repoRoot, branch?.name, branch?.kind]),
+  );
   const remote = branch?.kind === "remote";
 
   const submit = async () => {
-    if (!branch || !repoRoot || busy) return;
-    setBusy(true);
-    try {
-      await native.gitDeleteBranch(repoRoot, branch.name, { remote });
-      toast.success(
-        remote
-          ? `Deleted remote branch ${branch.name}`
-          : `Deleted branch ${branch.name} in ${repoName}`,
-      );
-      onOpenChange(false);
-      onDeleted();
-    } catch (e) {
-      errorToast(`Could not delete ${branch.name}`, e);
-    } finally {
-      setBusy(false);
-    }
+    if (!branch || !repoRoot || branch.isHead) return;
+    await run(
+      (workspace) =>
+        native.gitDeleteBranch(repoRoot, branch.name, { remote }, workspace),
+      () => {
+        toast.success(
+          remote
+            ? `Deleted remote branch ${branch.name}`
+            : `Deleted branch ${branch.name} in ${repoName}`,
+        );
+        onOpenChange(false);
+        onDeleted();
+      },
+      `Could not delete ${branch.name}`,
+    );
   };
 
   return (

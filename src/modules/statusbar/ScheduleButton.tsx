@@ -11,7 +11,7 @@ import { Clock01Icon, Delete02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /** A command queued to run later, as the backend reports it. */
@@ -56,30 +56,39 @@ export function ScheduleButton({ leafId }: Props) {
   const [time, setTime] = useState("06:30");
   const [dateTime, setDateTime] = useState("");
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const refreshEpoch = useRef(0);
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [storageError, setStorageError] = useState<string | null>(null);
   // Re-renders the countdowns. Only ticks while the panel is open.
   const [, setTick] = useState(0);
 
   const refresh = useCallback(() => {
+    const epoch = ++refreshEpoch.current;
     void invoke<ScheduledJob[]>("schedule_list")
       .then((items) => {
+        if (epoch !== refreshEpoch.current) return;
         setJobs(items);
         setStorageError(null);
       })
-      .catch((e) => setStorageError(String(e)));
+      .catch((e) => {
+        if (epoch === refreshEpoch.current) setStorageError(String(e));
+      });
   }, []);
 
   // Desktop and phone share the backend queue.
   useEffect(() => {
     refresh();
-    const errors = listen<string>("terax:schedule-error", (e) =>
-      setStorageError(e.payload),
-    );
+    const errors = listen<string>("terax:schedule-error", (e) => {
+      refreshEpoch.current += 1;
+      setStorageError(e.payload);
+    });
     const stop = listen<ScheduledJob[]>("terax:schedules", (e) => {
+      refreshEpoch.current += 1;
       setJobs(Array.isArray(e.payload) ? e.payload : []);
     });
     return () => {
+      refreshEpoch.current += 1;
       void stop.then((off) => off());
       void errors.then((off) => off());
     };
@@ -93,7 +102,7 @@ export function ScheduleButton({ leafId }: Props) {
   }, [open, refresh]);
 
   const submit = () => {
-    if ((target === "terminal" && leafId === null) || saving) return;
+    if ((target === "terminal" && leafId === null) || savingRef.current) return;
     const text = command.trim();
     if (text === "") {
       toast.error("先填写要发送的内容");
@@ -117,6 +126,7 @@ export function ScheduleButton({ leafId }: Props) {
       toast.error("请选择每日发送时间");
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     void invoke("schedule_add_at", {
       target,
@@ -131,16 +141,19 @@ export function ScheduleButton({ leafId }: Props) {
       dailyTime: mode === "daily" ? time : null,
     })
       .then(() => {
-        setCommand("");
-        setHours("");
-        setMinutes("");
+        setCommand((current) => (current === command ? "" : current));
+        setHours((current) => (current === hours ? "" : current));
+        setMinutes((current) => (current === minutes ? "" : current));
         toast.success(
           mode === "daily" ? `已安排：每天 ${time} 发送` : "已添加定时任务",
         );
         refresh();
       })
       .catch((e) => errorToast("排队失败", String(e)))
-      .finally(() => setSaving(false));
+      .finally(() => {
+        savingRef.current = false;
+        setSaving(false);
+      });
   };
 
   const cancel = (id: number) => {

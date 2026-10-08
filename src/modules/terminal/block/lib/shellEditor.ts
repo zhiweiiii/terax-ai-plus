@@ -46,7 +46,7 @@ export type ShellEditorOptions = {
   fontSize: number;
   fontWeight: string;
   placeholderText?: string;
-  onSubmit: (text: string) => void;
+  onSubmit: (text: string) => boolean;
   onInterrupt: () => void;
   /** Escape with no completion open; return true when handled. */
   onEscape?: () => boolean;
@@ -357,6 +357,7 @@ export function createShellEditor(opts: ShellEditorOptions): ShellEditorHandle {
   const themeComp = new Compartment();
   const highlightComp = new Compartment();
   const editableComp = new Compartment();
+  const historyComp = new Compartment();
 
   const clear = (view: EditorView) =>
     view.dispatch({
@@ -371,8 +372,7 @@ export function createShellEditor(opts: ShellEditorOptions): ShellEditorHandle {
           // Enter always runs the line (Tab is accept). Predictable shell UX.
           const text = view.state.doc.toString();
           if (!text.trim()) return true;
-          opts.onSubmit(text);
-          clear(view);
+          if (opts.onSubmit(text) !== false) clear(view);
           return true;
         },
       },
@@ -399,7 +399,7 @@ export function createShellEditor(opts: ShellEditorOptions): ShellEditorHandle {
   const state = EditorState.create({
     doc: "",
     extensions: [
-      history(),
+      historyComp.of(history()),
       drawSelection({ cursorBlinkRate: 1100 }),
       rectangularSelection(),
       crosshairCursor(),
@@ -453,11 +453,14 @@ export function createShellEditor(opts: ShellEditorOptions): ShellEditorHandle {
     focus: () => view.focus(),
     blur: () => view.contentDOM.blur(),
     getValue: () => view.state.doc.toString(),
-    setValue: (text) =>
+    setValue: (text) => {
+      view.dispatch({ effects: historyComp.reconfigure([]) });
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
         selection: { anchor: text.length },
-      }),
+      });
+      view.dispatch({ effects: historyComp.reconfigure(history()) });
+    },
     clear: () => clear(view),
     setEditable: (editable) =>
       view.dispatch({

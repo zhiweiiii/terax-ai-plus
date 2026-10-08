@@ -14,7 +14,7 @@ export function resolveControlContext(
   activeTabId: number,
   activeSpaceId: string,
   callerPaneId?: number,
-): ControlContext {
+): ControlContext | null {
   if (callerPaneId != null) {
     const callerTab = tabs.find(
       (tab) => tab.kind === "terminal" && hasLeaf(tab.paneTree, callerPaneId),
@@ -28,6 +28,7 @@ export function resolveControlContext(
         source: "caller",
       };
     }
+    return null;
   }
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId);

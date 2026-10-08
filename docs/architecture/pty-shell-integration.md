@@ -1,10 +1,32 @@
 # PTY shell 集成
 
+## 桌面输入等待与顺序（2026-10-08）
+
+pty_write 原先是同步 Tauri 命令，等待 ConPTY writer 或慢读程序时可能占用界面线程。现在复制有界 raw 输入后将尺寸 claim 和 write_all 移到 blocking 池，注册表锁只用于获取 Session，不跨等待持有。单次原生输入限 4 MiB，已退出和锁异常明确失败。
+
+异步写入不能靠后台线程抢 mutex 决定输入顺序，因此前端每个 PtySession 串行提交，最多一条写 IPC 在途；所有等待输入共限 4 MiB 与 2048 条，失败不阻断后续独立写入。关闭或退出后排队输入不再 invoke，队列随完成释放容量。raw bytes 和 PTY ID header 保持不变，不将不同协议帧合并，也不修改光标或 IME。exit 回调即使抛错也释放 channel handler。
+
+实际 bridge 模块隔离验证两条输入顺序、失败恢复、单条/总字节和条数限制、容量回收、关闭取消及异常 exit 清理，通过。原生 clippy/fmt 通过；没有以真实 Windows Codex/Claude 运行验证替代记录，也不将此项描述为所有光标/卡顿问题唯一根因。
+
+## 原生附件进入 WSL
+
+Windows 文件拖入和剪贴板截图路径先按目标 Session 保存的环境转换，仅 WSL 的 Windows 原生路径调用 `wsl_native_paths`，本机和已经是 Linux 路径时零额外 IPC。依据 [Microsoft WSL 路径转换说明](https://learn.microsoft.com/en-us/windows/dev-environment/wsl-interop)，使用发行版内的 `wslpath -a -u`，不硬编码可配置的 automount 根目录。Windows 路径是固定 sh 脚本的位置参数，不拼进源码，转换后仍按实际 shell/agent 引用。
+
+同发行版 wsl$/wsl.localhost UNC 直接还原 Linux 路径，其他发行版明确拒绝。单批最多 128 个路径和 24000 个 UTF-16 单元，拒绝控制字符；子进程复用隐藏窗口、Windows Job、30 秒期限和 64 KiB 输出限制，文件 IO/进程等待在 blocking 池。完成时检查同一 Session/PTY，重启或关闭的旧结果不粘贴。纯路径计划与前端 Session 边界已隔离验证，实际 WSL 子进程未执行。
+
 Codex TUI 由 xterm 原生渲染和定位输入法。曾经的自定义输入锚点改写 xterm 私有接口，在用户环境出现输入卡顿和画面延迟刷新，现已移除。输出回调不额外计算输入光标位置，也不通过定时强制重绘正文。
 
 本文是 `TERAX.md` 的展开。与 `TERAX.md` 冲突时以 `TERAX.md` 为准。
 
 ## 会话模型
+
+OSC 中的 agent 命令识别只检查执行位置，普通参数里出现 codex/claude 不会误标；兼容带引号的 Windows 路径、常见 CLI 扩展名、包装命令和复合命令。恢复 ID 沿用同一词法切分与会话列表的 UUID 校验，不从一整段引号参数里推测 resume。它是保守的启动提示，不执行或完整解释任意 shell 脚本。
+
+PTY 缺少有效 Job 时启动失败并清理，不保留无树级回收保护的 shell。reader/flusher/waiter 线程启动失败会终止进程并唤醒输出线程；PowerShell prompt 在集成函数执行前保存原始成功状态。
+
+ConPTY 的 master 用所有权包装串行关闭，最后引用即使在手机或输出线程释放也必须取得创建/关闭锁。关闭终端或 shell 退出时主动终止 Windows Job，避免其他 Arc 引用延迟回收后代。只有输出线程发送正文，退出等待它排空后才发送通知。初始化脚本使用独立临时文件原子替换，多进程启动不共享临时文件名。
+
+WSL 探测子进程有 30 秒期限和每路 64 KiB 输出上限，失败与超时清理 Windows 启动器。运行状态读取 `--running --quiet`，不解析本地化的状态词。原生 macOS/Linux 初始化已删除，WSL 内 Bash/Zsh/Fish 和 Windows Git Bash 仍保留。
 
 一个终端标签页对应一个 PTY 会话。会话存在 `PtyState`（`src-tauri/src/modules/pty/mod.rs`）里：
 
@@ -84,11 +106,33 @@ PowerShell 的 C 标记增加内部 `terax-start=<epoch-ms>;` 前缀，时间在
 
 ## 不变量
 
+Fish 初始化在未启用或重复加载时只返回当前脚本，不退出整个 shell；调用用户 prompt 前才恢复上一命令状态，避免函数存在性检查把失败状态改成成功。
+
 - 不验证"快速狂开标签页时首个标签是否稳定"，就不要移除 `CONPTY_LIFECYCLE_LOCK`。
 - 在 Windows 上不要在没有替代孤儿守卫的情况下停用 Job Object。
 - 传给 ConPTY 的 cwd 必须用反斜杠；到达前端的 OSC 7 cwd 则统一为正斜杠。
 - PATH 上找到的 shell 必须是非零长度的可执行文件，应用执行别名要跳过。
 - web 桥接共享同一个 `Arc<Session>`：广播在 flusher 里，新的消费者（手机观看者）必须走 `Session::web_subscribe`，不能自己私存一份字节流。
+
+
+## 输入栏粘贴
+
+RendererPool 的 pasteIntoLeaf 在终端禁用 stdin 时由 SlotAdapter.pasteLeafInput 路由到 Session。shell 输入栏登记 leaf 的粘贴回调，用公开 CodeMirror replaceSelection 更新草稿；没有挂载输入栏时保存到所属 leaf 的草稿，不发给 PTY。运行态继续用 xterm 原生 bracketed paste。退出、销毁或输入归属不为 shell 的会话拒绝走输入栏。提交结果为 boolean，拒绝时保留草稿。
+
+每个 Session 保存终端所属空间的 WorkspaceEnv 副本，由 TerminalStack 经面板树传递，不能在异步启动或重启时再读取全局当前环境。缺失空间归属的标签不启动；切换空间不改变已有后台 shell 的运行环境。
+
+终端及 block 搜索由 searchBufferLine 将匹配位置映射到公开 xterm 单元格列与宽度，不能使用 UTF-16 下标作为列。中文宽字符、组合字符、代理对与小写展开共享同一映射，仅在实际命中的行创建列索引。
+
+
+输入栏的草稿随编辑同步写入所属 leaf，切换时重置撤销历史；历史弹层和行内建议按请求代次拒绝关闭、编辑或销毁后的旧响应。启动和退出回调按 Session 身份与启动代次隔离，避免旧 shell 干扰新 shell。重启返回实际成功状态，启动期间不重复启动；调用方不能将拒绝或启动失败显示为切换成功。
+
+## 实际 shell 与路径输入
+
+shell_init::build_command 同时返回命令和引用类型，Session 保存 shell_kind；pty_open 的结果为 `{ id, shellKind }`，不额外探测或按全局 shell 设置猜测。类型区分 PowerShell、POSIX、fish、cmd 和未知；WSL 根据实际登录 shell 判断。前端在异步剪贴板读取完成后才按目标 Session 引用路径，拖放也走同一路径；agent 提示词路径不使用 shell 引号规则。
+
+quoteForShell 拒绝控制字符。PowerShell 以单引号引用并加倍 ASCII/弯单引号，避免 `$()`、变量及弯引号重新参与语法；POSIX 和 fish 分别处理单引号与反斜杠。cmd 的 `%`/`!`/双引号没有采用不可靠替换，而是拒绝并提示使用 PowerShell。未知/未启动 shell 不自动输入路径。目录切换使用 shell 专用字面路径命令，新终端通过启动 cwd 设置目录，不使用计时器补发命令。
+
+后台一次性本机命令只接受 PowerShell，缺失时明确失败；WSL 使用 sh，调用方绑定 WorkspaceEnv 并按该语法引用。交互 cmd 终端仍然支持。Windows 原生路径进入 WSL 的文件系统转换独立于引用，需要另行验证，不能仅凭引号正确认为路径可访问。
 
 ## 另见
 

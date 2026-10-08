@@ -4,7 +4,7 @@
 @import "./fonts.css";
 @import "./code-highlight.css";
 
-@source "../../node_modules/streamdown/dist/index.js";
+@source "../../node_modules/streamdown/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -176,9 +176,7 @@ html[data-chrome="borderless"] .terax-bg-surface {
   zoom: calc(1 / var(--app-zoom));
 }
 
-/* Custom window chrome (Linux/Windows): the OS gives us a transparent
- * borderless window, and we paint the rounded corners + border + shadow
- * ourselves so the app doesn't look naked on GNOME/KDE/Hyprland. */
+/* Paint the border and rounded corners of the transparent Windows window. */
 html[data-chrome="borderless"],
 html[data-chrome="borderless"] body {
   background: transparent !important;
@@ -193,7 +191,7 @@ html[data-chrome="borderless"] #settings-root {
 }
 
 /*
- * xterm.js overrides — kept outside @layer so they win against the addon's
+ * xterm.js overrides, kept outside @layer so they win against the addon's
  * own stylesheet (which is not in any layer and would otherwise override).
  *
  * xterm's scrollable element owns the history position. Its slider is an
@@ -288,23 +286,7 @@ textarea,
   display: none !important;
 }
 
-.no-scrollbar-deep,
-.no-scrollbar-deep * {
-  scrollbar-width: none !important;
-  -ms-overflow-style: none !important;
-}
-.no-scrollbar-deep::-webkit-scrollbar,
-.no-scrollbar-deep *::-webkit-scrollbar {
-  width: 0 !important;
-  height: 0 !important;
-  display: none !important;
-}
-
-/* Kill native scrollbars everywhere by default — Linux/Windows ship chunky
- * Chromium bars that break the chrome, and macOS WKWebView flashes its overlay
- * scrollbar briefly during layout transitions (AI panel open, pane split,
- * window resize) which looks like a glitch. Visible scroll affordances are
- * provided per-region via shadcn <ScrollArea>. */
+/* Regions opt into visible scroll controls; xterm uses its own slider. */
 html,
 html *,
 html *::before,
@@ -325,58 +307,6 @@ html *::-webkit-scrollbar {
   --dur-slow: 320ms;
   --ease-premium: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@keyframes terax-collapsible-down {
-  from {
-    height: 0;
-    opacity: 0;
-  }
-  to {
-    height: var(--radix-collapsible-content-height);
-    opacity: 1;
-  }
-}
-
-@keyframes terax-collapsible-up {
-  from {
-    height: var(--radix-collapsible-content-height);
-    opacity: 1;
-  }
-  to {
-    height: 0;
-    opacity: 0;
-  }
-}
-
-.terax-collapsible-content {
-  overflow: hidden;
-}
-.terax-collapsible-content[data-state="open"] {
-  animation: terax-collapsible-down var(--dur-base) var(--ease-soft);
-}
-.terax-collapsible-content[data-state="closed"] {
-  animation: terax-collapsible-up var(--dur-base) var(--ease-soft);
-}
-
-/* Height auto<->0 reveal without JS measuring: animate the grid track from 0fr
- * to 1fr. The inner child must be the sole grid row with min-height:0. Used by
- * the docked AI input bar and the composer voice-status row. */
-.terax-reveal {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition:
-    grid-template-rows var(--dur-base) var(--ease-premium),
-    opacity var(--dur-base) var(--ease-premium);
-  opacity: 0;
-}
-.terax-reveal[data-state="open"] {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-.terax-reveal > * {
-  min-height: 0;
-  overflow: hidden;
 }
 
 @keyframes terax-panel-in {
@@ -455,9 +385,6 @@ html *::-webkit-scrollbar {
     --dur-fast: 0.01ms;
     --dur-base: 0.01ms;
     --dur-slow: 0.01ms;
-  }
-  .terax-reveal {
-    transition: none;
   }
   .terax-shimmer {
     animation: none;

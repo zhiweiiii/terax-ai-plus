@@ -30,7 +30,7 @@ import type {
 let cachedHome: string | null = null;
 void homeDir()
   .then((h) => {
-    cachedHome = h.replace(/\/+$/, "");
+    cachedHome = h.replace(/\\/g, "/").replace(/\/+$/, "");
   })
   .catch(() => {});
 
@@ -51,14 +51,17 @@ const EMPTY: VisibleBlocks = { blocks: [], sticky: null };
 function fmtDuration(ms: number): string | null {
   if (!Number.isFinite(ms) || ms <= 0) return null;
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
-  if (ms < 3_600_000) {
-    const m = Math.floor(ms / 60000);
-    const s = Math.round((ms % 60000) / 1000);
+  if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
     return s ? `${m}m ${s}s` : `${m}m`;
   }
-  const h = Math.floor(ms / 3_600_000);
-  const m = Math.round((ms % 3_600_000) / 60000);
+  const minutes = Math.round(ms / 60000);
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
   return m ? `${h}h ${m}m` : `${h}h`;
 }
 
@@ -80,50 +83,78 @@ function copy(text: string, message: string) {
   void navigator.clipboard
     .writeText(text)
     .then(() => toast.success(message))
-    .catch(() => {});
+    .catch((error) => toast.error(`Could not copy block: ${String(error)}`));
 }
 
-function signature(v: VisibleBlocks): string {
-  let s = v.sticky?.id ?? "";
-  for (const b of v.blocks) {
-    s += `|${b.id}:${Math.round(b.top)}:${Math.round(b.bottom)}:${b.running}`;
-  }
-  return s;
+function sameBlock(
+  a: PositionedBlock | null,
+  b: PositionedBlock | null,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.id === b.id &&
+    a.command === b.command &&
+    a.cwd === b.cwd &&
+    a.exitCode === b.exitCode &&
+    a.running === b.running &&
+    a.ok === b.ok &&
+    a.startedAt === b.startedAt &&
+    a.finishedAt === b.finishedAt &&
+    a.top === b.top &&
+    a.bottom === b.bottom &&
+    a.headerTop === b.headerTop
+  );
 }
 
 export function BlockOverlay(props: Props) {
   const { subscribe, getVisible } = props;
   const [vis, setVis] = useState<VisibleBlocks>(EMPTY);
   const [searchId, setSearchId] = useState<string | null>(null);
-  const lastSig = useRef("");
+  const previous = useRef<VisibleBlocks | null>(null);
 
   useEffect(() => {
     const update = () => {
       const v = getVisible();
-      const sig = signature(v);
-      if (sig === lastSig.current) return;
-      lastSig.current = sig;
+      const old = previous.current;
+      if (
+        old &&
+        sameBlock(old.sticky, v.sticky) &&
+        old.blocks.length === v.blocks.length &&
+        old.blocks.every((block, index) => sameBlock(block, v.blocks[index]))
+      )
+        return;
+      previous.current = v;
       setVis(v);
     };
     update();
     return subscribe(update);
   }, [subscribe, getVisible]);
 
+  useEffect(() => () => props.clearSearch(), [props.clearSearch]);
+
+  const openSearch = (id: string) => {
+    props.clearSearch();
+    setSearchId(id);
+  };
+
   const closeSearch = () => {
     props.clearSearch();
     setSearchId(null);
+    props.onRestoreFocus();
   };
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
       {vis.blocks.map((b) => (
-        <BlockChrome key={b.id} block={b} all={props} onSearch={setSearchId} />
+        <BlockChrome key={b.id} block={b} all={props} onSearch={openSearch} />
       ))}
       {vis.sticky && (
-        <StickyHeader block={vis.sticky} all={props} onSearch={setSearchId} />
+        <StickyHeader block={vis.sticky} all={props} onSearch={openSearch} />
       )}
       {searchId && (
         <SearchBar
+          key={searchId}
           blockId={searchId}
           searchBlock={props.searchBlock}
           revealMatch={props.revealMatch}
@@ -331,10 +362,13 @@ function SearchBar({
       <HugeiconsIcon icon={Search01Icon} size={12} strokeWidth={1.75} />
       <input
         ref={inputRef}
+        aria-label="Find in block"
         className="bt-search-input"
         placeholder="Find in block"
         onChange={(e) => run(e.target.value)}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          e.stopPropagation();
           if (e.key === "Enter") {
             e.preventDefault();
             nav(e.shiftKey ? -1 : 1);

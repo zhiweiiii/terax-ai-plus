@@ -1,5 +1,5 @@
 import { memo, type ReactElement } from "react";
-import type { GraphEdge, GraphRow } from "./lib/graph";
+import type { GraphEdge, GraphRow } from "@/modules/git-history/lib/graph";
 
 export const LANE_WIDTH = 14;
 export const RAIL_PADDING_X = 8;
@@ -111,11 +111,11 @@ export const GraphRail = memo(function GraphRail({
 
   return (
     <svg
+      aria-hidden="true"
       width={width}
       height={rowHeight}
       viewBox={`0 0 ${width} ${rowHeight}`}
-      aria-hidden
-      className="shrink-0 overflow-visible"
+      className="shrink-0 overflow-hidden"
     >
       {row.topEdges.map((e) => renderTopEdge(e, midY))}
       {row.bottomEdges.map((e) => renderBottomEdge(e, midY, rowHeight))}

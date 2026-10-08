@@ -1,4 +1,12 @@
+import {
+  type EDITOR_THEMES,
+  isEditorThemeId,
+  normalizePreference,
+} from "@/modules/settings/validation";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
+
+export { EDITOR_THEMES, isEditorThemeId } from "@/modules/settings/validation";
+
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LazyStore } from "@tauri-apps/plugin-store";
 
@@ -10,42 +18,11 @@ export type BackgroundKind = "none" | "image";
 
 export type TerminalCursorStyle = "bar" | "block" | "underline";
 
-export const EDITOR_THEMES = [
-  "kanagawa",
-  "kanagawa-lotus",
-  "kanagawa-dragon",
-  "tokyo-night",
-  "catppuccin-mocha",
-  "catppuccin-latte",
-  "rose-pine",
-  "rose-pine-dawn",
-  "everforest",
-  "everforest-light",
-  "dracula",
-  "solarized-dark",
-  "solarized-light",
-  "nord",
-  "gruvbox-dark",
-  "atomone",
-  "aura",
-  "copilot",
-  "github-dark",
-  "github-light",
-  "xcode-dark",
-  "xcode-light",
-] as const;
-
 export type EditorThemeId = (typeof EDITOR_THEMES)[number];
 
 /** "auto" follows the active app theme's editorTheme pairing (resolved live). */
 export const EDITOR_THEME_AUTO = "auto" as const;
 export type EditorThemePref = typeof EDITOR_THEME_AUTO | EditorThemeId;
-
-export function isEditorThemeId(v: unknown): v is EditorThemeId {
-  return (
-    typeof v === "string" && (EDITOR_THEMES as readonly string[]).includes(v)
-  );
-}
 
 export const EDITOR_THEME_MODE: Record<EditorThemeId, "light" | "dark"> = {
   kanagawa: "dark",
@@ -295,10 +272,27 @@ const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
 // window can listen.
 const PREFS_CHANGED_EVENT = "terax://prefs-changed";
 
-async function writePref<T>(key: string, value: T): Promise<void> {
+let preferenceMutation = Promise.resolve();
+
+function enqueuePreferenceMutation(work: () => Promise<void>): Promise<void> {
+  const operation = preferenceMutation.then(work);
+  preferenceMutation = operation.catch(() => {});
+  return operation;
+}
+
+async function writeStoredPreference(
+  key: PrefKey,
+  raw: unknown,
+): Promise<void> {
+  const value = normalizePreference(key, raw, DEFAULT_PREFERENCES);
   await store.set(key, value);
   await store.save();
   await emit(PREFS_CHANGED_EVENT, { key, value });
+}
+
+function writePref(key: PrefKey, raw: unknown): Promise<void> {
+  const value = normalizePreference(key, raw, DEFAULT_PREFERENCES);
+  return enqueuePreferenceMutation(() => writeStoredPreference(key, value));
 }
 
 export async function loadPreferences(): Promise<Preferences> {
@@ -306,7 +300,17 @@ export async function loadPreferences(): Promise<Preferences> {
   // `plugin:store|get` per setting and is the dominant boot cost.
   const entries = await store.entries();
   const map = new Map<string, unknown>(entries);
-  const get = <T>(k: string): T | undefined => map.get(k) as T | undefined;
+  const get = <T>(key: string): T | undefined => {
+    const value = map.get(key);
+    if (value === undefined) return undefined;
+    if (key === LEGACY_KEY_SHOW_HIDDEN_DIRS && typeof value !== "boolean")
+      return undefined;
+    return (
+      Object.getOwnPropertyDescriptor(DEFAULT_PREFERENCES, key)
+        ? normalizePreference(key as PrefKey, value, DEFAULT_PREFERENCES)
+        : value
+    ) as T | undefined;
+  };
   return {
     theme: get<ThemePref>(KEY_THEME) ?? DEFAULT_PREFERENCES.theme,
     themeId: get<string>(KEY_THEME_ID) ?? DEFAULT_PREFERENCES.themeId,
@@ -342,8 +346,7 @@ export async function loadPreferences(): Promise<Preferences> {
       get<boolean>(LEGACY_KEY_SHOW_HIDDEN_DIRS) ??
       DEFAULT_PREFERENCES.showHidden,
     hideGitIgnored:
-      get<boolean>(KEY_HIDE_GIT_IGNORED) ??
-      DEFAULT_PREFERENCES.hideGitIgnored,
+      get<boolean>(KEY_HIDE_GIT_IGNORED) ?? DEFAULT_PREFERENCES.hideGitIgnored,
     agentKeyPassthrough:
       get<boolean>(KEY_AGENT_KEY_PASSTHROUGH) ??
       DEFAULT_PREFERENCES.agentKeyPassthrough,
@@ -351,9 +354,9 @@ export async function loadPreferences(): Promise<Preferences> {
       get<boolean>(KEY_COMPACT_FOLDERS) ?? DEFAULT_PREFERENCES.compactFolders,
     claudeGateway:
       get<ClaudeGatewayConfig>(KEY_CLAUDE_GATEWAY) ??
-      migrateAgentEnvPresets(get<LegacyAgentEnvPreset[]>(
-        LEGACY_KEY_AGENT_ENV_PRESETS,
-      )),
+      migrateAgentEnvPresets(
+        get<LegacyAgentEnvPreset[]>(LEGACY_KEY_AGENT_ENV_PRESETS),
+      ),
     explorerGitDecorations:
       get<boolean>(KEY_EXPLORER_GIT_DECORATIONS) ??
       DEFAULT_PREFERENCES.explorerGitDecorations,
@@ -428,17 +431,26 @@ export async function loadPreferences(): Promise<Preferences> {
   };
 }
 
-export async function setLspActivation(
+export function setLspActivation(
   id: string,
   value: LspActivation | null,
 ): Promise<void> {
-  const current =
-    ((await store.get(KEY_LSP_ACTIVATION)) as Record<string, LspActivation>) ??
-    {};
+  return enqueuePreferenceMutation(() => updateLspActivation(id, value));
+}
+
+async function updateLspActivation(
+  id: string,
+  value: LspActivation | null,
+): Promise<void> {
+  const current = normalizePreference(
+    "lspActivation",
+    await store.get(KEY_LSP_ACTIVATION),
+    DEFAULT_PREFERENCES,
+  ) as Record<string, LspActivation>;
   const next = { ...current };
   if (value === null) delete next[id];
   else next[id] = value;
-  await writePref(KEY_LSP_ACTIVATION, next);
+  await writeStoredPreference(KEY_LSP_ACTIVATION, next);
 }
 
 export async function setLspCustomServers(
@@ -596,9 +608,13 @@ export const EMPTY_MODEL_ROUTES: ClaudeModelRoutes = {
 function migrateAgentEnvPresets(
   presets: LegacyAgentEnvPreset[] | undefined,
 ): ClaudeGatewayConfig {
-  if (!presets?.length) return { providers: [], current: null };
+  if (!Array.isArray(presets) || !presets.length)
+    return { providers: [], current: null };
   const providers = presets
-    .filter((preset) => preset.baseUrl)
+    .filter(
+      (preset) =>
+        preset && typeof preset.baseUrl === "string" && preset.baseUrl,
+    )
     // An entry written before tokens were stored in the clear holds only DPAPI
     // ciphertext. Carry the endpoint over with an empty key rather than drop
     // it: the user re-enters one key instead of rebuilding the entry.
@@ -611,7 +627,11 @@ function migrateAgentEnvPresets(
       authStyle: "bearer" as const,
       models: { ...EMPTY_MODEL_ROUTES, default: preset.model ?? "" },
     }));
-  return { providers, current: null };
+  return normalizePreference(
+    "claudeGateway",
+    { providers, current: null },
+    DEFAULT_PREFERENCES,
+  ) as ClaudeGatewayConfig;
 }
 
 export async function setClaudeGateway(
@@ -735,10 +755,22 @@ export async function setEditorFormatter(
   await writePref(KEY_EDITOR_FORMATTER, value);
 }
 
-export async function setEditorFormatterByLang(
-  value: Record<string, EditorFormatter>,
+export function setEditorFormatterByLang(
+  update: (
+    current: Record<string, EditorFormatter>,
+  ) => Record<string, EditorFormatter>,
 ): Promise<void> {
-  await writePref(KEY_EDITOR_FORMATTER_BY_LANG, value);
+  return enqueuePreferenceMutation(async () => {
+    const current = normalizePreference(
+      KEY_EDITOR_FORMATTER_BY_LANG,
+      await store.get(KEY_EDITOR_FORMATTER_BY_LANG),
+      DEFAULT_PREFERENCES,
+    ) as Record<string, EditorFormatter>;
+    await writeStoredPreference(
+      KEY_EDITOR_FORMATTER_BY_LANG,
+      update({ ...current }),
+    );
+  });
 }
 
 export async function setEditorCustomFormatCommand(
@@ -752,13 +784,9 @@ export async function setDefaultWorkspaceEnv(value: string): Promise<void> {
 }
 
 export async function setShortcuts(
-  value: Record<ShortcutId, KeyBinding[]> | {},
+  value: Partial<Record<ShortcutId, KeyBinding[]>>,
 ): Promise<void> {
   await writePref(KEY_SHORTCUTS, value);
-}
-
-export async function resetShortcuts(): Promise<void> {
-  await writePref(KEY_SHORTCUTS, DEFAULT_PREFERENCES.shortcuts);
 }
 
 export type PrefKey = keyof Preferences;
@@ -813,16 +841,32 @@ export async function onPreferencesChange(
   // Same-process writes still fire onChange immediately; cross-window writes
   // arrive via the Tauri event emitted by writePref().
   const unsubLocal = await store.onChange<unknown>((key, value) => {
-    const mapped = map[key];
-    if (mapped) cb(mapped, value);
+    const mapped = Object.getOwnPropertyDescriptor(map, key)
+      ? map[key]
+      : undefined;
+    if (mapped)
+      cb(mapped, normalizePreference(mapped, value, DEFAULT_PREFERENCES));
   });
-  const unsubEvent = await listen<{ key: string; value: unknown }>(
-    PREFS_CHANGED_EVENT,
-    (e) => {
-      const mapped = map[e.payload.key];
-      if (mapped) cb(mapped, e.payload.value);
-    },
-  );
+  let unsubEvent: UnlistenFn;
+  try {
+    unsubEvent = await listen<{ key: string; value: unknown }>(
+      PREFS_CHANGED_EVENT,
+      (e) => {
+        if (!e.payload || typeof e.payload.key !== "string") return;
+        const mapped = Object.getOwnPropertyDescriptor(map, e.payload.key)
+          ? map[e.payload.key]
+          : undefined;
+        if (mapped)
+          cb(
+            mapped,
+            normalizePreference(mapped, e.payload.value, DEFAULT_PREFERENCES),
+          );
+      },
+    );
+  } catch (error) {
+    unsubLocal();
+    throw error;
+  }
   return () => {
     unsubLocal();
     unsubEvent();

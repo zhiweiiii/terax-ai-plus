@@ -339,6 +339,7 @@ export const SHORTCUTS: Shortcut[] = [
 export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "General",
   "Tabs",
+  "Spaces",
   "Panes",
   "Terminal",
   "View",
@@ -387,8 +388,9 @@ function keyFromCode(code: string): string | null {
 export function matchBinding(
   e: KeyboardEvent,
   binding: KeyBinding,
-  id?: ShortcutId
+  id?: ShortcutId,
 ): boolean {
+  if (e.isComposing || e.keyCode === 229) return false;
   const eventKey = e.key.toLowerCase();
   const bindingKey = binding.key.toLowerCase();
 

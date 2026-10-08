@@ -1,4 +1,4 @@
-/* Inter Variable — latin + cyrillic only. */
+/* Inter Variable: latin and cyrillic only. */
 @font-face {
   font-family: 'Inter Variable';
   font-style: normal;
@@ -19,7 +19,7 @@
     U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
-/* JetBrains Mono — woff2 only (every target webview supports it). */
+/* JetBrains Mono: woff2 only (every target webview supports it). */
 @font-face {
   font-family: 'JetBrains Mono';
   font-style: normal;

@@ -26,6 +26,54 @@ export type SerializedTab =
   | { kind: "preview"; url: string; ownerTab?: number }
   | { kind: "markdown"; path: string; ownerTab?: number };
 
+export function isSerializedTabs(value: unknown): value is SerializedTab[] {
+  if (!Array.isArray(value) || value.length > 10000) return false;
+  let remainingNodes = 10000;
+  const validNode = (node: unknown, depth: number): boolean => {
+    if (!node || typeof node !== "object" || depth > 32 || --remainingNodes < 0)
+      return false;
+    const item = node as Record<string, unknown>;
+    if (item.kind === "leaf") {
+      return (
+        (item.cwd === undefined || typeof item.cwd === "string") &&
+        (item.active === undefined || typeof item.active === "boolean")
+      );
+    }
+    return (
+      item.kind === "split" &&
+      (item.dir === "row" || item.dir === "col") &&
+      Array.isArray(item.children) &&
+      item.children.length <= 10000 &&
+      item.children.every((child) => validNode(child, depth + 1))
+    );
+  };
+  return value.every((tab: unknown) => {
+    if (!tab || typeof tab !== "object") return false;
+    const item = tab as Record<string, unknown>;
+    if (item.kind === "terminal") {
+      return (
+        validNode(item.tree, 0) &&
+        (item.blocks === undefined || typeof item.blocks === "boolean") &&
+        (item.customTitle === undefined || typeof item.customTitle === "string")
+      );
+    }
+    if (
+      item.kind !== "editor" &&
+      item.kind !== "markdown" &&
+      item.kind !== "preview"
+    )
+      return false;
+    return (
+      typeof (item.kind === "preview" ? item.url : item.path) === "string" &&
+      (item.ownerTab === undefined ||
+        (typeof item.ownerTab === "number" &&
+          Number.isSafeInteger(item.ownerTab) &&
+          item.ownerTab >= 0 &&
+          item.ownerTab < value.length))
+    );
+  });
+}
+
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : path;
@@ -105,9 +153,7 @@ export function serializeTabs(tabs: Tab[]): SerializedTab[] {
   return out.map((s, i) => {
     const ownerTabId = slots[i]?.tab.ownerTabId;
     if (
-      (s.kind === "editor" ||
-        s.kind === "markdown" ||
-        s.kind === "preview") &&
+      (s.kind === "editor" || s.kind === "markdown" || s.kind === "preview") &&
       ownerTabId !== undefined
     ) {
       const owner = terminalSlot.get(ownerTabId);
@@ -244,7 +290,7 @@ export function hydrateTabs(
   spaceId: string,
   allocId: () => number,
 ): Tab[] {
-  if (!Array.isArray(serialized)) return [];
+  if (!isSerializedTabs(serialized)) return [];
 
   // First pass: hydrate every tab but remember, per serialized slot, the new
   // id of terminal tabs and the serialized owner slot of file tabs.

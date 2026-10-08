@@ -2,11 +2,11 @@ use tauri::{AppHandle, Manager};
 
 use crate::modules::git::operations;
 use crate::modules::git::types::{
-    DiscardEntry, GitBranchListResult, GitCloneOptions, GitCommitFileChange, GitCommitOptions,
-    GitCommitResult, GitCompareResult, GitConfigUserResult, GitDiffContentResult, GitDiffResult,
-    GitFetchResult, GitLogEntry, GitLogFilterOptions, GitMergeResult, GitPanelSnapshot,
-    GitPreCommitChecksResult, GitPushOptions, GitPushResult, GitRebaseResult, GitRemoteEntry,
-    GitRepoHead, GitRepoInfo, GitStatusSnapshot, GitTagCreateOptions, GitWorkspaceSnapshot,
+    DiscardEntry, GitBranchListResult, GitCloneOptions, GitCommitFileChange, GitCommitResult,
+    GitCompareResult, GitConfigUserResult, GitDiffContentResult, GitDiffResult, GitFetchResult,
+    GitLogEntry, GitLogFilterOptions, GitMergeResult, GitPanelSnapshot, GitPreCommitChecksResult,
+    GitPushOptions, GitPushResult, GitRebaseResult, GitRemoteEntry, GitRepoHead, GitRepoInfo,
+    GitStatusSnapshot, GitTagCreateOptions, GitWorkspaceSnapshot,
 };
 use crate::modules::workspace::{WorkspaceEnv, WorkspaceRegistry};
 
@@ -229,8 +229,7 @@ pub async fn git_log_file(
 ) -> Result<Vec<GitLogEntry>, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     blocking(app, move |r| {
-        operations::log_file(r, &repo_root, &path, max_count, skip, &workspace)
-            .map_err(Into::into)
+        operations::log_file(r, &repo_root, &path, max_count, skip, &workspace).map_err(Into::into)
     })
     .await
 }
@@ -325,14 +324,8 @@ pub async fn git_checkout_branch(
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     blocking(app, move |r| {
-        operations::checkout_branch(
-            r,
-            &repo_root,
-            &branch,
-            local_name.as_deref(),
-            &workspace,
-        )
-        .map_err(Into::into)
+        operations::checkout_branch(r, &repo_root, &branch, local_name.as_deref(), &workspace)
+            .map_err(Into::into)
     })
     .await
 }
@@ -380,47 +373,17 @@ pub async fn git_fetch_all(
 }
 
 #[tauri::command]
-pub async fn git_commit_advanced(
-    repo_root: String,
-    message: String,
-    options: GitCommitOptions,
-    workspace: Option<WorkspaceEnv>,
-    app: AppHandle,
-) -> Result<GitCommitResult, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    blocking(app, move |r| {
-        operations::commit_advanced(r, &repo_root, &message, &options, &workspace)
-            .map_err(Into::into)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn git_amend_specific_commit(
-    repo_root: String,
-    target_sha: String,
-    message: String,
-    workspace: Option<WorkspaceEnv>,
-    app: AppHandle,
-) -> Result<GitCommitResult, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    blocking(app, move |r| {
-        operations::amend_specific_commit(r, &repo_root, &target_sha, &message, &workspace)
-            .map_err(Into::into)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn git_commit_reword(
     repo_root: String,
     message: String,
+    expected_sha: String,
     workspace: Option<WorkspaceEnv>,
     app: AppHandle,
 ) -> Result<GitCommitResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     blocking(app, move |r| {
-        operations::commit_reword(r, &repo_root, &message, &workspace).map_err(Into::into)
+        operations::commit_reword(r, &repo_root, &message, &expected_sha, &workspace)
+            .map_err(Into::into)
     })
     .await
 }
@@ -594,8 +557,7 @@ pub async fn git_compare_branches(
 ) -> Result<GitCompareResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     blocking(app, move |r| {
-        operations::compare_branches(r, &repo_root, &left, &right, &workspace)
-            .map_err(Into::into)
+        operations::compare_branches(r, &repo_root, &left, &right, &workspace).map_err(Into::into)
     })
     .await
 }
@@ -751,8 +713,7 @@ pub async fn git_reset(
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     blocking(app, move |r| {
-        operations::reset(r, &repo_root, &mode, target.as_deref(), &workspace)
-            .map_err(Into::into)
+        operations::reset(r, &repo_root, &mode, target.as_deref(), &workspace).map_err(Into::into)
     })
     .await
 }
@@ -786,64 +747,6 @@ pub async fn git_cherry_pick(
 }
 
 #[tauri::command]
-pub async fn git_reword_commit(
-    repo_root: String,
-    sha: String,
-    message: String,
-    workspace: Option<WorkspaceEnv>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    blocking(app, move |r| {
-        operations::reword_commit(r, &repo_root, &sha, &message, &workspace)
-            .map_err(Into::into)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn git_fixup_commit(
-    repo_root: String,
-    sha: String,
-    workspace: Option<WorkspaceEnv>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    blocking(app, move |r| {
-        operations::fixup_commit(r, &repo_root, &sha, &workspace).map_err(Into::into)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn git_squash_commit(
-    repo_root: String,
-    sha: String,
-    workspace: Option<WorkspaceEnv>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    blocking(app, move |r| {
-        operations::squash_commit(r, &repo_root, &sha, &workspace).map_err(Into::into)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn git_drop_commit(
-    repo_root: String,
-    sha: String,
-    workspace: Option<WorkspaceEnv>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    blocking(app, move |r| {
-        operations::drop_commit(r, &repo_root, &sha, &workspace).map_err(Into::into)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn git_diff_range(
     repo_root: String,
     from: String,
@@ -867,22 +770,7 @@ pub async fn git_diff_commit_vs_worktree(
 ) -> Result<GitDiffResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     blocking(app, move |r| {
-        operations::diff_commit_vs_worktree(r, &repo_root, &sha, &workspace)
-            .map_err(Into::into)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn git_create_patch(
-    repo_root: String,
-    shas: Vec<String>,
-    workspace: Option<WorkspaceEnv>,
-    app: AppHandle,
-) -> Result<String, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    blocking(app, move |r| {
-        operations::create_patch(r, &repo_root, &shas, &workspace).map_err(Into::into)
+        operations::diff_commit_vs_worktree(r, &repo_root, &sha, &workspace).map_err(Into::into)
     })
     .await
 }

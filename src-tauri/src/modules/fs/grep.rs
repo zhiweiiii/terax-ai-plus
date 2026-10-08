@@ -152,7 +152,7 @@ fn search_tree(
         .follow_links(false)
         .threads(walk_threads())
         .filter_entry(|dent| {
-            if dent.depth() == 0 {
+            if dent.depth() == 0 || !dent.file_type().is_some_and(|kind| kind.is_dir()) {
                 return true;
             }
             match dent.file_name().to_str() {
@@ -290,13 +290,7 @@ pub async fn fs_grep_interactive(
     blocking(move || {
         let cancel = || generation.load(Ordering::SeqCst) != my_gen;
         Ok(search_tree(
-            &root_path,
-            &root,
-            &workspace,
-            &matcher,
-            &terms,
-            cap,
-            &cancel,
+            &root_path, &root, &workspace, &matcher, &terms, cap, &cancel,
         ))
     })
     .await
@@ -322,5 +316,3 @@ fn display_path(
     }
     to_canon(path)
 }
-
-

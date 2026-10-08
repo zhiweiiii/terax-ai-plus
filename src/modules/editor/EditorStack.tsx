@@ -1,10 +1,12 @@
 import { cn, isMarkdownPath } from "@/lib/utils";
 import { MarkdownViewToggle } from "@/modules/markdown";
 import type { EditorTab, Tab } from "@/modules/tabs";
+import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import { useEffect, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
 
 type Props = {
+  spaces: readonly SpaceMeta[];
   tabs: Tab[];
   activeId: number;
   onDirtyChange: (id: number, dirty: boolean) => void;
@@ -14,6 +16,7 @@ type Props = {
 };
 
 export function EditorStack({
+  spaces,
   tabs,
   activeId,
   onDirtyChange,
@@ -97,6 +100,8 @@ export function EditorStack({
   return (
     <div className="relative h-full w-full">
       {editors.map((t) => {
+        const space = spaces.find((item) => item.id === t.spaceId);
+        if (!space) return null;
         const visible = t.id === activeId;
         return (
           <div
@@ -117,6 +122,7 @@ export function EditorStack({
                 />
               )}
               <EditorPane
+                workspace={space.env}
                 ref={getRefCallback(t.id)}
                 path={t.path}
                 overrideLanguage={t.overrideLanguage}

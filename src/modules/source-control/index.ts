@@ -1,24 +1,15 @@
-export { RepoBranchSelector } from "./RepoBranchSelector";
-export type { SourceControlRepositoryTarget } from "./repositoryTarget";
-export { SourceControlPanel } from "./SourceControlPanelLazy";
 export { CloneRepositoryDialog } from "./CloneRepositoryDialog";
 export { PushDialog } from "./PushDialog";
 export { RemoteManagerDialog } from "./RemoteManagerDialog";
-export { useMultiRepoSourceControl } from "./useMultiRepoSourceControl";
-export { useRepoList } from "./useRepoList";
-export { useRepositoryTargeting } from "./useRepositoryTargeting";
-export {
-  getSourceControlRemoteIndicator,
-  type SourceControlSummary,
-  useSourceControl,
-} from "./useSourceControl";
-export { useSourceControlContext } from "./useSourceControlContext";
+export { RepoBranchSelector } from "./RepoBranchSelector";
 export {
   isRejectedPushError,
-  parseUpstreamRemote,
   type PushTagsMode,
+  parseUpstreamRemote,
   pushTagsValue,
 } from "./remoteHelpers";
+export type { SourceControlRepositoryTarget } from "./repositoryTarget";
+export { SourceControlPanel } from "./SourceControlPanelLazy";
 export type {
   CloneOptions,
   GitRemoteEntry,
@@ -29,3 +20,11 @@ export type {
   PushPlanCommitDiff,
   PushPlanEntry,
 } from "./useMultiRepoSourceControl";
+export { useMultiRepoSourceControl } from "./useMultiRepoSourceControl";
+export { useRepoList } from "./useRepoList";
+export { useRepositoryTargeting } from "./useRepositoryTargeting";
+export {
+  type SourceControlSummary,
+  useSourceControl,
+} from "./useSourceControl";
+export { useSourceControlContext } from "./useSourceControlContext";

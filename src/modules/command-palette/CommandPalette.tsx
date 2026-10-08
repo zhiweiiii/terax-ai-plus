@@ -88,7 +88,14 @@ export function CommandPalette({
 
   const themes = useMemo(() => {
     if (!inThemes) return [];
-    const all = [...listBuiltinThemes(), ...customThemes];
+    const all = Array.from(
+      new Map(
+        [...listBuiltinThemes(), ...customThemes].map((theme) => [
+          theme.id,
+          theme,
+        ]),
+      ).values(),
+    );
     const q = themeFilter.toLowerCase();
     if (!q) return all;
     return all
@@ -124,15 +131,24 @@ export function CommandPalette({
   }, [open, initialMode]);
 
   useEffect(() => {
-    if (!inThemes || !value.startsWith("theme:")) return;
+    if (!open || !inThemes || !value.startsWith("theme:")) {
+      previewThemeId(null);
+      return;
+    }
     const id = value.slice("theme:".length);
-    if (id === "back") return;
+    if (id === "back" || !themes.some((theme) => theme.id === id)) {
+      previewThemeId(null);
+      return;
+    }
     const handle = window.setTimeout(
       () => previewThemeId(id),
       THEME_PREVIEW_DELAY_MS,
     );
-    return () => window.clearTimeout(handle);
-  }, [value, inThemes, previewThemeId]);
+    return () => {
+      window.clearTimeout(handle);
+      previewThemeId(null);
+    };
+  }, [open, value, inThemes, themes, previewThemeId]);
 
   const runAfterClose = useCallback(
     (fn: () => void) => {
@@ -192,6 +208,7 @@ export function CommandPalette({
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (!inThemes) return;
       if (e.key === "Escape" || (e.key === "Backspace" && query.length === 0)) {
         e.preventDefault();
@@ -231,6 +248,13 @@ export function CommandPalette({
           onValueChange={setQuery}
           placeholder={placeholder}
           autoFocus
+          onKeyDown={(event) => {
+            if (
+              event.nativeEvent.isComposing ||
+              event.nativeEvent.keyCode === 229
+            )
+              event.stopPropagation();
+          }}
         />
         <ScrollArea className="max-h-[420px]">
           <CommandList className="max-h-none overflow-visible pr-3">
@@ -396,7 +420,11 @@ function rankCommands(
   }
   const scored: { item: PaletteItem; s: number }[] = [];
   for (const item of items) {
-    const s = fuzzyBest(term, [item.title, item.group, ...(item.keywords ?? [])]);
+    const s = fuzzyBest(term, [
+      item.title,
+      item.group,
+      ...(item.keywords ?? []),
+    ]);
     if (s !== null) scored.push({ item, s });
   }
   scored.sort(
@@ -494,7 +522,9 @@ function StatusItem({
         />
       ) : null}
       <span
-        className={tone === "error" ? "text-destructive" : "text-muted-foreground"}
+        className={
+          tone === "error" ? "text-destructive" : "text-muted-foreground"
+        }
       >
         {label}
       </span>

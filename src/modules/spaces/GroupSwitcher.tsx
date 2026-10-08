@@ -17,7 +17,7 @@ import {
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { SpaceMeta } from "./lib/store";
 
 type Props = {
@@ -45,23 +45,31 @@ export function GroupSwitcher({
   const [creating, setCreating] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const editing = useRef(false);
+  const focusInput = useCallback((input: HTMLInputElement | null) => {
+    input?.focus();
+  }, []);
 
   const active = spaces.find((s) => s.id === activeId);
   const label = active?.name ?? "Group";
 
   const startCreate = () => {
+    editing.current = true;
     setDraft(`Group ${spaces.length + 1}`);
     setCreating(true);
     setRenamingId(null);
   };
 
   const startRename = (space: SpaceMeta) => {
+    editing.current = true;
     setDraft(space.name);
     setRenamingId(space.id);
     setCreating(false);
   };
 
   const commit = () => {
+    if (!editing.current) return;
+    editing.current = false;
     const name = draft.trim();
     if (name) {
       if (creating) onCreate(name);
@@ -73,6 +81,7 @@ export function GroupSwitcher({
   };
 
   const cancel = () => {
+    editing.current = false;
     setCreating(false);
     setRenamingId(null);
     setDraft("");
@@ -118,11 +127,17 @@ export function GroupSwitcher({
             return (
               <div key={space.id} className="px-1.5 py-1">
                 <input
-                  autoFocus
+                  ref={focusInput}
+                  aria-label="Group name"
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
                     e.stopPropagation();
+                    if (
+                      e.nativeEvent.isComposing ||
+                      e.nativeEvent.keyCode === 229
+                    )
+                      return;
                     if (e.key === "Enter") commit();
                     else if (e.key === "Escape") cancel();
                   }}
@@ -154,9 +169,11 @@ export function GroupSwitcher({
                   className="shrink-0 text-primary"
                 />
               )}
-              <span
-                role="button"
+              <button
+                type="button"
                 title="Rename"
+                aria-label={`Rename ${space.name}`}
+                onKeyDown={(e) => e.stopPropagation()}
                 onClick={(e) => {
                   e.stopPropagation();
                   startRename(space);
@@ -168,19 +185,25 @@ export function GroupSwitcher({
                   size={11}
                   strokeWidth={1.9}
                 />
-              </span>
+              </button>
               {spaces.length > 1 && (
-                <span
-                  role="button"
+                <button
+                  type="button"
                   title="Delete group"
+                  aria-label={`Delete ${space.name}`}
+                  onKeyDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
                     onDelete(space.id);
                   }}
                   className="shrink-0 rounded p-0.5 opacity-0 hover:bg-destructive/15 hover:text-destructive group-hover/item:opacity-60"
                 >
-                  <HugeiconsIcon icon={Delete02Icon} size={11} strokeWidth={1.9} />
-                </span>
+                  <HugeiconsIcon
+                    icon={Delete02Icon}
+                    size={11}
+                    strokeWidth={1.9}
+                  />
+                </button>
               )}
             </DropdownMenuItem>
           );
@@ -191,11 +214,14 @@ export function GroupSwitcher({
         {creating ? (
           <div className="px-1.5 py-1">
             <input
-              autoFocus
+              ref={focusInput}
+              aria-label="New group name"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 e.stopPropagation();
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229)
+                  return;
                 if (e.key === "Enter") commit();
                 else if (e.key === "Escape") cancel();
               }}

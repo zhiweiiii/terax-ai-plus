@@ -10,6 +10,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const HEAD_BYTES: u64 = 192 * 1024;
 const MAX_PER_AGENT: usize = 40;
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_SCAN_ENTRIES: usize = 32_768;
+const MAX_SCAN_FILES: usize = 8_192;
+const MAX_SCAN_DEPTH: usize = 8;
+const SCAN_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +37,7 @@ struct CachedHeader {
     used: Instant,
 }
 struct CachedDirectory {
-    paths: Vec<PathBuf>,
+    paths: Result<Vec<PathBuf>, String>,
     checked: Instant,
 }
 
@@ -48,14 +52,14 @@ fn session_root(cwd: &str, agent: &str) -> Option<PathBuf> {
         _ => None,
     }
 }
-fn session_paths(cwd: &str, agent: &str) -> Vec<PathBuf> {
+fn session_paths(cwd: &str, agent: &str) -> Result<Vec<PathBuf>, String> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedDirectory>>> = OnceLock::new();
     let Some(root) = session_root(cwd, agent) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut cache = match CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
         Ok(cache) => cache,
-        Err(_) => return Vec::new(),
+        Err(_) => return Err("Session directory cache is unavailable".into()),
     };
     if let Some(hit) = cache
         .get(&root)
@@ -63,8 +67,7 @@ fn session_paths(cwd: &str, agent: &str) -> Vec<PathBuf> {
     {
         return hit.paths.clone();
     }
-    let mut paths = Vec::new();
-    collect_paths(&root, agent == "codex", &mut paths);
+    let paths = collect_paths(&root, agent == "codex");
     if cache.len() >= 32 && !cache.contains_key(&root) {
         if let Some(oldest) = cache
             .iter()
@@ -83,23 +86,48 @@ fn session_paths(cwd: &str, agent: &str) -> Vec<PathBuf> {
     );
     paths
 }
-fn collect_paths(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
+fn collect_paths(dir: &Path, recursive: bool) -> Result<Vec<PathBuf>, String> {
+    let started = Instant::now();
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    let mut out = Vec::new();
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = pending.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if depth == 0 && error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(out)
+            }
+            Err(error) => return Err(format!("Cannot scan session directory: {error}")),
         };
-        let path = entry.path();
-        if recursive && kind.is_dir() {
-            collect_paths(&path, true, out);
-        } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
-            out.push(path);
+        for entry in entries {
+            visited += 1;
+            if visited > MAX_SCAN_ENTRIES || started.elapsed() > SCAN_DEADLINE {
+                return Err(
+                    "Session directory scan exceeded its budget; use the CLI history picker".into(),
+                );
+            }
+            let entry = entry.map_err(|error| error.to_string())?;
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if recursive && kind.is_dir() {
+                if depth >= MAX_SCAN_DEPTH {
+                    return Err("Session directory nesting exceeds the supported limit".into());
+                }
+                pending.push((path, depth + 1));
+            } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+                if out.len() >= MAX_SCAN_FILES {
+                    return Err("Too many session files; use the CLI history picker".into());
+                }
+                out.push(path);
+            }
         }
     }
+    Ok(out)
 }
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 36
         && id.chars().enumerate().all(|(i, c)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -258,8 +286,8 @@ fn session_header(path: &Path, agent: &str, metadata: &fs::Metadata) -> Option<H
     }
     header
 }
-fn list_sessions(cwd: &str, agent: &'static str) -> Vec<Session> {
-    let mut files: Vec<_> = session_paths(cwd, agent)
+fn list_sessions(cwd: &str, agent: &'static str) -> Result<Vec<Session>, String> {
+    let mut files: Vec<_> = session_paths(cwd, agent)?
         .into_iter()
         .filter_map(|path| {
             let metadata = fs::metadata(&path).ok()?;
@@ -273,7 +301,7 @@ fn list_sessions(cwd: &str, agent: &'static str) -> Vec<Session> {
         })
         .collect();
     files.sort_by_key(|(modified, _, _)| std::cmp::Reverse(*modified));
-    files
+    Ok(files
         .into_iter()
         .filter_map(|(updated_at, path, metadata)| {
             let header = session_header(&path, agent, &metadata)?;
@@ -285,7 +313,7 @@ fn list_sessions(cwd: &str, agent: &'static str) -> Vec<Session> {
             })
         })
         .take(MAX_PER_AGENT)
-        .collect()
+        .collect())
 }
 pub(crate) fn resolve_session_file(
     cwd: &str,
@@ -294,7 +322,7 @@ pub(crate) fn resolve_session_file(
     started_at: SystemTime,
 ) -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    for path in session_paths(cwd, agent) {
+    for path in session_paths(cwd, agent).ok()? {
         if id.is_some_and(|id| {
             !path
                 .file_name()
@@ -321,17 +349,26 @@ pub(crate) fn resolve_session_file(
             continue;
         }
         candidates.push(path);
+        if candidates.len() > 1 {
+            return None;
+        }
     }
     (candidates.len() == 1).then(|| candidates.remove(0))
 }
 #[tauri::command]
-pub async fn agent_sessions(cwd: String) -> Vec<Session> {
+pub async fn agent_sessions(
+    cwd: String,
+    workspace: Option<crate::modules::workspace::WorkspaceEnv>,
+) -> Result<Vec<Session>, String> {
+    if crate::modules::workspace::WorkspaceEnv::from_option(workspace).is_wsl() {
+        return Ok(Vec::new());
+    }
     tauri::async_runtime::spawn_blocking(move || {
-        let mut all = list_sessions(&cwd, "claude");
-        all.extend(list_sessions(&cwd, "codex"));
+        let mut all = list_sessions(&cwd, "claude")?;
+        all.extend(list_sessions(&cwd, "codex")?);
         all.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-        all
+        Ok(all)
     })
     .await
-    .unwrap_or_default()
+    .map_err(|error| error.to_string())?
 }

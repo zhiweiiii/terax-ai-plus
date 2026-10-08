@@ -14,7 +14,7 @@ use tauri::Emitter;
 
 use crate::modules::control::ControlState;
 use crate::modules::workspace::{user_spawn_cwd_or_home, WorkspaceEnv, WorkspaceRegistry};
-pub(crate) use session::{Session, SizeOwner, WebMsg};
+pub(crate) use session::{valid_grid, Session, SizeOwner, WebMsg};
 
 /// Emitted when the PTY grid changed because an end claimed the session. The
 /// desktop frontend must resize its xterm to match and stop auto-fitting until
@@ -76,17 +76,21 @@ impl PtyState {
     /// app has, with a pty_id when the session is live.
     pub fn web_tabs(&self) -> Vec<WebTab> {
         let sessions = self.sessions.read().unwrap();
+        let mut live_leaves: HashMap<u32, u32> = HashMap::new();
+        for (&id, session) in sessions.iter() {
+            if session.exited.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Some(leaf) = session.leaf_id {
+                live_leaves
+                    .entry(leaf)
+                    .and_modify(|latest| *latest = (*latest).max(id))
+                    .or_insert(id);
+            }
+        }
         let mut list = self.web_tabs.lock().unwrap();
         for t in list.iter_mut() {
-            // A pty_id pointing at a session that is gone (exited or never
-            // spawned) is stale: drop it so the page never attaches to the
-            // wrong session (issue #8). The frontend syncs live ids via
-            // web_sync_leaf_pty, so no cwd-based guessing is needed.
-            if let Some(pid) = t.pty_id {
-                if sessions.get(&pid).is_none() {
-                    t.pty_id = None;
-                }
-            }
+            t.pty_id = live_leaves.get(&t.leaf_id).copied();
         }
         list.iter().cloned().collect()
     }
@@ -107,14 +111,6 @@ impl PtyState {
     /// Groups (spaces) for the web page's switcher, in desktop order.
     pub fn web_spaces(&self) -> Vec<(String, String)> {
         self.web_spaces.lock().unwrap().clone()
-    }
-
-    /// Record that a leaf's pty session now exists under `pty_id`.
-    pub fn web_sync_leaf_pty(&self, leaf_id: u32, pty_id: u32) {
-        let mut list = self.web_tabs.lock().unwrap();
-        if let Some(t) = list.iter_mut().find(|t| t.leaf_id == leaf_id) {
-            t.pty_id = Some(pty_id);
-        }
     }
 
     /// Borrow a live session by id for the web layer (write / resize / subscribe).
@@ -147,9 +143,7 @@ impl PtyState {
     /// the pty) and return None so the page can retry shortly.
     pub fn web_leaf_session(&self, leaf_id: u32, app: &tauri::AppHandle) -> Option<Arc<Session>> {
         let pty_id = self
-            .web_tabs
-            .lock()
-            .unwrap()
+            .web_tabs()
             .iter()
             .find(|t| t.leaf_id == leaf_id)
             .and_then(|t| t.pty_id);
@@ -159,48 +153,13 @@ impl PtyState {
         let _ = app.emit("terax:web-activate", leaf_id);
         None
     }
+}
 
-    /// Ensure at least one terminal session exists for the web page. Spawns a
-    /// default shell (home cwd, no control env) when the session map is empty,
-    /// so the phone always has something to attach to. Output goes to the
-    /// session's own history + web broadcast; no Tauri Channel is involved.
-    pub fn web_ensure_session(&self, app: &tauri::AppHandle) {
-        if !self.sessions.read().unwrap().is_empty() {
-            return;
-        }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let cwd = dirs::home_dir().map(|p| p.to_string_lossy().into_owned());
-        let app = app.clone();
-        let spawned = tauri::async_runtime::block_on(async {
-            let session = tauri::async_runtime::spawn_blocking(move || {
-                session::spawn(
-                    id,
-                    app,
-                    80,
-                    24,
-                    cwd,
-                    WorkspaceEnv::from_option(None),
-                    false,
-                    None,
-                    None,
-                    // The session the phone attaches to has no desktop pane to
-                    // inherit a provider choice from.
-                    None,
-                    None,
-                    None,
-                )
-                .map(|(s, _)| s)
-            })
-            .await;
-            session.ok().and_then(|r| r.ok())
-        });
-        if let Some(session) = spawned {
-            self.sessions.write().unwrap().insert(id, session);
-            log::info!("web: spawned default session id={id}");
-        } else {
-            log::warn!("web: failed to spawn default session");
-        }
-    }
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyOpened {
+    id: u32,
+    shell_kind: shell_init::ShellQuoteKind,
 }
 
 #[tauri::command]
@@ -220,7 +179,7 @@ pub async fn pty_open(
     gateway_provider: Option<String>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
-) -> Result<u32, String> {
+) -> Result<PtyOpened, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let blocks = blocks.unwrap_or(false);
     let cwd = user_spawn_cwd_or_home(&registry, cwd.as_deref(), &workspace);
@@ -245,6 +204,7 @@ pub async fn pty_open(
     let session = tauri::async_runtime::spawn_blocking(move || {
         session::spawn(
             id,
+            pane_id,
             app,
             cols,
             rows,
@@ -268,11 +228,8 @@ pub async fn pty_open(
         log::error!("pty_open failed: {e}");
         e
     })?;
+    let shell_kind = session.shell_kind;
     state.sessions.write().unwrap().insert(id, session);
-    // Record the leaf → pty mapping so the web page can show this tab as live.
-    if let Some(leaf) = pane_id {
-        state.web_sync_leaf_pty(leaf, id);
-    }
     // The shell can exit before this insert (instant failure, `exit` in an rc
     // file); the waiter's reap then ran with the id absent. Re-check and reap
     // so the pseudoconsole isn't stranded.
@@ -292,7 +249,7 @@ pub async fn pty_open(
         }
     }
     log::info!("pty opened id={id} cols={cols} rows={rows}");
-    Ok(id)
+    Ok(PtyOpened { id, shell_kind })
 }
 
 // Input is the latency-critical path: raw body + id header skips JSON
@@ -305,14 +262,13 @@ fn looks_like_protocol_response(bytes: &[u8]) -> bool {
     if bytes == b"\x1b[I" || bytes == b"\x1b[O" {
         return true;
     }
-    bytes.starts_with(b"\x1b]")
-        && (bytes.ends_with(b"\x07") || bytes.ends_with(b"\x1b\\"))
+    bytes.starts_with(b"\x1b]") && (bytes.ends_with(b"\x07") || bytes.ends_with(b"\x1b\\"))
 }
 
 #[tauri::command]
-pub fn pty_write(
-    state: tauri::State<PtyState>,
-    request: tauri::ipc::Request,
+pub async fn pty_write(
+    state: tauri::State<'_, PtyState>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
     let id: u32 = request
         .headers()
@@ -323,6 +279,10 @@ pub fn pty_write(
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("pty_write: expected raw body".to_string());
     };
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err("terminal input exceeds 4 MiB".to_string());
+    }
+    let bytes = bytes.clone();
     // Typing at the desktop is an activity claim: it takes the grid back from
     // a phone that had claimed it.
     //
@@ -332,36 +292,38 @@ pub fn pty_write(
     // asked for). Those must reach the PTY or the TUI hangs waiting, but they
     // must not move the grid, or a watched session ping-pongs back to the
     // desktop's size a few seconds after every phone claim.
-    if !looks_like_protocol_response(bytes) {
-        if let Some(session) = state.sessions.read().unwrap().get(&id) {
-            if let Some((cols, rows)) = session.claim(SizeOwner::Desktop) {
-                log::info!("pty {id}: desktop reclaimed grid {cols}x{rows}");
-            }
-        }
-    }
     let session = state
         .sessions
         .read()
-        .unwrap()
+        .map_err(|_| "terminal registry unavailable".to_string())?
         .get(&id)
         .cloned()
         .ok_or_else(|| {
             log::warn!("pty_write: unknown id={id}");
             "no session".to_string()
         })?;
-    // Bind to a local so the MutexGuard temporary drops before `session` —
-    // see rustc note on tail-expression temporary drop order.
-    let result = session
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(bytes)
-        .map_err(|e| {
-            // EPIPE is expected if the child already exited.
-            log::debug!("pty_write id={id} failed: {e}");
-            e.to_string()
-        });
-    result
+    tauri::async_runtime::spawn_blocking(move || {
+        if session.exited.load(Ordering::Acquire) {
+            return Err("terminal exited".to_string());
+        }
+        if !looks_like_protocol_response(&bytes) {
+            if let Some((cols, rows)) = session.claim(SizeOwner::Desktop) {
+                log::info!("pty {id}: desktop reclaimed grid {cols}x{rows}");
+            }
+        }
+        let result = session
+            .writer
+            .lock()
+            .map_err(|_| "terminal writer unavailable".to_string())?
+            .write_all(&bytes)
+            .map_err(|e| {
+                log::debug!("pty_write id={id} failed: {e}");
+                e.to_string()
+            });
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -371,6 +333,9 @@ pub fn pty_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(u16, u16), String> {
+    if !session::valid_grid(cols, rows) {
+        return Err("terminal grid exceeds the supported size".into());
+    }
     let session = state
         .sessions
         .read()
@@ -414,11 +379,7 @@ pub fn pty_kick(
 pub fn pty_close(state: tauri::State<PtyState>, id: u32) -> Result<(), String> {
     let session = state.sessions.write().unwrap().remove(&id);
     if let Some(s) = session {
-        if let Err(e) = s.killer.lock().unwrap().kill() {
-            // Non-fatal: the child may already have exited on its own (e.g. the
-            // user ran `exit`). Log so this isn't invisible during debugging.
-            log::debug!("pty_close: kill id={id} returned {e}");
-        }
+        s.terminate();
         log::info!("pty closed id={id}");
         // Detached: on Windows `ClosePseudoConsole` can block until conhost
         // drains, which would freeze this Tauri worker thread and stall IPC.
@@ -467,25 +428,7 @@ pub fn pty_has_foreground_job(state: tauri::State<PtyState>, id: u32) -> Result<
     if shell_pid == 0 {
         return Ok(false);
     }
-    #[cfg(unix)]
-    {
-        let leader = session.master.lock().unwrap().process_group_leader();
-        Ok(matches!(leader, Some(pid) if pid > 0 && pid as u32 != shell_pid))
-    }
-    #[cfg(windows)]
-    {
-        Ok(shell_has_children(shell_pid))
-    }
-}
-
-// pgrep -P exits 0 when shell_pid has at least one child, 1 when none.
-#[cfg(unix)]
-fn shell_has_children(shell_pid: u32) -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-P", &shell_pid.to_string()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    Ok(shell_has_children(shell_pid))
 }
 
 #[cfg(windows)]
@@ -493,8 +436,7 @@ fn shell_has_children(shell_pid: u32) -> bool {
     use std::mem::{size_of, zeroed};
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
-        TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
     };
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -530,9 +472,7 @@ pub fn pty_close_all(state: tauri::State<PtyState>) -> Result<usize, String> {
     };
     let count = drained.len();
     for (id, s) in drained {
-        if let Err(e) = s.killer.lock().unwrap().kill() {
-            log::debug!("pty_close_all: kill id={id} returned {e}");
-        }
+        s.terminate();
         thread::Builder::new()
             .name(format!("terax-pty-drop-{id}"))
             .spawn(move || session::drop_session(s))
@@ -579,10 +519,7 @@ pub fn web_sync_tabs(
         schedule.forget_leaf(leaf);
     }
     if schedule.revision() != before {
-        let _ = app.emit(
-            crate::modules::schedule::SCHEDULE_EVENT,
-            schedule.list(),
-        );
+        let _ = app.emit(crate::modules::schedule::SCHEDULE_EVENT, schedule.list());
     }
 }
 
@@ -591,12 +528,6 @@ pub fn web_sync_tabs(
 #[tauri::command]
 pub fn web_sync_spaces(state: tauri::State<PtyState>, spaces: Vec<WebSpace>) {
     state.web_sync_spaces(spaces);
-}
-
-/// Frontend tells us a leaf's pty session id once it has been opened.
-#[tauri::command]
-pub fn web_sync_leaf_pty(state: tauri::State<PtyState>, leaf_id: u32, pty_id: u32) {
-    state.web_sync_leaf_pty(leaf_id, pty_id);
 }
 
 /// The web page wants to attach to a desktop tab that has no live pty yet.

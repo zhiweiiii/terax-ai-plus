@@ -4,7 +4,7 @@ import { createTheme } from "@uiw/codemirror-themes";
 
 // Syntax palette shared by every locally-defined theme. The editor renders as
 // glass over the app surface, so `background`/`selection`/`caret` here are
-// overridden by buildSharedExtensions() — only the syntax colors really land.
+// overridden by buildSharedExtensions(); only the syntax colors really land.
 type Palette = {
   mode: "light" | "dark";
   bg: string;

@@ -1,4 +1,5 @@
 import type { Tab } from "@/modules/tabs";
+import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import { useEffect, useMemo, useRef } from "react";
 import { selectLiveTerminals } from "./lib/liveTerminals";
 import { leafIds } from "./lib/panes";
@@ -6,6 +7,7 @@ import { PaneTreeView } from "./PaneTreeView";
 import type { TerminalPaneHandle } from "./TerminalPane";
 
 type Props = {
+  spaces: readonly SpaceMeta[];
   tabs: Tab[];
   activeId: number;
   /** Register/unregister handle by leaf id (not tab id). */
@@ -22,6 +24,7 @@ type Bundle = {
 };
 
 export function TerminalStack({
+  spaces,
   tabs,
   activeId,
   registerHandle,
@@ -70,6 +73,8 @@ export function TerminalStack({
   return (
     <div className="relative h-full w-full">
       {terminals.map((t) => {
+        const space = spaces.find((space) => space.id === t.spaceId);
+        if (!space) return null;
         const tabVisible = t.id === activeId;
         return (
           <div
@@ -83,6 +88,7 @@ export function TerminalStack({
             aria-hidden={!tabVisible}
           >
             <PaneTreeView
+              workspace={space.env}
               node={t.paneTree}
               tabVisible={tabVisible}
               activeLeafId={t.activeLeafId}

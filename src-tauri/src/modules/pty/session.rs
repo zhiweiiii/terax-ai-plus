@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -14,6 +14,14 @@ use super::shell_init;
 use crate::modules::workspace::WorkspaceEnv;
 
 const AGENT_EVENT: &str = "terax:agent-signal";
+
+pub(crate) fn valid_grid(cols: u16, rows: u16) -> bool {
+    cols >= 2
+        && rows >= 2
+        && cols <= 2048
+        && rows <= 1024
+        && u32::from(cols) * u32::from(rows) <= 262144
+}
 
 // Flusher coalesces a short window after first-byte arrival so we send chunks,
 // not single bytes. MAX_IDLE is only a safety net for missed signals.
@@ -30,9 +38,7 @@ const MAX_PENDING: usize = 4 * 1024 * 1024;
 const OVERFLOW_NOTICE: &[u8] =
     b"\x1bc\x1b[2m[terax: dropped output due to backpressure]\x1b[0m\r\n";
 
-/// Bounded queue a Web client subscribes with. SyncSender + try_send drops the
-/// oldest chunk when a slow viewer can't keep up, so one laggy phone never
-/// stalls the PTY pipeline.
+/// A full queue disconnects its viewer rather than blocking PTY output.
 const WEB_SUB_QUEUE: usize = 64;
 
 /// Message sent to a Web viewer: live output bytes, or a final exit notice so
@@ -84,14 +90,16 @@ pub struct Session {
     _job: Option<crate::modules::proc::job::ProcessJob>,
     /// PID of the shell process. 0 means unknown; callers must skip checks when 0.
     pub shell_pid: u32,
+    pub shell_kind: shell_init::ShellQuoteKind,
     pub killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    pub master: Mutex<Box<dyn MasterPty + Send>>,
+    master: Mutex<SerializedMaster>,
     // Set by the waiter once the child exits, so pty_open can reap a shell
     // that died before it was registered.
     pub(super) exited: Arc<AtomicBool>,
     /// Display metadata for the web page's session list.
     pub cwd: Option<String>,
+    pub(super) leaf_id: Option<u32>,
     /// The coding agent running in this shell, as its own OSC markers
     /// announced it. Both the gate for reading an agent transcript - a
     /// directory that once ran one must not show that conversation over an
@@ -99,7 +107,8 @@ pub struct Session {
     agent: Arc<Mutex<Option<AgentRun>>>,
     web_submissions: Mutex<std::collections::VecDeque<(String, Result<(), String>)>>,
     /// Web viewers attached to this session (bounded queues).
-    web_subs: Mutex<Vec<SyncSender<WebMsg>>>,
+    web_subs: Mutex<Vec<(u64, SyncSender<WebMsg>)>>,
+    next_web_subscription: AtomicU64,
     /// Whether the PTY is currently on the alternate screen (opencode / claude
     /// / vim). Set by the flusher as it scans output; reported on attach so a
     /// phone can put its headless parser into the right mode before replaying
@@ -130,9 +139,7 @@ impl Drop for Session {
         // frontend disconnected, window crashed, dev HMR), the reader/flusher
         // threads would otherwise stay alive forever holding the child. Kill
         // the child here so the reader hits EOF and the threads unwind.
-        if let Ok(mut k) = self.killer.lock() {
-            let _ = k.kill();
-        }
+        self.terminate();
     }
 }
 // Serializes ConPTY create and close: overlapping pseudoconsole lifecycle
@@ -141,12 +148,40 @@ impl Drop for Session {
 static CONPTY_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn drop_session(session: Arc<Session>) {
-    #[cfg(windows)]
-    let _guard = CONPTY_LIFECYCLE_LOCK.lock().unwrap();
     drop(session);
 }
 
+struct SerializedMaster(Option<Box<dyn MasterPty + Send>>);
+
+impl std::ops::Deref for SerializedMaster {
+    type Target = dyn MasterPty + Send;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().expect("live PTY master")
+    }
+}
+
+impl Drop for SerializedMaster {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        let _guard = CONPTY_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        drop(self.0.take());
+    }
+}
+
 impl Session {
+    pub(super) fn terminate(&self) {
+        #[cfg(windows)]
+        if let Some(job) = &self._job {
+            job.terminate();
+        }
+        if let Ok(mut killer) = self.killer.lock() {
+            let _ = killer.kill();
+        }
+    }
+
     /// Whether the PTY is on the alternate screen right now, so a phone can
     /// parse the replayed backlog in the right mode.
     pub fn web_in_alt(&self) -> bool {
@@ -246,7 +281,7 @@ impl Session {
         result
     }
 
-    /// Attach a Web viewer: returns the sender handle used to cancel this exact
+    /// Attach a Web viewer: returns the ID used to cancel this exact
     /// subscription, and a receiver for live chunks. Returns None if the
     /// session already exited.
     ///
@@ -254,13 +289,15 @@ impl Session {
     /// terminal's own buffer, asked for on attach (`web::request_snapshot`):
     /// keeping a second copy of every session's output on this side made the
     /// phone open on a history the desktop no longer had.
-    pub fn web_subscribe(&self) -> Option<(SyncSender<WebMsg>, mpsc::Receiver<WebMsg>)> {
+    pub fn web_subscribe(&self) -> Option<(u64, mpsc::Receiver<WebMsg>)> {
+        let mut subs = self.web_subs.lock().unwrap();
         if self.exited.load(Ordering::Acquire) {
             return None;
         }
         let (tx, rx) = mpsc::sync_channel(WEB_SUB_QUEUE);
-        self.web_subs.lock().unwrap().push(tx.clone());
-        Some((tx, rx))
+        let id = self.next_web_subscription.fetch_add(1, Ordering::Relaxed);
+        subs.push((id, tx));
+        Some((id, rx))
     }
 
     /// The live PTY grid.
@@ -271,7 +308,7 @@ impl Session {
     /// Record the grid an end would like, without claiming ownership. Lets a
     /// watching viewer keep its preference ready for the moment it does claim.
     pub fn note_grid(&self, who: SizeOwner, cols: u16, rows: u16) {
-        if cols < 2 || rows < 2 {
+        if !valid_grid(cols, rows) {
             return;
         }
         let slot = match who {
@@ -323,7 +360,7 @@ impl Session {
     /// Deliberate and one-shot (a page load), so it bypasses the ownership
     /// cooldown; the desktop reclaims on its next keystroke.
     pub fn web_take_grid(&self, cols: u16, rows: u16) -> Option<(u16, u16)> {
-        if cols < 2 || rows < 2 {
+        if !valid_grid(cols, rows) {
             return None;
         }
         *self.web_grid.lock().unwrap() = Some((cols, rows));
@@ -343,7 +380,7 @@ impl Session {
     /// transient made them re-grid twice on every renderer-slot rebind, which
     /// is constant while a full-screen TUI is running.
     pub fn kick_grid(&self, cols: u16, rows: u16) {
-        if cols < 2 || rows < 2 || self.exited.load(Ordering::Acquire) {
+        if !valid_grid(cols, rows) || self.exited.load(Ordering::Acquire) {
             return;
         }
         let Ok(master) = self.master.lock() else {
@@ -362,7 +399,7 @@ impl Session {
     /// Resize the PTY and tell every attached viewer. Returns None when the
     /// grid was already the live one, so callers broadcast only real changes.
     fn apply_grid(&self, cols: u16, rows: u16) -> Option<(u16, u16)> {
-        if cols < 2 || rows < 2 || self.exited.load(Ordering::Acquire) {
+        if !valid_grid(cols, rows) || self.exited.load(Ordering::Acquire) {
             return None;
         }
         let mut size = self.size.lock().unwrap();
@@ -384,17 +421,14 @@ impl Session {
         self.web_subs
             .lock()
             .unwrap()
-            .retain(|s| s.try_send(WebMsg::Resized(cols, rows)).is_ok());
+            .retain(|(_, s)| s.try_send(WebMsg::Resized(cols, rows)).is_ok());
         Some((cols, rows))
     }
 
     /// Remove one specific subscriber (not the whole table, so other viewers
     /// of the same session are never affected).
-    pub fn web_unsubscribe(&self, tx: &SyncSender<WebMsg>) {
-        self.web_subs
-            .lock()
-            .unwrap()
-            .retain(|s| !std::ptr::eq(s, tx));
+    pub fn web_unsubscribe(&self, id: u64) {
+        self.web_subs.lock().unwrap().retain(|(key, _)| *key != id);
     }
 
     /// Fan out one output chunk to every attached Web viewer. A viewer whose
@@ -403,7 +437,7 @@ impl Session {
     /// missing output, and one laggy viewer can't accumulate unbounded state.
     fn web_broadcast(&self, chunk: &[u8]) {
         let mut subs = self.web_subs.lock().unwrap();
-        subs.retain(|s| s.try_send(WebMsg::Output(chunk.to_vec())).is_ok());
+        subs.retain(|(_, s)| s.try_send(WebMsg::Output(chunk.to_vec())).is_ok());
     }
 
     /// Tell every Web viewer that this session exited (final message). The
@@ -411,7 +445,7 @@ impl Session {
     /// afterwards via handle_ws.
     fn web_broadcast_exit(&self, code: i32) {
         let mut subs = self.web_subs.lock().unwrap();
-        for s in subs.drain(..) {
+        for (_, s) in subs.drain(..) {
             let _ = s.try_send(WebMsg::Exited(code));
         }
     }
@@ -444,6 +478,7 @@ impl Drop for ChildKillGuard {
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     id: u32,
+    leaf_id: Option<u32>,
     app: AppHandle,
     cols: u16,
     rows: u16,
@@ -456,6 +491,9 @@ pub fn spawn(
     on_data: Option<Box<dyn Fn(Vec<u8>) + Send + Sync>>,
     on_exit: Option<Box<dyn Fn(i32) + Send + Sync>>,
 ) -> Result<(Arc<Session>, PtySize), String> {
+    if !valid_grid(cols, rows) {
+        return Err("terminal grid exceeds the supported size".into());
+    }
     let on_data = on_data.map(Arc::new);
     let on_exit = on_exit.map(Arc::new);
     #[cfg(windows)]
@@ -470,7 +508,7 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
-    let cmd = shell_init::build_command(
+    let (cmd, shell_kind) = shell_init::build_command(
         cwd.clone(),
         workspace,
         blocks,
@@ -489,21 +527,14 @@ pub fn spawn(
     let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
         pair.master.take_writer().map_err(|e| e.to_string())?,
     ));
-    guard.disarm();
-
     let shell_pid = child.process_id().unwrap_or(0);
 
     #[cfg(windows)]
-    let job = match child.process_id() {
-        Some(pid) => match crate::modules::proc::job::ProcessJob::create_for(pid) {
-            Ok(j) => Some(j),
-            Err(e) => {
-                log::warn!("pty job-object setup failed for pid={pid}: {e}");
-                None
-            }
-        },
-        None => None,
-    };
+    let job = crate::modules::proc::job::ProcessJob::create_for(
+        child.process_id().ok_or("missing shell process ID")?,
+    )
+    .map_err(|e| format!("PTY job setup failed: {e}"))?;
+    guard.disarm();
 
     let exited = Arc::new(AtomicBool::new(false));
     // Shared rather than read off the session: the reader thread that learns
@@ -512,27 +543,41 @@ pub fn spawn(
 
     let session = Arc::new(Session {
         #[cfg(windows)]
-        _job: job,
+        _job: Some(job),
         shell_pid,
+        shell_kind,
         killer: Mutex::new(killer),
         writer: writer.clone(),
-        master: Mutex::new(pair.master),
+        master: Mutex::new(SerializedMaster(Some(pair.master))),
         exited: exited.clone(),
         cwd,
+        leaf_id,
         agent: agent_name.clone(),
         web_submissions: Mutex::new(std::collections::VecDeque::new()),
         web_subs: Mutex::new(Vec::new()),
+        next_web_subscription: AtomicU64::new(1),
         in_alt: AtomicBool::new(false),
         owner: Mutex::new((SizeOwner::Desktop, Instant::now())),
         size: Mutex::new((cols, rows)),
         desktop_grid: Mutex::new(Some((cols, rows))),
         web_grid: Mutex::new(None),
     });
+    #[cfg(windows)]
+    drop(_spawn_guard);
 
     let pending: Arc<(Mutex<Vec<u8>>, Condvar)> =
         Arc::new((Mutex::new(Vec::with_capacity(READ_BUF)), Condvar::new()));
     let done = Arc::new(AtomicBool::new(false));
     let spawn_at = Instant::now();
+
+    let done_abort = done.clone();
+    let pending_abort = pending.clone();
+    let spawn_error = |error: std::io::Error| {
+        session.terminate();
+        done_abort.store(true, Ordering::Release);
+        pending_abort.1.notify_all();
+        error.to_string()
+    };
 
     let first_byte = Arc::new(AtomicBool::new(false));
 
@@ -627,7 +672,7 @@ pub fn spawn(
                 log::warn!("pty backpressure: dropped {dropped_bytes} bytes (cap {MAX_PENDING})");
             }
         })
-        .expect("spawn pty reader thread");
+        .map_err(&spawn_error)?;
 
     let on_data_ref = on_data.clone();
     let pending_f = pending.clone();
@@ -637,7 +682,7 @@ pub fn spawn(
     // phone can parse the backlog in the right buffer mode.
     const ENTER_ALT: &[u8] = b"\x1b[?1049h";
     const LEAVE_ALT: &[u8] = b"\x1b[?1049l";
-    thread::Builder::new()
+    let flusher_thread = thread::Builder::new()
         .name("terax-pty-flusher".into())
         .spawn(move || {
             let (lock, cv) = &*pending_f;
@@ -688,9 +733,8 @@ pub fn spawn(
                 session_f.web_broadcast(&chunk);
             }
         })
-        .expect("spawn pty flusher thread");
+        .map_err(&spawn_error)?;
 
-    let on_data_exit = on_data;
     let on_exit_cb = on_exit;
     let pending_e = pending;
     let done_e = done;
@@ -708,6 +752,7 @@ pub fn spawn(
                 }
             };
             exited_w.store(true, Ordering::Release);
+            session_exit_f.terminate();
             // Wait for the reader to hit EOF before taking a final snapshot of
             // `pending`, so the last line of output never races the Exit event.
             // On Windows the reader cannot be joined (it is not the thread that
@@ -724,19 +769,13 @@ pub fn spawn(
             if let Err(e) = reader_thread.join() {
                 log::error!("pty reader thread panicked: {e:?}");
             }
-            let (lock, cv) = &*pending_e;
-            let tail = std::mem::take(&mut *lock.lock().unwrap());
-            if !tail.is_empty() {
-                // The tail is the last output before exit. Both the desktop
-                // channel and attached Web viewers get it, so a phone attached
-                // at exit time sees the final lines (issue #5).
-                session_exit_f.web_broadcast(&tail);
-                if let Some(cb) = &on_data_exit {
-                    cb(tail);
-                }
-            }
             done_e.store(true, Ordering::Release);
-            cv.notify_all();
+            pending_e.1.notify_all();
+            // One output owner preserves ordering, including a chunk already
+            // taken from pending when the child exits.
+            if let Err(e) = flusher_thread.join() {
+                log::error!("pty flusher thread panicked: {e:?}");
+            }
             // Final word to attached Web viewers before the session is reaped:
             // they clear their attached state immediately instead of waiting
             // for a reconnect.
@@ -750,7 +789,7 @@ pub fn spawn(
                 }
             }
         })
-        .expect("spawn pty waiter thread");
+        .map_err(spawn_error)?;
 
     Ok((session, size))
 }

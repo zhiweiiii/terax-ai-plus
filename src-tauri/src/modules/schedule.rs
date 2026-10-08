@@ -9,7 +9,6 @@
 //!
 //! Jobs are persisted before background execution. Terminal bindings are session-scoped.
 
-use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -25,9 +24,6 @@ mod storage;
 
 /// Emitted whenever the list changes, so the desktop refreshes without polling.
 pub const SCHEDULE_EVENT: &str = "terax:schedules";
-
-/// Carriage return - what pressing Enter sends to a PTY.
-const ENTER: u8 = 13;
 
 /// How long a due job keeps trying before it is given up on.
 ///
@@ -71,6 +67,12 @@ pub struct Job {
     pub last_result: Option<String>,
     #[serde(default)]
     pub paused: bool,
+}
+
+impl Job {
+    fn is_due(&self, now: i64) -> bool {
+        self.fire_at <= now && !self.running && !self.finished && !self.paused
+    }
 }
 
 #[derive(Default)]
@@ -167,6 +169,27 @@ impl ScheduleState {
         Ok(true)
     }
 
+    fn rebind(&self, id: u64, leaf_id: u32) -> Result<(), String> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let index = jobs
+            .iter()
+            .position(|j| {
+                j.id == id && j.target == Target::Terminal && j.paused && !j.running && !j.finished
+            })
+            .ok_or("任务不存在或无需绑定")?;
+        let previous = jobs[index].clone();
+        jobs[index].leaf_id = leaf_id;
+        jobs[index].paused = false;
+        jobs[index].fire_at = jobs[index].fire_at.max(now_ms());
+        jobs[index].last_result = None;
+        if let Err(error) = self.save(&jobs) {
+            jobs[index] = previous;
+            return Err(error);
+        }
+        self.revision.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Never reuse an expired terminal binding for another session.
     pub fn forget_leaf(&self, leaf_id: u32) {
         let mut jobs = self.jobs.lock().unwrap();
@@ -197,17 +220,23 @@ impl ScheduleState {
             .lock()
             .unwrap()
             .iter()
-            .filter(|j| j.fire_at <= now && !j.running && !j.finished && !j.paused)
+            .filter(|j| j.is_due(now))
             .cloned()
             .collect()
     }
 
-    fn complete(&self, job: &Job) {
+    fn complete(&self, job: &Job, result: Result<(), String>) {
         let mut jobs = self.jobs.lock().unwrap();
-        let Some(current) = jobs.iter_mut().find(|j| j.id == job.id) else {
+        let Some(current) = jobs.iter_mut().find(|j| {
+            j.id == job.id && j.leaf_id == job.leaf_id && j.fire_at == job.fire_at && !j.finished
+        }) else {
             return;
         };
         current.running = false;
+        current.last_result = Some(match result {
+            Ok(()) => "已发送到终端".into(),
+            Err(error) => format!("失败：{error}"),
+        });
         if let Some(time) = &job.daily_time {
             match next_daily(time, now_ms()) {
                 Ok(next) => current.fire_at = next,
@@ -215,6 +244,9 @@ impl ScheduleState {
             }
         } else {
             current.finished = true;
+        }
+        if current.finished {
+            current.paused = false;
         }
         if let Err(error) = self.save(&jobs) {
             log::error!("schedule persistence: {error}");
@@ -316,15 +348,16 @@ fn deliver(app: &tauri::AppHandle, job: &Job) -> Result<(), String> {
     let session = state
         .web_leaf_session(job.leaf_id, app)
         .ok_or_else(|| "terminal not open yet".to_string())?;
-    let mut writer = session
-        .writer
-        .lock()
-        .map_err(|_| "writer poisoned".to_string())?;
     let schedule = app.state::<ScheduleState>();
     let mut jobs = schedule.jobs.lock().unwrap();
     let current = jobs
         .iter_mut()
-        .find(|j| j.id == job.id && !j.paused && !j.finished)
+        .find(|j| {
+            j.id == job.id
+                && j.leaf_id == job.leaf_id
+                && j.fire_at == job.fire_at
+                && j.is_due(now_ms())
+        })
         .ok_or("任务已取消或暂停")?;
     current.running = true;
     if let Err(error) = schedule.save(&jobs) {
@@ -333,11 +366,10 @@ fn deliver(app: &tauri::AppHandle, job: &Job) -> Result<(), String> {
         }
         return Err(error);
     }
-    writer
-        .write_all(job.command.as_bytes())
-        .map_err(|e| e.to_string())?;
-    writer.write_all(&[ENTER]).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())?;
+    session.web_submit(
+        &format!("schedule-{}-{}", job.id, job.fire_at),
+        &job.command,
+    )?;
     drop(jobs);
     Ok(())
 }
@@ -383,7 +415,10 @@ pub fn start(app: tauri::AppHandle) {
                 }
                 {
                     let mut jobs = state.jobs.lock().unwrap();
-                    let Some(current) = jobs.iter_mut().find(|j| j.id == job.id) else {
+                    let Some(current) = jobs
+                        .iter_mut()
+                        .find(|j| j.id == job.id && j.fire_at == job.fire_at && j.is_due(now_ms()))
+                    else {
                         continue;
                     };
                     current.running = true;
@@ -415,7 +450,7 @@ pub fn start(app: tauri::AppHandle) {
             match deliver(&app, &job) {
                 Ok(()) => {
                     log::info!("schedule: ran job {} on leaf {}", job.id, job.leaf_id);
-                    state.complete(&job);
+                    state.complete(&job, Ok(()));
                     changed = true;
                 }
                 Err(reason) => {
@@ -432,7 +467,7 @@ pub fn start(app: tauri::AppHandle) {
                             job.id,
                             job.leaf_id
                         );
-                        state.complete(&job);
+                        state.complete(&job, Err(reason));
                         changed = true;
                     }
                 }
@@ -489,20 +524,7 @@ pub fn schedule_rebind(
     id: u64,
     leaf_id: u32,
 ) -> Result<(), String> {
-    let mut jobs = state.jobs.lock().unwrap();
-    let index = jobs
-        .iter()
-        .position(|j| j.id == id && j.target == Target::Terminal && j.paused)
-        .ok_or("任务不存在或无需绑定")?;
-    let previous = jobs[index].clone();
-    jobs[index].leaf_id = leaf_id;
-    jobs[index].paused = false;
-    if let Err(error) = state.save(&jobs) {
-        jobs[index] = previous;
-        return Err(error);
-    }
-    drop(jobs);
-    state.revision.fetch_add(1, Ordering::Relaxed);
+    state.rebind(id, leaf_id)?;
     let _ = app.emit(SCHEDULE_EVENT, state.list());
     Ok(())
 }

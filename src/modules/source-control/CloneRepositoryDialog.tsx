@@ -12,7 +12,8 @@ import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { FolderGitTwoIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useRepositoryOperation } from "@/modules/source-control/useRepositoryOperation";
 import { toast } from "sonner";
 import type { CloneOptions } from "./useMultiRepoSourceControl";
 
@@ -40,9 +41,14 @@ export function CloneRepositoryDialog({
   const [shallow, setShallow] = useState(false);
   const [recurseSubmodules, setRecurseSubmodules] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { busy, run, scopeKey } = useRepositoryOperation(
+    open,
+    defaultTargetDir ?? "",
+  );
+  const formId = useId();
   const urlInputRef = useRef<HTMLInputElement>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Reset drafts when the repository or workspace changes.
   useEffect(() => {
     if (!open) return;
     setUrl("");
@@ -50,9 +56,9 @@ export function CloneRepositoryDialog({
     setShallow(false);
     setRecurseSubmodules(false);
     setError(null);
-    setBusy(false);
-    setTimeout(() => urlInputRef.current?.focus(), 0);
-  }, [open, defaultTargetDir]);
+    const timer = setTimeout(() => urlInputRef.current?.focus(), 0);
+    return () => clearTimeout(timer);
+  }, [open, defaultTargetDir, scopeKey]);
 
   const submit = async () => {
     if (busy) return;
@@ -67,22 +73,30 @@ export function CloneRepositoryDialog({
       return;
     }
     setError(null);
-    setBusy(true);
-    try {
-      await onClone(trimmedUrl, trimmedTarget, { shallow, recurseSubmodules });
-      toast.success(`Cloned into ${trimmedTarget}`);
-      onCloned(trimmedTarget);
-      onOpenChange(false);
-    } catch (e) {
-      setError(typeof e === "string" ? e : String(e));
-    } finally {
-      setBusy(false);
-    }
+    await run(
+      () => onClone(trimmedUrl, trimmedTarget, { shallow, recurseSubmodules }),
+      () => {
+        toast.success(`Cloned into ${trimmedTarget}`);
+        onCloned(trimmedTarget);
+        onOpenChange(false);
+      },
+      "Could not clone repository",
+      (error) => setError(String(error)),
+    );
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md"
+        showCloseButton={!busy}
+        onEscapeKeyDown={(event) => {
+          if (busy) event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (busy) event.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-1.75">
             <HugeiconsIcon
@@ -101,20 +115,22 @@ export function CloneRepositoryDialog({
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1">
             <label
-              htmlFor="clone-repo-url"
+              htmlFor={`${formId}-url`}
               className="text-[10.5px] font-medium uppercase tracking-[0.12em] text-muted-foreground/85"
             >
               Repository URL
             </label>
             <Input
-              id="clone-repo-url"
+              id={`${formId}-url`}
               ref={urlInputRef}
               value={url}
+              disabled={busy}
               onChange={(e) => {
                 setUrl(e.target.value);
                 setError(null);
               }}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   void submit();
@@ -126,19 +142,21 @@ export function CloneRepositoryDialog({
           </div>
           <div className="flex flex-col gap-1">
             <label
-              htmlFor="clone-target-dir"
+              htmlFor={`${formId}-target`}
               className="text-[10.5px] font-medium uppercase tracking-[0.12em] text-muted-foreground/85"
             >
               Target directory
             </label>
             <Input
-              id="clone-target-dir"
+              id={`${formId}-target`}
               value={targetDir}
+              disabled={busy}
               onChange={(e) => {
                 setTargetDir(e.target.value);
                 setError(null);
               }}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   void submit();
@@ -150,11 +168,11 @@ export function CloneRepositoryDialog({
           </div>
           <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
             <label
-              htmlFor="clone-shallow"
+              htmlFor={`${formId}-shallow`}
               className="flex cursor-pointer items-center gap-1.5"
             >
               <Checkbox
-                id="clone-shallow"
+                id={`${formId}-shallow`}
                 aria-label="Shallow clone"
                 checked={shallow}
                 disabled={busy}
@@ -164,11 +182,11 @@ export function CloneRepositoryDialog({
               Shallow (depth 1)
             </label>
             <label
-              htmlFor="clone-submodules"
+              htmlFor={`${formId}-submodules`}
               className="flex cursor-pointer items-center gap-1.5"
             >
               <Checkbox
-                id="clone-submodules"
+                id={`${formId}-submodules`}
                 aria-label="Recurse submodules"
                 checked={recurseSubmodules}
                 disabled={busy}

@@ -7,10 +7,10 @@
 # Installed into conf.d, which every fish session sources; only Terax-spawned
 # shells (TERAX_TERMINAL=1) may get their prompt wrapped.
 if not set -q TERAX_TERMINAL
-    exit 0
+    return 0
 end
 if set -q __TERAX_HOOKS_LOADED
-    exit 0
+    return 0
 end
 set -g __TERAX_HOOKS_LOADED 1
 
@@ -91,8 +91,8 @@ function __terax_install_prompt
             printf '\e]133;B\e\\'
             return
         end
-        __terax_restore_status $__terax_status
         if functions -q __terax_user_prompt
+            __terax_restore_status $__terax_status
             __terax_user_prompt
         else
             printf '%s > ' (prompt_pwd)

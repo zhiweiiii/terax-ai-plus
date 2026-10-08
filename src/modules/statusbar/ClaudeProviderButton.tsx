@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Popover,
   PopoverContent,
@@ -19,11 +18,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { errorToast } from "@/lib/errorToast";
-import { respawnSession } from "@/modules/terminal";
 import {
-  gatewayPin,
-  setGatewayPin,
-} from "@/modules/terminal/lib/gatewayPins";
+  leafCwd,
+  leafHasForegroundProcess,
+  respawnSession,
+} from "@/modules/terminal";
+import { gatewayPin, setGatewayPin } from "@/modules/terminal/lib/gatewayPins";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   type ClaudeApiFormat,
@@ -42,7 +42,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 type GatewayStatus = {
@@ -127,7 +127,11 @@ type Props = {
  * before the variables live in that one shell, so a Claude Code that is already
  * running keeps its old endpoint until it restarts.
  */
-export function ClaudeProviderButton({ leafId }: Props) {
+export function ClaudeProviderButton(props: Props) {
+  return <ScopedClaudeProviderButton key={props.leafId ?? "none"} {...props} />;
+}
+
+function ScopedClaudeProviderButton({ leafId }: Props) {
   const config = usePreferencesStore((s) => s.claudeGateway);
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<GatewayStatus | null>(null);
@@ -135,6 +139,35 @@ export function ClaudeProviderButton({ leafId }: Props) {
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState<TestResult | null>(null);
+  const mountedRef = useRef(true);
+  const busyRef = useRef(false);
+  const statusRequestRef = useRef(0);
+  const testRequestRef = useRef(0);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      statusRequestRef.current++;
+      testRequestRef.current++;
+    };
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Editing the draft invalidates its previous probe result and pending response.
+  useEffect(() => {
+    testRequestRef.current++;
+    setTest(null);
+  }, [draft]);
+  const startOperation = () => {
+    if (!mountedRef.current || busyRef.current) return false;
+    busyRef.current = true;
+    setBusy(true);
+    return true;
+  };
+  const finishOperation = () => {
+    busyRef.current = false;
+    if (mountedRef.current) setBusy(false);
+  };
   /* Bumped whenever the mapping changes, because a plain Map cannot tell React
      that this terminal's badge is now stale. */
   const [pinRevision, setPinRevision] = useState(0);
@@ -147,10 +180,14 @@ export function ClaudeProviderButton({ leafId }: Props) {
   const orphaned = pinnedId !== undefined && pinned === null;
 
   const refreshStatus = async () => {
+    const request = ++statusRequestRef.current;
     try {
-      setStatus(await invoke<GatewayStatus>("gateway_status"));
+      const status = await invoke<GatewayStatus>("gateway_status");
+      if (mountedRef.current && statusRequestRef.current === request)
+        setStatus(status);
     } catch (e) {
-      errorToast("读取网关状态失败", e);
+      if (mountedRef.current && statusRequestRef.current === request)
+        errorToast("读取网关状态失败", e);
     }
   };
 
@@ -158,6 +195,8 @@ export function ClaudeProviderButton({ leafId }: Props) {
     setOpen(next);
     if (next) void refreshStatus();
     else {
+      statusRequestRef.current++;
+      testRequestRef.current++;
       setDraft(null);
       setTest(null);
     }
@@ -167,16 +206,30 @@ export function ClaudeProviderButton({ leafId }: Props) {
    *  are injected when the pty spawns, which is the only way they can reach a
    *  Claude Code without also landing in the terminal and its history. */
   const applyToTerminal = async (value: string | null): Promise<boolean> => {
+    if (!mountedRef.current) return false;
     if (leafId === null) {
       toast.error("没有可用的命令行");
       return false;
     }
+    if (await leafHasForegroundProcess(leafId)) {
+      toast.error("命令行正在运行任务，请结束任务后再切换供应商");
+      return false;
+    }
+    if (!mountedRef.current) return false;
+    const previous = gatewayPin(leafId);
     setGatewayPin(leafId, value);
     setPinRevision((n) => n + 1);
     try {
-      await respawnSession(leafId);
+      if (!(await respawnSession(leafId, leafCwd(leafId) ?? undefined))) {
+        setGatewayPin(leafId, previous ?? null);
+        if (mountedRef.current) setPinRevision((n) => n + 1);
+        toast.error("命令行正在启动或未能启动，请稍后重试");
+        return false;
+      }
       return true;
     } catch (e) {
+      setGatewayPin(leafId, previous ?? null);
+      if (mountedRef.current) setPinRevision((n) => n + 1);
       errorToast("重启命令行失败", e);
       return false;
     }
@@ -196,39 +249,59 @@ export function ClaudeProviderButton({ leafId }: Props) {
   };
 
   const select = async (provider: ClaudeProvider) => {
-    setBusy(true);
+    if (!startOperation()) return;
     try {
-      if (!(await persist({ ...config, current: provider.id }))) return;
+      if (leafId === null || (await leafHasForegroundProcess(leafId))) {
+        toast.error("请先选择一个空闲命令行");
+        return;
+      }
+      if (!mountedRef.current) return;
       // Verify before rewiring the shell: switching to an endpoint that does
       // not answer would leave a terminal that looks configured and fails on
       // the first prompt.
       const probe = await invoke<TestResult>("gateway_test_provider", {
         provider,
       });
+      if (!mountedRef.current) return;
       if (!probe.ok) {
         setTest(probe);
         errorToast(`${provider.name} 接口不可用，未切换`, probe.message);
         return;
       }
+      const latest = usePreferencesStore.getState().claudeGateway;
+      if (
+        !latest.providers.some(
+          (item) => JSON.stringify(item) === JSON.stringify(provider),
+        )
+      ) {
+        toast.error("供应商配置已变化，请重新选择");
+        return;
+      }
+      if (!(await persist({ ...latest, current: provider.id }))) return;
+      if (!mountedRef.current) return;
       if (!(await applyToTerminal(provider.id))) return;
       await refreshStatus();
+      if (!mountedRef.current) return;
       setOpen(false);
-      toast.success(`本命令行已切换到 ${provider.name}（${probe.latencyMs}ms）`);
+      toast.success(
+        `本命令行已切换到 ${provider.name}（${probe.latencyMs}ms）`,
+      );
     } catch (e) {
       errorToast("切换供应商失败", e);
     } finally {
-      setBusy(false);
+      finishOperation();
     }
   };
 
   const deactivate = async () => {
-    setBusy(true);
+    if (!startOperation()) return;
     try {
       if (!(await applyToTerminal(null))) return;
+      if (!mountedRef.current) return;
       setOpen(false);
       toast.success("本命令行已停用");
     } finally {
-      setBusy(false);
+      finishOperation();
     }
   };
 
@@ -236,14 +309,26 @@ export function ClaudeProviderButton({ leafId }: Props) {
    *  configuration from a wrong key, a wrong path or a model the plan does not
    *  include, which is the whole question being asked here. */
   const runTest = async (provider: ClaudeProvider) => {
+    if (!startOperation()) return;
+    const request = ++testRequestRef.current;
+    const submittedDraft = draft;
     setTesting(true);
     setTest(null);
     try {
-      setTest(await invoke<TestResult>("gateway_test_provider", { provider }));
+      const result = await invoke<TestResult>("gateway_test_provider", {
+        provider,
+      });
+      if (
+        mountedRef.current &&
+        testRequestRef.current === request &&
+        draftRef.current === submittedDraft
+      )
+        setTest(result);
     } catch (e) {
       errorToast("测试失败", e);
     } finally {
-      setTesting(false);
+      if (mountedRef.current) setTesting(false);
+      finishOperation();
     }
   };
 
@@ -267,11 +352,12 @@ export function ClaudeProviderButton({ leafId }: Props) {
 
   const save = async () => {
     if (!draft) return;
+    if (!startOperation()) return;
+    const submittedDraft = draft;
     const name = draft.name.trim() || draft.baseUrl.trim();
-    setBusy(true);
     try {
       const provider: ClaudeProvider = {
-        id: draft.id ?? `${Date.now()}`,
+        id: draft.id ?? crypto.randomUUID(),
         name,
         baseUrl: draft.baseUrl.trim(),
         apiKey: draft.apiKey.trim(),
@@ -284,26 +370,33 @@ export function ClaudeProviderButton({ leafId }: Props) {
           haiku: draft.models.haiku.trim(),
         },
       };
+      const latest = usePreferencesStore.getState().claudeGateway;
+      if (draft.id && !latest.providers.some((item) => item.id === draft.id)) {
+        toast.error("供应商已删除，无法覆盖");
+        return;
+      }
       const providers = draft.id
-        ? config.providers.map((p) => (p.id === draft.id ? provider : p))
-        : [...config.providers, provider];
-      if (await persist({ ...config, providers })) setDraft(null);
+        ? latest.providers.map((p) => (p.id === draft.id ? provider : p))
+        : [...latest.providers, provider];
+      if ((await persist({ ...latest, providers })) && mountedRef.current)
+        setDraft((current) => (current === submittedDraft ? null : current));
     } finally {
-      setBusy(false);
+      finishOperation();
     }
   };
 
   const remove = async (provider: ClaudeProvider) => {
-    setBusy(true);
+    if (!startOperation()) return;
     try {
-      const providers = config.providers.filter((p) => p.id !== provider.id);
+      const latest = usePreferencesStore.getState().claudeGateway;
+      const providers = latest.providers.filter((p) => p.id !== provider.id);
       await persist({
         providers,
-        current: config.current === provider.id ? null : config.current,
+        current: latest.current === provider.id ? null : latest.current,
       });
-      setPinRevision((n) => n + 1);
+      if (mountedRef.current) setPinRevision((n) => n + 1);
     } finally {
-      setBusy(false);
+      finishOperation();
     }
   };
 
@@ -336,13 +429,16 @@ export function ClaudeProviderButton({ leafId }: Props) {
         <PopoverContent
           align="end"
           side="top"
-          className="max-h-[70vh] w-[26rem] overflow-y-auto p-3"
+          className="max-h-[70vh] w-[26rem] max-w-[calc(100vw-2rem)] overflow-y-auto p-3"
         >
           <div className="flex flex-col gap-2.5">
+            <p className="text-[10.5px] leading-snug text-muted-foreground">
+              切换会发送一次测试请求并重启空闲命令行。运行任务时不可切换。
+            </p>
             {config.providers.length === 0 && draft === null ? (
               <p className="text-[10.5px] leading-snug text-muted-foreground">
-                还没有供应商。添加一个中转站，Claude Code 就能通过本地网关使用它，
-                OpenAI 格式的接口会自动转换。
+                还没有供应商。添加一个中转站，Claude Code
+                就能通过本地网关使用它， OpenAI 格式的接口会自动转换。
               </p>
             ) : null}
 
@@ -447,6 +543,7 @@ export function ClaudeProviderButton({ leafId }: Props) {
               <div className="flex flex-col gap-2.5 border-t border-border/60 pt-2.5">
                 <Field label="名称">
                   <Input
+                    aria-label="名称"
                     className="h-8"
                     value={draft.name}
                     onChange={(e) =>
@@ -458,6 +555,7 @@ export function ClaudeProviderButton({ leafId }: Props) {
                 </Field>
                 <Field label="Base URL">
                   <Input
+                    aria-label="Base URL"
                     className="h-8"
                     value={draft.baseUrl}
                     onChange={(e) =>
@@ -469,6 +567,8 @@ export function ClaudeProviderButton({ leafId }: Props) {
                 </Field>
                 <Field label="API Key">
                   <Input
+                    type="password"
+                    aria-label="API Key"
                     className="h-8"
                     value={draft.apiKey}
                     onChange={(e) =>
@@ -491,7 +591,10 @@ export function ClaudeProviderButton({ leafId }: Props) {
                         setDraft({ ...draft, apiFormat: v as ClaudeApiFormat })
                       }
                     >
-                      <SelectTrigger className="h-8 w-full text-[11px]">
+                      <SelectTrigger
+                        aria-label="接口格式"
+                        className="h-8 w-full text-[11px]"
+                      >
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -511,7 +614,10 @@ export function ClaudeProviderButton({ leafId }: Props) {
                         setDraft({ ...draft, authStyle: v as ClaudeAuthStyle })
                       }
                     >
-                      <SelectTrigger className="h-8 w-full text-[11px]">
+                      <SelectTrigger
+                        aria-label="认证方式"
+                        className="h-8 w-full text-[11px]"
+                      >
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -527,6 +633,7 @@ export function ClaudeProviderButton({ leafId }: Props) {
                 </div>
                 <Field label="默认模型">
                   <Input
+                    aria-label="默认模型"
                     className="h-8"
                     value={draft.models.default}
                     onChange={(e) =>
@@ -543,6 +650,7 @@ export function ClaudeProviderButton({ leafId }: Props) {
                   {(["opus", "sonnet", "haiku"] as const).map((role) => (
                     <Field key={role} label={ROLE_LABELS[role]}>
                       <Input
+                        aria-label={`${ROLE_LABELS[role]} 模型`}
                         className="h-8"
                         value={draft.models[role]}
                         onChange={(e) =>
@@ -558,7 +666,8 @@ export function ClaudeProviderButton({ leafId }: Props) {
                   ))}
                 </div>
                 <p className="text-[10.5px] leading-snug text-muted-foreground">
-                  Claude Code 请求哪一档模型，就发对应的那一行；留空的沿用默认模型。
+                  Claude Code
+                  请求哪一档模型，就发对应的那一行；留空的沿用默认模型。
                 </p>
                 <div className="flex items-center gap-2">
                   <Button
@@ -599,9 +708,11 @@ export function ClaudeProviderButton({ leafId }: Props) {
 
             <div className="flex items-center justify-between gap-2 border-t border-border/60 pt-2">
               <span className="min-w-0 truncate text-[10px] text-muted-foreground">
-                {status?.running
-                  ? `网关 ${status.origin} · 只作用于当前命令行`
-                  : "网关未启动，选择供应商后自动开启"}
+                {status === null
+                  ? "网关状态暂不可用"
+                  : status.running
+                    ? `网关 ${status.origin} · 只作用于当前命令行`
+                    : "网关未启动，选择供应商后自动开启"}
               </span>
               {pinnedId !== undefined ? (
                 <Button
@@ -651,7 +762,10 @@ function ProviderBadge({
           <span className="truncate">{orphaned ? "供应商已删除" : name}</span>
         </span>
       </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-64 text-[11px] leading-relaxed">
+      <TooltipContent
+        side="top"
+        className="max-w-64 text-[11px] leading-relaxed"
+      >
         {orphaned
           ? "这个命令行仍指向一个已删除的供应商，请重新选择一个。"
           : `这个命令行的 Claude Code 正走 ${name}，其他命令行不受影响。`}
@@ -683,7 +797,9 @@ function TestLine({ result }: { result: TestResult }) {
   return (
     <div
       className={`flex items-start gap-1.5 ${
-        result.ok ? "text-emerald-700 dark:text-emerald-400" : "text-destructive"
+        result.ok
+          ? "text-emerald-700 dark:text-emerald-400"
+          : "text-destructive"
       }`}
     >
       <p className="min-w-0 flex-1 select-text whitespace-pre-wrap break-words text-[10.5px] leading-snug">
@@ -712,9 +828,8 @@ function Field({
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <Label className="text-[11px]">{label}</Label>
+      <span className="text-[11px]">{label}</span>
       {children}
     </div>
   );
 }
-

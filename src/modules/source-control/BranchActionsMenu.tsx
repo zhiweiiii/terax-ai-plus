@@ -77,6 +77,7 @@ export function BranchActionsMenu({
         className="min-w-44 rounded-xl border border-border/40 bg-popover/90 p-1 shadow-lg backdrop-blur-md"
       >
         <DropdownMenuItem
+          disabled={busy || !currentBranch}
           onSelect={(e) => {
             e.preventDefault();
             onPull();
@@ -114,6 +115,7 @@ export function BranchActionsMenu({
         />
         <DropdownMenuSeparator className="my-0.5 border-t border-border/30" />
         <DropdownMenuItem
+          disabled={busy || !currentBranch}
           onSelect={(e) => {
             e.preventDefault();
             onDiff();
@@ -166,6 +168,7 @@ function BranchPickerSub({
       >
         {targets.map((name) => (
           <DropdownMenuItem
+            disabled={busy}
             key={name}
             onSelect={(e) => {
               e.preventDefault();

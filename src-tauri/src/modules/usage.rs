@@ -147,20 +147,17 @@ fn fetch() -> Usage {
     // otherwise translate a leading slash into a Windows path, which is exactly
     // how this gets mistaken for a missing feature.
     let command = "claude -p \"/usage\"";
-    let mut cmd = match crate::modules::shell::build_oneshot_command(
-        command,
-        &WorkspaceEnv::Local,
-        None,
-    ) {
-        Ok(cmd) => cmd,
-        Err(message) => {
-            return Usage {
-                fetched_at: now_secs(),
-                error: Some(message),
-                ..Usage::default()
+    let mut cmd =
+        match crate::modules::shell::build_oneshot_command(command, &WorkspaceEnv::Local, None) {
+            Ok(cmd) => cmd,
+            Err(message) => {
+                return Usage {
+                    fetched_at: now_secs(),
+                    error: Some(message),
+                    ..Usage::default()
+                }
             }
-        }
-    };
+        };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -176,6 +173,18 @@ fn fetch() -> Usage {
             }
         }
     };
+    let process_job = match crate::modules::proc::job::ProcessJob::create_for(child.id()) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Usage {
+                fetched_at: now_secs(),
+                error: Some(format!("无法管理 claude 进程：{error}")),
+                ..Usage::default()
+            };
+        }
+    };
     let stdout = child.take_stdout();
     let stderr = child.take_stderr();
     let out_handle = thread::spawn(move || stdout.map(|mut p| drain(&mut p)).unwrap_or_default());
@@ -186,9 +195,11 @@ fn fetch() -> Usage {
     thread::spawn(move || {
         let _ = tx.send(waiter.wait());
     });
-    let timed_out = match rx.recv_timeout(TIMEOUT) {
-        Ok(_) => false,
-        Err(_) => {
+    let waited = rx.recv_timeout(TIMEOUT);
+    drop(process_job);
+    let timed_out = match waited {
+        Ok(Ok(_)) => false,
+        _ => {
             let _ = child.kill();
             let _ = child.wait();
             true
@@ -355,7 +366,22 @@ fn fetch_codex() -> CodexUsage {
             }
         }
     };
+    let process_job = match crate::modules::proc::job::ProcessJob::create_for(child.id()) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return CodexUsage {
+                fetched_at: now_secs(),
+                error: Some(format!("无法管理 codex app-server 进程：{error}")),
+                ..CodexUsage::default()
+            };
+        }
+    };
     let Some(mut stdin) = child.stdin.take() else {
+        process_job.terminate();
+        let _ = child.kill();
+        let _ = child.wait();
         return CodexUsage {
             fetched_at: now_secs(),
             error: Some("无法打开 codex app-server 的输入流".to_string()),
@@ -363,6 +389,7 @@ fn fetch_codex() -> CodexUsage {
         };
     };
     let Some(stdout) = child.stdout.take() else {
+        process_job.terminate();
         let _ = child.kill();
         let _ = child.wait();
         return CodexUsage {
@@ -393,6 +420,7 @@ fn fetch_codex() -> CodexUsage {
     })();
     if let Err(error) = write_result {
         drop(stdin);
+        process_job.terminate();
         let _ = child.kill();
         let _ = child.wait();
         return CodexUsage {
@@ -415,11 +443,13 @@ fn fetch_codex() -> CodexUsage {
             }
         }
     });
-    let stderr_reader = stderr.map(|stderr| thread::spawn(move || drain(&mut BufReader::new(stderr))));
+    let stderr_reader =
+        stderr.map(|stderr| thread::spawn(move || drain(&mut BufReader::new(stderr))));
     let result = rx.recv_timeout(TIMEOUT);
     // The app-server is only a read probe. End it immediately after the one
     // response so it cannot outlive Terax or compete with an open Codex TUI.
     drop(stdin);
+    process_job.terminate();
     let _ = child.kill();
     let _ = child.wait();
     let _ = reader.join();

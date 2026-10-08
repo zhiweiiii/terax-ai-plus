@@ -29,6 +29,7 @@ import {
   setEditorWordWrap,
   setVimMode,
 } from "@/modules/settings/store";
+import { savePreference } from "@/settings/lib/savePreference";
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useState } from "react";
@@ -65,9 +66,13 @@ export function EditorSection() {
         <SettingRow title="字号" description="代码编辑器文字大小。">
           <Select
             value={String(editorFontSize)}
-            onValueChange={(v) => void setEditorFontSize(Number(v))}
+            onValueChange={(v) => savePreference(setEditorFontSize(Number(v)))}
           >
-            <SelectTrigger size="sm" className="h-8 w-28 text-[12px]">
+            <SelectTrigger
+              aria-label="编辑器字号"
+              size="sm"
+              className="h-8 w-28 text-[12px]"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -93,7 +98,8 @@ export function EditorSection() {
         >
           <Switch
             checked={vimMode}
-            onCheckedChange={(v) => void setVimMode(v)}
+            aria-label="编辑器 Vim 模式"
+            onCheckedChange={(v) => savePreference(setVimMode(v))}
           />
         </SettingRow>
         <SettingRow
@@ -102,7 +108,8 @@ export function EditorSection() {
         >
           <Switch
             checked={editorWordWrap}
-            onCheckedChange={(v) => void setEditorWordWrap(v)}
+            aria-label="编辑器自动换行"
+            onCheckedChange={(v) => savePreference(setEditorWordWrap(v))}
           />
         </SettingRow>
       </div>
@@ -115,22 +122,24 @@ export function EditorSection() {
         >
           <Switch
             checked={editorAutoSave}
-            onCheckedChange={(v) => void setEditorAutoSave(v)}
+            aria-label="编辑器自动保存"
+            onCheckedChange={(v) => savePreference(setEditorAutoSave(v))}
           />
         </SettingRow>
         {editorAutoSave && (
           <AutoSaveDelayInput
             value={editorAutoSaveDelay}
-            onChange={(v) => void setEditorAutoSaveDelay(v)}
+            onChange={(v) => savePreference(setEditorAutoSaveDelay(v))}
           />
         )}
         <SettingRow
           title="保存时格式化"
-          description="手动保存 (Cmd+S / :w) 时用下方选择的格式化工具格式化文件。"
+          description="手动保存 (Ctrl+S / :w) 时用下方选择的格式化工具格式化文件。"
         >
           <Switch
             checked={editorFormatOnSave}
-            onCheckedChange={(v) => void setEditorFormatOnSave(v)}
+            aria-label="保存时格式化"
+            onCheckedChange={(v) => savePreference(setEditorFormatOnSave(v))}
           />
         </SettingRow>
         {editorFormatOnSave && (
@@ -141,7 +150,7 @@ export function EditorSection() {
             >
               <FormatterSelect
                 value={editorFormatter}
-                onChange={(v) => void setEditorFormatter(v)}
+                onChange={(v) => savePreference(setEditorFormatter(v))}
               />
             </SettingRow>
             {usesCustom && <CustomFormatCommandInput />}
@@ -170,7 +179,7 @@ function FormatterSelect({
 }) {
   return (
     <Select value={value} onValueChange={(v) => onChange(v as EditorFormatter)}>
-      <SelectTrigger className="h-8 w-40 text-[12px]">
+      <SelectTrigger aria-label="格式化工具" className="h-8 w-40 text-[12px]">
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -199,13 +208,20 @@ function CustomFormatCommandInput() {
     >
       <Input
         value={draft}
+        aria-label="自定义格式化命令"
         placeholder="mytool --fix {file}"
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => {
-          if (draft !== stored) void setEditorCustomFormatCommand(draft);
+          if (draft !== stored)
+            savePreference(setEditorCustomFormatCommand(draft));
         }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
+          if (
+            !e.nativeEvent.isComposing &&
+            e.keyCode !== 229 &&
+            e.key === "Enter"
+          )
+            e.currentTarget.blur();
         }}
         className="h-8 w-64 font-mono text-[12px] md:text-[12px]"
       />
@@ -218,8 +234,11 @@ function FormatterOverrides() {
   const entries = Object.entries(byLang);
   const unused = EXPOSED_LANGUAGES.filter((l) => !(l.ext in byLang));
 
-  const update = (next: Record<string, EditorFormatter>) =>
-    void setEditorFormatterByLang(next);
+  const update = (
+    next: (
+      current: Record<string, EditorFormatter>,
+    ) => Record<string, EditorFormatter>,
+  ) => savePreference(setEditorFormatterByLang(next));
 
   return (
     <>
@@ -233,7 +252,11 @@ function FormatterOverrides() {
           className="h-8 rounded-md border border-border px-3 text-[12px] text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
           onClick={() => {
             const first = unused[0];
-            if (first) update({ ...byLang, [first.ext]: "lsp" });
+            if (first)
+              update((current) => ({
+                ...current,
+                [first.ext]: current[first.ext] ?? "lsp",
+              }));
           }}
         >
           添加覆盖规则
@@ -248,13 +271,19 @@ function FormatterOverrides() {
             value={lang}
             onValueChange={(nextLang) => {
               if (nextLang === lang) return;
-              const next = { ...byLang };
-              delete next[lang];
-              next[nextLang] = formatter;
-              update(next);
+              update((current) => {
+                if (!(lang in current) || nextLang in current) return current;
+                const next = { ...current };
+                delete next[lang];
+                next[nextLang] = current[lang];
+                return next;
+              });
             }}
           >
-            <SelectTrigger className="h-7 w-44 text-[12px]">
+            <SelectTrigger
+              aria-label="格式化规则语言"
+              className="h-7 w-44 text-[12px]"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -269,16 +298,22 @@ function FormatterOverrides() {
           </Select>
           <FormatterSelect
             value={formatter}
-            onChange={(v) => update({ ...byLang, [lang]: v })}
+            onChange={(v) =>
+              update((current) =>
+                lang in current ? { ...current, [lang]: v } : current,
+              )
+            }
           />
           <button
             type="button"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             title="移除覆盖规则"
             onClick={() => {
-              const next = { ...byLang };
-              delete next[lang];
-              update(next);
+              update((current) => {
+                const next = { ...current };
+                delete next[lang];
+                return next;
+              });
             }}
           >
             <HugeiconsIcon icon={Cancel01Icon} size={12} strokeWidth={2} />
@@ -329,6 +364,7 @@ function AutoSaveDelayInput({
       <div className="flex items-center gap-2">
         <Input
           type="number"
+          aria-label="自动保存延迟（毫秒）"
           min={AUTO_SAVE_DELAY_MIN}
           max={AUTO_SAVE_DELAY_MAX}
           step={AUTO_SAVE_STEP}
@@ -336,7 +372,11 @@ function AutoSaveDelayInput({
           onChange={(e) => setDraft(e.target.value)}
           onBlur={commit}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (
+              !e.nativeEvent.isComposing &&
+              e.keyCode !== 229 &&
+              e.key === "Enter"
+            ) {
               e.currentTarget.blur();
             }
           }}

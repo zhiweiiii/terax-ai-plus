@@ -1,5 +1,6 @@
 import { USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
+import { errorToast } from "@/lib/errorToast";
 import {
   Cancel01Icon,
   Copy01Icon,
@@ -21,16 +22,36 @@ export function WindowControls({ closeOnly = false }: Props) {
   useEffect(() => {
     if (!USE_CUSTOM_WINDOW_CONTROLS || closeOnly) return;
     const w = getCurrentWindow();
+    let alive = true;
+    let request = 0;
     let unlisten: (() => void) | undefined;
-    void w.isMaximized().then(setMaximized);
+    const refresh = () => {
+      if (!alive) return;
+      const current = ++request;
+      void w
+        .isMaximized()
+        .then((value) => {
+          if (alive && current === request) setMaximized(value);
+        })
+        .catch((error) =>
+          console.error("[terax] window state query failed:", error),
+        );
+    };
+    refresh();
     void w
-      .onResized(() => {
-        void w.isMaximized().then(setMaximized);
-      })
+      .onResized(refresh)
       .then((un) => {
-        unlisten = un;
-      });
-    return () => unlisten?.();
+        if (!alive) un();
+        else unlisten = un;
+      })
+      .catch((error) =>
+        console.error("[terax] window resize listener failed:", error),
+      );
+    return () => {
+      alive = false;
+      request++;
+      unlisten?.();
+    };
   }, [closeOnly]);
 
   if (!USE_CUSTOM_WINDOW_CONTROLS) return null;
@@ -41,12 +62,25 @@ export function WindowControls({ closeOnly = false }: Props) {
     <div className="flex h-full shrink-0 items-center gap-0.5 pr-1">
       {!closeOnly && (
         <>
-          <CtlButton ariaLabel="Minimize" onClick={() => void w.minimize()}>
+          <CtlButton
+            ariaLabel="Minimize"
+            onClick={() =>
+              void w
+                .minimize()
+                .catch((error) =>
+                  errorToast("Could not minimize window", error),
+                )
+            }
+          >
             <HugeiconsIcon icon={MinusSignIcon} size={12} strokeWidth={2} />
           </CtlButton>
           <CtlButton
             ariaLabel={maximized ? "Restore" : "Maximize"}
-            onClick={() => void w.toggleMaximize()}
+            onClick={() =>
+              void w
+                .toggleMaximize()
+                .catch((error) => errorToast("Could not resize window", error))
+            }
           >
             <HugeiconsIcon
               icon={maximized ? Copy01Icon : SquareIcon}
@@ -56,7 +90,15 @@ export function WindowControls({ closeOnly = false }: Props) {
           </CtlButton>
         </>
       )}
-      <CtlButton ariaLabel="Close" onClick={() => void w.close()} danger>
+      <CtlButton
+        ariaLabel="Close"
+        onClick={() =>
+          void w
+            .close()
+            .catch((error) => errorToast("Could not close window", error))
+        }
+        danger
+      >
         <HugeiconsIcon icon={Cancel01Icon} size={14} strokeWidth={2} />
       </CtlButton>
     </div>

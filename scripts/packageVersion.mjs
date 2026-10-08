@@ -8,15 +8,18 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const statePath = resolve(root, ".terax-package-state.json");
 const inputPaths = [
   "src",
-  "src-tauri/src",
+  "src-tauri",
   "scripts",
   "index.html",
   "settings.html",
   "package.json",
   "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
   "tsconfig.json",
   "tsconfig.node.json",
   "vite.config.ts",
+  "vite.web.config.ts",
+  "public",
   "src-tauri/Cargo.toml",
   "src-tauri/Cargo.lock",
   "src-tauri/build.rs",
@@ -89,19 +92,24 @@ function updateVersion(version) {
   const originals = Object.fromEntries(
     Object.entries(manifestPaths).map(([name, path]) => [name, readText(path)]),
   );
-  writeText(manifestPaths.package, replaceJsonVersion(originals.package, version));
-  writeText(manifestPaths.tauri, replaceJsonVersion(originals.tauri, version));
   const current = readVersionFromCargo(originals.cargo);
   const line = new RegExp(`^version = "${escapeRegex(current)}"$`, "gm");
   const cargo = originals.cargo.replace(line, `version = "${version}"`);
   if ((cargo.match(/^version = "/gm) ?? []).length !== 2) {
     throw new Error("Could not update both Cargo package versions.");
   }
-  writeText(manifestPaths.cargo, cargo);
-  writeText(
-    manifestPaths.cargoLock,
-    replaceWorkspaceLockVersions(originals.cargoLock, version),
-  );
+  const updated = {
+    package: replaceJsonVersion(originals.package, version),
+    tauri: replaceJsonVersion(originals.tauri, version),
+    cargo,
+    cargoLock: replaceWorkspaceLockVersions(originals.cargoLock, version),
+  };
+  try {
+    for (const [name, content] of Object.entries(updated)) writeText(manifestPaths[name], content);
+  } catch (error) {
+    for (const [name, content] of Object.entries(originals)) writeText(manifestPaths[name], content);
+    throw error;
+  }
   return originals;
 }
 
@@ -143,10 +151,10 @@ function readVersionFromCargo(content) {
 function inputFiles() {
   const output = execFileSync(
     "git",
-    ["ls-files", "--cached", "--others", "--exclude-standard", "--", ...inputPaths],
+    ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...inputPaths],
     { cwd: root, encoding: "utf8" },
   );
-  return [...new Set(output.split(/\r?\n/).filter(Boolean))].sort();
+  return [...new Set(output.split("\0").filter((path) => path && path !== "src-tauri/web.html"))].sort();
 }
 
 function normalizedContent(relativePath, content, version) {
@@ -181,11 +189,9 @@ function sourceFingerprint(version) {
       continue;
     }
     const content = readFileSync(path);
-    const normalized = normalizedContent(
-      relativePath,
-      content.toString("utf8"),
-      version,
-    );
+    const normalized = Object.values(manifestPaths).includes(path)
+      ? normalizedContent(relativePath, content.toString("utf8"), version)
+      : content;
     hash.update(normalized);
     hash.update("\0");
   }
@@ -212,6 +218,12 @@ function writeState(version) {
 
 export function preparePackageVersion() {
   const version = readVersion();
+  if (process.env.GITHUB_REF_TYPE === "tag") {
+    if (process.env.GITHUB_REF_NAME !== `v${version}`) {
+      throw new Error("Release tag must match the manifest version.");
+    }
+    return { changed: false, version, originals: null };
+  }
   const changed = readState()?.fingerprint !== sourceFingerprint(version);
   if (!changed) return { changed: false, version, originals: null };
   const next = nextPatch(version);

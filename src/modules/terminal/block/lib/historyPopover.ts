@@ -5,11 +5,12 @@ import {
   StateField,
 } from "@codemirror/state";
 import {
-  EditorView,
+  type EditorView,
   keymap,
   showTooltip,
   type Tooltip,
   type TooltipView,
+  ViewPlugin,
 } from "@codemirror/view";
 import { Clock01Icon } from "@hugeicons/core-free-icons";
 import { hugeIcon } from "./completionIcons";
@@ -75,15 +76,14 @@ function historyTooltipView(view: EditorView): TooltipView {
   list.className = "cm-history-list";
   const footer = document.createElement("div");
   footer.className = "cm-history-footer";
-  footer.textContent = "↑↓ navigate · ↵ run · esc";
+  footer.textContent = "↑↓ navigate · ↵ select · esc";
   dom.append(list, footer);
 
-  let lastSig = "";
+  let lastState: HState | null = null;
   const render = () => {
     const h = view.state.field(historyField);
-    const sig = `${h.index}|${h.items.length}|${h.items[0] ?? ""}`;
-    if (sig === lastSig) return;
-    lastSig = sig;
+    if (h === lastState) return;
+    lastState = h;
     list.replaceChildren();
     h.items.forEach((cmd, i) => {
       const row = document.createElement("div");
@@ -125,23 +125,51 @@ function historyTooltipView(view: EditorView): TooltipView {
 
 export function historyPopover(fetch: Fetcher) {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let epoch = 0;
+  let destroyed = false;
+  let pending = false;
+
+  const invalidate = () => {
+    epoch += 1;
+    pending = false;
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+
+  const request = (view: EditorView, query: string, refiltering: boolean) => {
+    const requestEpoch = epoch;
+    pending = true;
+    void fetch(query, LIMIT)
+      .then((items) => {
+        if (
+          destroyed ||
+          requestEpoch !== epoch ||
+          !view.hasFocus ||
+          view.state.doc.toString() !== query ||
+          (refiltering && !view.state.field(historyField, false)?.open)
+        )
+          return;
+        if (items.length || refiltering)
+          dispatch(view, { open: true, items, index: 0 });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (requestEpoch === epoch) pending = false;
+      });
+  };
 
   const open = (view: EditorView) => {
+    invalidate();
     const query = view.state.doc.toString();
-    void fetch(query, LIMIT).then((items) => {
-      if (items.length) dispatch(view, { open: true, items, index: 0 });
-    });
+    request(view, query, false);
   };
 
   const refilter = (view: EditorView) => {
-    if (timer) clearTimeout(timer);
+    invalidate();
     const query = view.state.doc.toString();
     timer = setTimeout(() => {
-      void fetch(query, LIMIT).then((items) => {
-        if (view.state.field(historyField, false)?.open) {
-          dispatch(view, { open: true, items, index: 0 });
-        }
-      });
+      timer = null;
+      request(view, query, true);
     }, REFILTER_MS);
   };
 
@@ -173,9 +201,10 @@ export function historyPopover(fetch: Fetcher) {
   };
 
   const dismiss = (view: EditorView): boolean => {
-    if (!view.state.field(historyField, false)?.open) return false;
+    const handled = pending || !!view.state.field(historyField, false)?.open;
+    invalidate();
     close(view);
-    return true;
+    return handled;
   };
 
   return [
@@ -188,9 +217,24 @@ export function historyPopover(fetch: Fetcher) {
         { key: "Escape", run: dismiss },
       ]),
     ),
-    EditorView.updateListener.of((u) => {
-      if (!u.docChanged) return;
-      if (u.state.field(historyField, false)?.open) refilter(u.view);
-    }),
+    ViewPlugin.fromClass(
+      class {
+        update(u: import("@codemirror/view").ViewUpdate) {
+          if (u.docChanged) {
+            invalidate();
+            if (u.state.field(historyField, false)?.open) refilter(u.view);
+          } else if (
+            (u.focusChanged && !u.view.hasFocus) ||
+            (u.startState.field(historyField, false)?.open &&
+              !u.state.field(historyField, false)?.open)
+          )
+            invalidate();
+        }
+        destroy() {
+          destroyed = true;
+          invalidate();
+        }
+      },
+    ),
   ];
 }

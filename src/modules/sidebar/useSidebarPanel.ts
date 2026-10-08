@@ -15,11 +15,11 @@ const SIDEBAR_WIDTH_STORAGE_KEY = "terax.sidebar.width";
 const SIDEBAR_VIEW_STORAGE_KEY = "terax.sidebar.view";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "terax.sidebar.collapsed";
 
-export function shouldPersistSidebarWidth(
+function shouldPersistSidebarWidth(
   width: number,
   isUserInteraction: boolean,
 ): boolean {
-  return isUserInteraction && width > 0;
+  return isUserInteraction && Number.isFinite(width) && width > 0;
 }
 
 function clampSidebarWidth(width: number): number {
@@ -32,7 +32,7 @@ function clampSidebarWidth(width: number): number {
 function readSidebarWidth(): number {
   try {
     const stored = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
-    const parsed = stored ? Number.parseInt(stored, 10) : NaN;
+    const parsed = stored ? Number(stored) : NaN;
     return Number.isFinite(parsed)
       ? clampSidebarWidth(parsed)
       : SIDEBAR_DEFAULT_WIDTH;
@@ -44,7 +44,12 @@ function readSidebarWidth(): number {
 function readSidebarView(): SidebarViewId {
   try {
     const stored = window.localStorage.getItem(SIDEBAR_VIEW_STORAGE_KEY);
-    if (stored === "explorer" || stored === "source-control" || stored === "open-files") return stored;
+    if (
+      stored === "explorer" ||
+      stored === "source-control" ||
+      stored === "open-files"
+    )
+      return stored;
   } catch {
     // ignore
   }
@@ -68,7 +73,8 @@ export function useSidebarPanel(
   explorerRef: RefObject<FocusableExplorer | null>,
 ) {
   const sidebarRef = useRef<PanelImperativeHandle | null>(null);
-  const sidebarWidthRef = useRef(readSidebarWidth());
+  const [initialSidebarWidth] = useState(readSidebarWidth);
+  const sidebarWidthRef = useRef(initialSidebarWidth);
   const sidebarWidthWriteTimerRef = useRef(0);
   const explorerReturnFocusRef = useRef<HTMLElement | null>(null);
   const [sidebarView, setSidebarViewState] =
@@ -139,14 +145,15 @@ export function useSidebarPanel(
   const persistSidebarWidth = useCallback(
     (next: number, isUserInteraction: boolean) => {
       if (!shouldPersistSidebarWidth(next, isUserInteraction)) return;
-      sidebarWidthRef.current = next;
+      const width = clampSidebarWidth(next);
+      sidebarWidthRef.current = width;
       if (sidebarWidthWriteTimerRef.current) {
         window.clearTimeout(sidebarWidthWriteTimerRef.current);
       }
       sidebarWidthWriteTimerRef.current = window.setTimeout(() => {
         sidebarWidthWriteTimerRef.current = 0;
         try {
-          window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(next));
+          window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
         } catch {
           // ignore
         }
@@ -159,6 +166,15 @@ export function useSidebarPanel(
     return () => {
       if (sidebarWidthWriteTimerRef.current) {
         window.clearTimeout(sidebarWidthWriteTimerRef.current);
+        sidebarWidthWriteTimerRef.current = 0;
+        try {
+          window.localStorage.setItem(
+            SIDEBAR_WIDTH_STORAGE_KEY,
+            String(sidebarWidthRef.current),
+          );
+        } catch {
+          // Storage may be unavailable during window shutdown.
+        }
       }
     };
   }, []);

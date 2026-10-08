@@ -1,36 +1,19 @@
-import {
-  type GitRepoHead,
-  type GitStatusSnapshot,
-  native,
-} from "@/lib/native";
+import { type GitRepoHead, type GitStatusSnapshot, native } from "@/lib/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 
 export type RepoStatusEntry = {
   repoRoot: string;
-  /** Last path segment, used as the group header label. */
   name: string;
   status: GitStatusSnapshot;
 };
-
 export function repoDisplayName(repoRoot: string): string {
   const parts = repoRoot.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : repoRoot;
 }
-
-// Auto-refresh of the secondary repos is throttled: their state feeds the
-// aggregate badge while the panel is closed, so every active-repo refresh must
-// not fan out a git process per repo. Direct refreshRepo/refreshAll calls
-// bypass the throttle.
 const SECONDARY_REFRESH_THROTTLE_MS = 3000;
+type Snapshot = { scope: string; values: Record<string, GitStatusSnapshot> };
 
-/**
- * Statuses for every repo in a multi-repo workspace, so the panel can list all
- * of their changes at once and the badge can sum them.
- *
- * The active repo is *not* fetched here: its snapshot is owned by
- * useSourceControl, which also drives branch, ahead/behind and push. Passing it
- * in keeps one source of truth per repo instead of two that can disagree.
- */
 export function useRepoStatuses(
   repos: GitRepoHead[],
   enabled: boolean,
@@ -45,98 +28,167 @@ export function useRepoStatuses(
   refreshRepo: (repoRoot: string) => Promise<void>;
   refreshAll: () => Promise<void>;
 } {
-  const [others, setOthers] = useState<Record<string, GitStatusSnapshot>>({});
-  const loadTokenRef = useRef(0);
-  const lastAutoRefreshAtRef = useRef(0);
-
-  const secondaryRoots = useMemo(
+  const env = useWorkspaceEnvStore((s) => s.env);
+  const scope = workspaceScopeKey(env);
+  const roots = useMemo(
     () => repos.map((r) => r.repoRoot).filter((r) => r !== activeRepoRoot),
     [repos, activeRepoRoot],
   );
-  const secondaryKey = secondaryRoots.join("\u0000");
-
-  const refreshRepo = useCallback(async (repoRoot: string) => {
-    try {
-      const status = await native.gitStatus(repoRoot);
-      setOthers((current) => ({ ...current, [repoRoot]: status }));
-    } catch {
-      // A repo that vanished or cannot be read simply drops out of the list;
-      // surfacing an error per repo would bury the panel in noise.
-      setOthers((current) => {
-        if (!(repoRoot in current)) return current;
-        const next = { ...current };
-        delete next[repoRoot];
-        return next;
-      });
-    }
-  }, []);
-
-  const refreshAll = useCallback(async () => {
-    const token = ++loadTokenRef.current;
-    const roots = secondaryKey ? secondaryKey.split("\u0000") : [];
-    // Sequential on purpose: these run alongside the active repo's own refresh
-    // and a wide workspace would otherwise fan out a git process per repo.
-    const collected: Record<string, GitStatusSnapshot> = {};
-    for (const root of roots) {
-      try {
-        collected[root] = await native.gitStatus(root);
-      } catch {
-        /* skip unreadable repo */
-      }
-      if (token !== loadTokenRef.current) return;
-    }
-    if (token !== loadTokenRef.current) return;
-    setOthers(collected);
-  }, [secondaryKey]);
-
-  // Re-read the others whenever the active repo's snapshot moved: every refresh
-  // path in the panel ends in one, so this keeps the groups in step without
-  // wiring a second trigger into each of them. Throttled so a closed panel
-  // (which still pays for the aggregate badge) does not fan out a git process
-  // per repo on every active-repo refresh.
+  const rootKey = roots.join("\u0000");
+  const key = `${scope}\u0000${enabled}\u0000${rootKey}`;
+  const requestsRef = useRef(new Map<string, number>());
+  const contextRef = useRef({ key, roots, enabled, scope });
+  if (contextRef.current.key !== key) {
+    requestsRef.current.clear();
+    contextRef.current = { key, roots, enabled, scope };
+  }
+  const [others, setOthers] = useState<Snapshot>({ scope, values: {} });
+  const mountedRef = useRef(true);
+  const batchRef = useRef(0);
+  const lastAutoRef = useRef({ key: "", at: 0 });
   useEffect(() => {
-    if (!enabled || secondaryKey === "") {
-      setOthers({});
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      batchRef.current++;
+      contextRef.current = { ...contextRef.current };
+      requestsRef.current.clear();
+      lastAutoRef.current = { key: "", at: 0 };
+    };
+  }, []);
+  const nextRequest = useCallback((root: string) => {
+    const request = (requestsRef.current.get(root) ?? 0) + 1;
+    requestsRef.current.set(root, request);
+    return request;
+  }, []);
+  const refreshRepo = useCallback(
+    async (repoRoot: string) => {
+      const context = contextRef.current;
+      if (
+        !mountedRef.current ||
+        !context.enabled ||
+        !context.roots.includes(repoRoot)
+      )
+        return;
+      const request = nextRequest(repoRoot);
+      let status: GitStatusSnapshot | undefined;
+      try {
+        status = await native.gitStatus(repoRoot);
+      } catch {}
+      if (
+        !mountedRef.current ||
+        contextRef.current !== context ||
+        requestsRef.current.get(repoRoot) !== request
+      )
+        return;
+      setOthers((current) => {
+        const values = {
+          ...(current.scope === context.scope ? current.values : {}),
+        };
+        if (status) values[repoRoot] = status;
+        else delete values[repoRoot];
+        return { scope: context.scope, values };
+      });
+    },
+    [nextRequest],
+  );
+  const refreshAll = useCallback(async () => {
+    const context = contextRef.current;
+    if (!mountedRef.current || !context.enabled) return;
+    const batch = ++batchRef.current;
+    const collected = new Map<
+      string,
+      { request: number; status?: GitStatusSnapshot }
+    >();
+    for (const root of context.roots) {
+      if (
+        !mountedRef.current ||
+        contextRef.current !== context ||
+        batchRef.current !== batch
+      )
+        return;
+      const request = nextRequest(root);
+      let status: GitStatusSnapshot | undefined;
+      try {
+        status = await native.gitStatus(root);
+      } catch {}
+      collected.set(root, { request, status });
+    }
+    if (
+      !mountedRef.current ||
+      contextRef.current !== context ||
+      batchRef.current !== batch
+    )
+      return;
+    setOthers((current) => {
+      const values: Record<string, GitStatusSnapshot> = {};
+      for (const root of context.roots) {
+        const result = collected.get(root);
+        if (result && requestsRef.current.get(root) === result.request) {
+          if (result.status) values[root] = result.status;
+        } else if (current.scope === context.scope && current.values[root])
+          values[root] = current.values[root];
+      }
+      return { scope: context.scope, values };
+    });
+  }, [nextRequest]);
+  useEffect(() => {
+    if (!enabled || rootKey === "") {
+      batchRef.current++;
+      setOthers({ scope, values: {} });
       return;
     }
     const now = Date.now();
-    if (now - lastAutoRefreshAtRef.current < SECONDARY_REFRESH_THROTTLE_MS) {
+    const previous = lastAutoRef.current;
+    if (
+      previous.key === key &&
+      now - previous.at < SECONDARY_REFRESH_THROTTLE_MS
+    )
       return;
-    }
-    lastAutoRefreshAtRef.current = now;
+    lastAutoRef.current = { key, at: now };
     void refreshAll();
-  }, [enabled, secondaryKey, refreshAll, activeStatus]);
-
+    void activeStatus;
+  }, [enabled, rootKey, scope, key, refreshAll, activeStatus]);
   const applyStatus = useCallback(
     (
       repoRoot: string,
       updater: (status: GitStatusSnapshot) => GitStatusSnapshot,
     ) => {
+      const context = contextRef.current;
+      if (!context.enabled || !context.roots.includes(repoRoot)) return;
       setOthers((current) => {
-        const existing = current[repoRoot];
-        if (!existing) return current;
+        if (current.scope !== context.scope || !current.values[repoRoot])
+          return current;
+        const existing = current.values[repoRoot];
         const next = updater(existing);
-        return next === existing ? current : { ...current, [repoRoot]: next };
+        return next === existing
+          ? current
+          : {
+              scope: context.scope,
+              values: { ...current.values, [repoRoot]: next },
+            };
       });
     },
     [],
   );
-
-  const entries = useMemo<RepoStatusEntry[]>(() => {
+  const entries = useMemo(() => {
     const out: RepoStatusEntry[] = [];
+    if (!enabled) return out;
     for (const repo of repos) {
       const status =
-        repo.repoRoot === activeRepoRoot ? activeStatus : others[repo.repoRoot];
-      if (!status) continue;
-      if (status.changedFiles.length === 0) continue;
-      out.push({
-        repoRoot: repo.repoRoot,
-        name: repoDisplayName(repo.repoRoot),
-        status,
-      });
+        repo.repoRoot === activeRepoRoot
+          ? activeStatus
+          : others.scope === scope
+            ? others.values[repo.repoRoot]
+            : null;
+      if (status?.changedFiles.length)
+        out.push({
+          repoRoot: repo.repoRoot,
+          name: repoDisplayName(repo.repoRoot),
+          status,
+        });
     }
     return out;
-  }, [repos, activeRepoRoot, activeStatus, others]);
-
+  }, [repos, activeRepoRoot, activeStatus, others, scope, enabled]);
   return { entries, applyStatus, refreshRepo, refreshAll };
 }

@@ -16,13 +16,8 @@ export const USE_CUSTOM_WINDOW_CONTROLS = true;
 export const MOD_KEY = "Ctrl";
 /** KeyBinding property name for the platform's primary modifier. */
 export const MOD_PROP: "meta" | "ctrl" = "ctrl";
-export const CTRL_KEY = "Ctrl";
-export const ALT_KEY = "Alt";
-export const SHIFT_KEY = "Shift";
-export const TAB_KEY = "Tab";
-export const ENTER_KEY = "Enter";
 
-export const KEY_SEP = "+";
+const KEY_SEP = "+";
 
 export function fmtShortcut(...parts: string[]): string {
   return parts.join(KEY_SEP);

@@ -1,6 +1,6 @@
 import { CommandLineIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 
 const W = 170;
 const OFFSET = 32;
@@ -12,16 +12,7 @@ type Props = {
   onDismiss: () => void;
 };
 
-/**
- * Floating button shown after selecting text in the editor/terminal. Clicking
- * it sends the selection to the command line — the terminal whose working
- * directory contains the file (see `findClaudeLeaf`), whatever is running
- * there. Always shown for a non-empty selection, regardless of whether a
- * Claude Code / opencode terminal exists.
- */
 export function SelectionAskButton({ x, y, onSend, onDismiss }: Props) {
-  const pos = useRef({ top: 0, left: 0 });
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onDismiss();
@@ -30,20 +21,21 @@ export function SelectionAskButton({ x, y, onSend, onDismiss }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onDismiss]);
 
-  pos.current = {
-    top: Math.max(8, y - OFFSET),
+  const pos = {
+    top: Math.max(8, Math.min(y - OFFSET, window.innerHeight - 36)),
     left: Math.max(8, Math.min(x - W / 2, window.innerWidth - W - 8)),
   };
 
   return (
     <div
       data-selection-ask
-      style={{ top: pos.current.top, left: pos.current.left, width: W }}
+      style={{ top: pos.top, left: pos.left, width: W }}
       className="fixed z-50"
     >
       <button
         type="button"
         title="把选中内容发送到 agent"
+        onMouseDown={(e) => e.preventDefault()}
         onClick={(e) => {
           e.stopPropagation();
           onSend();

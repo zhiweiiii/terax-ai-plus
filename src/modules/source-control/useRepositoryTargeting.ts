@@ -2,6 +2,7 @@ import { native } from "@/lib/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
+import { parseWorkspaceScopeKey } from "@/modules/workspace";
 import {
   clearRepositoryTargetForSpace,
   repositoryTargetForSpace,
@@ -39,19 +40,33 @@ export function useRepositoryTargeting({
     [spaceId, targets, workspaceKey],
   );
 
-  useEffect(() => {
-    if (requestScopeRef.current === requestScope) return;
+  if (requestScopeRef.current !== requestScope) {
     requestScopeRef.current = requestScope;
     sourceControlRequestRef.current += 1;
     historyRequestRef.current += 1;
-  }, [requestScope]);
+  }
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      sourceControlRequestRef.current++;
+      historyRequestRef.current++;
+    };
+  }, []);
 
   const resolveRepository = useCallback(
     async (path: string, requestRef: RequestCounter) => {
+      if (!mountedRef.current || !isContextCurrent(spaceId, workspaceKey))
+        return null;
       const requestId = ++requestRef.current;
       try {
-        const repo = await native.gitResolveRepo(path);
+        const repo = await native.gitResolveRepo(
+          path,
+          parseWorkspaceScopeKey(workspaceKey),
+        );
         if (
+          !mountedRef.current ||
           requestId !== requestRef.current ||
           !isContextCurrent(spaceId, workspaceKey)
         ) {
@@ -63,6 +78,7 @@ export function useRepositoryTargeting({
         return repo;
       } catch (error) {
         if (
+          mountedRef.current &&
           requestId === requestRef.current &&
           isContextCurrent(spaceId, workspaceKey)
         ) {
@@ -77,7 +93,12 @@ export function useRepositoryTargeting({
   const openInSourceControl = useCallback(
     async (path: string) => {
       const repo = await resolveRepository(path, sourceControlRequestRef);
-      if (!repo) return;
+      if (
+        !repo ||
+        !mountedRef.current ||
+        !isContextCurrent(spaceId, workspaceKey)
+      )
+        return;
       setTargets((current) =>
         setRepositoryTargetForSpace(
           current,
@@ -88,16 +109,33 @@ export function useRepositoryTargeting({
       );
       openSourceControl();
     },
-    [openSourceControl, resolveRepository, spaceId, workspaceKey],
+    [
+      openSourceControl,
+      resolveRepository,
+      spaceId,
+      workspaceKey,
+      isContextCurrent,
+    ],
   );
 
   const openGitHistory = useCallback(
     async (path: string) => {
       const repo = await resolveRepository(path, historyRequestRef);
-      if (!repo) return;
+      if (
+        !repo ||
+        !mountedRef.current ||
+        !isContextCurrent(spaceId, workspaceKey)
+      )
+        return;
       openCommitHistoryTab({ repoRoot: repo.repoRoot, branch: repo.branch });
     },
-    [openCommitHistoryTab, resolveRepository],
+    [
+      openCommitHistoryTab,
+      resolveRepository,
+      isContextCurrent,
+      spaceId,
+      workspaceKey,
+    ],
   );
 
   const followActiveContext = useCallback(() => {

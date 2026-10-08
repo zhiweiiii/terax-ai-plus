@@ -17,39 +17,61 @@ const SUPPORTED_HOSTS: Record<string, RemoteWebHost> = {
   "www.bitbucket.org": "bitbucket",
 };
 
-export function parseRemoteWebUrl(raw: string | null | undefined): RemoteWebInfo | null {
+export function parseRemoteWebUrl(
+  raw: string | null | undefined,
+): RemoteWebInfo | null {
   if (!raw) return null;
   const trimmed = raw.trim();
-  if (!trimmed) return null;
+  if (
+    !trimmed ||
+    trimmed.length > 8192 ||
+    /[\u0000-\u0020\u007f]/.test(trimmed)
+  ) {
+    return null;
+  }
 
   let hostname: string;
   let pathname: string;
 
-  const scpMatch = trimmed.match(/^([^@]+@)?([^:]+):(.+)$/);
-  if (scpMatch && !/^https?:\/\//i.test(trimmed) && !trimmed.startsWith("/")) {
-    hostname = scpMatch[2];
-    pathname = scpMatch[3];
-  } else {
+  if (trimmed.includes("://")) {
     try {
       const url = new URL(trimmed);
+      if (!["http:", "https:", "ssh:", "git:"].includes(url.protocol)) {
+        return null;
+      }
       hostname = url.hostname;
       pathname = url.pathname;
     } catch {
       return null;
     }
+  } else {
+    const scpMatch = trimmed.match(/^(?:[^@/:]+@)?([^/:]+):(.+)$/);
+    if (!scpMatch) return null;
+    hostname = scpMatch[1];
+    pathname = scpMatch[2];
   }
 
-  const host = SUPPORTED_HOSTS[hostname.toLowerCase()];
+  const host: RemoteWebHost | undefined = Object.getOwnPropertyDescriptor(
+    SUPPORTED_HOSTS,
+    hostname.toLowerCase(),
+  )?.value;
   if (!host) return null;
 
   const parts = pathname
-    .replace(/^\//, "")
+    .replace(/^\/+|\/+$/g, "")
     .replace(/\.git$/i, "")
-    .split("/")
-    .filter(Boolean);
-  if (parts.length < 2) return null;
-  const owner = parts[0];
-  const repo = parts[1];
+    .split("/");
+  if (
+    parts.length < 2 ||
+    (host !== "gitlab" && parts.length !== 2) ||
+    parts.some(
+      (part) =>
+        !part || !/^[\w.-]+$/.test(part) || part === "." || part === "..",
+    )
+  )
+    return null;
+  const owner = parts.slice(0, -1).join("/");
+  const repo = parts[parts.length - 1];
   return {
     host,
     hostname: hostname.toLowerCase(),

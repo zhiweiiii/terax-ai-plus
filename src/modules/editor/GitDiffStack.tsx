@@ -1,4 +1,5 @@
 import type { GitCommitFileDiffTab, GitDiffTab, Tab } from "@/modules/tabs";
+import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import { useEffect, useRef } from "react";
 import type { GitDiffPaneHandle } from "./GitDiffPane";
 import { GitDiffPane } from "./GitDiffPane";
@@ -6,6 +7,7 @@ import { GitDiffPane } from "./GitDiffPane";
 export type { GitDiffPaneHandle };
 
 type Props = {
+  spaces: readonly SpaceMeta[];
   tabs: Tab[];
   activeId: number;
   registerHandle: (id: number, handle: GitDiffPaneHandle | null) => void;
@@ -13,6 +15,7 @@ type Props = {
 };
 
 export function GitDiffStack({
+  spaces,
   tabs,
   activeId,
   registerHandle,
@@ -32,10 +35,13 @@ export function GitDiffStack({
     registerRef.current(active?.id ?? -1, h);
 
   if (!active) return null;
+  const space = spaces.find((item) => item.id === active.spaceId);
+  if (!space) return null;
   if (active.kind === "git-diff") {
     return (
       <div className="h-full w-full">
         <GitDiffPane
+          workspace={space.env}
           key={active.id}
           ref={setRef}
           active
@@ -54,6 +60,7 @@ export function GitDiffStack({
   return (
     <div className="h-full w-full">
       <GitDiffPane
+        workspace={space.env}
         key={active.id}
         ref={setRef}
         active

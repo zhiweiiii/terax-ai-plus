@@ -37,8 +37,10 @@ struct Delta {
     #[serde(default)]
     content: Option<String>,
     // OpenRouter and Kimi say `reasoning`, DeepSeek says `reasoning_content`.
-    #[serde(default, alias = "reasoning_content")]
+    #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -68,7 +70,6 @@ struct ToolBlock {
     started: bool,
     pending_args: String,
     consecutive_whitespace: usize,
-    aborted: bool,
 }
 
 /// Some relays get stuck emitting whitespace into a function call forever.
@@ -133,30 +134,47 @@ impl Converter {
     }
 
     /// Feed upstream bytes, get client bytes back.
-    pub fn push(&mut self, bytes: &[u8]) -> Vec<u8> {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
-        append_utf8(&mut self.buffer, &mut self.remainder, bytes);
-        while let Some(block) = take_block(&mut self.buffer) {
-            for line in block.lines() {
-                let Some(data) = strip_field(line, "data") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data == "[DONE]" {
-                    self.finish_into(&mut out);
-                    continue;
+        if self.sent_stop || self.errored {
+            return Ok(out);
+        }
+        for bytes in bytes.chunks(16 * 1024) {
+            append_utf8(&mut self.buffer, &mut self.remainder, bytes);
+            while let Some(block) = take_block(&mut self.buffer) {
+                if block.len() > 4 * 1024 * 1024 {
+                    return Err("upstream SSE event exceeds size limit".into());
                 }
-                if let Ok(chunk) = serde_json::from_str::<Chunk>(data) {
-                    self.on_chunk(chunk, &mut out);
+                for line in block.lines() {
+                    let Some(data) = strip_field(line, "data") else {
+                        continue;
+                    };
+                    let data = data.trim();
+                    if data == "[DONE]" {
+                        if !self.sent_start {
+                            return Err("upstream returned no message".into());
+                        }
+                        self.finish_into(&mut out);
+                        return Ok(out);
+                    }
+                    if let Ok(chunk) = serde_json::from_str::<Chunk>(data) {
+                        self.on_chunk(chunk, &mut out)?;
+                    }
                 }
             }
+            if self.buffer.len() > 4 * 1024 * 1024 {
+                return Err("upstream SSE event exceeds size limit".into());
+            }
         }
-        out
+        Ok(out)
     }
 
     /// Close the message when upstream ended without sending `[DONE]`.
     pub fn finish(&mut self) -> Vec<u8> {
         let mut out = Vec::new();
+        if !self.sent_stop && !self.emitted_delta && !self.errored {
+            return self.error("upstream stream ended before completion");
+        }
         if !self.errored {
             self.finish_into(&mut out);
         }
@@ -183,6 +201,12 @@ impl Converter {
         if self.sent_stop {
             return;
         }
+        self.close_open_block(out);
+        self.start_late_tool_blocks(out);
+        self.close_tool_blocks(out);
+        if self.sent_start && self.pending_delta.is_none() {
+            self.pending_delta = Some((Some("end_turn".into()), self.latest_usage.clone()));
+        }
         if let Some((stop_reason, usage)) = self.pending_delta.take() {
             emit(
                 out,
@@ -201,7 +225,10 @@ impl Converter {
         self.sent_stop = true;
     }
 
-    fn on_chunk(&mut self, chunk: Chunk, out: &mut Vec<u8>) {
+    fn on_chunk(&mut self, chunk: Chunk, out: &mut Vec<u8>) -> Result<(), String> {
+        if self.next_index > 8192 {
+            return Err("upstream content block count exceeds limit".into());
+        }
         if self.message_id.is_none() && !chunk.id.is_empty() {
             self.message_id = Some(chunk.id);
         }
@@ -218,7 +245,7 @@ impl Converter {
         }
 
         let Some(choice) = chunk.choices.into_iter().next() else {
-            return;
+            return Ok(());
         };
 
         if !self.sent_start {
@@ -244,7 +271,13 @@ impl Converter {
             self.sent_start = true;
         }
 
-        if let Some(reasoning) = choice.delta.reasoning.as_deref() {
+        if let Some(reasoning) = choice
+            .delta
+            .reasoning
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .or(choice.delta.reasoning_content.as_deref())
+        {
             if !reasoning.is_empty() {
                 self.write_block(BlockKind::Thinking, reasoning, out);
             }
@@ -258,7 +291,7 @@ impl Converter {
             if !tool_calls.is_empty() {
                 self.close_open_block(out);
                 for call in tool_calls {
-                    self.write_tool_call(call, out);
+                    self.write_tool_call(call, out)?;
                 }
             }
         }
@@ -270,15 +303,15 @@ impl Converter {
                 if let (Some((_, pending)), Some(usage)) = (self.pending_delta.as_mut(), usage) {
                     *pending = Some(usage);
                 }
-                return;
+                return Ok(());
             }
             self.emitted_delta = true;
             self.close_open_block(out);
             self.start_late_tool_blocks(out);
             self.close_tool_blocks(out);
-            self.pending_delta =
-                Some((Some(map_finish_reason(finish_reason).to_string()), usage));
+            self.pending_delta = Some((Some(map_finish_reason(finish_reason).to_string()), usage));
         }
+        Ok(())
     }
 
     fn write_block(&mut self, kind: BlockKind, text: &str, out: &mut Vec<u8>) {
@@ -310,24 +343,24 @@ impl Converter {
         );
     }
 
-    fn write_tool_call(&mut self, call: ToolCallDelta, out: &mut Vec<u8>) {
+    fn write_tool_call(&mut self, call: ToolCallDelta, out: &mut Vec<u8>) -> Result<(), String> {
+        if !self.tool_blocks.contains_key(&call.index) && self.tool_blocks.len() >= 128 {
+            return Err("upstream tool count exceeds limit".into());
+        }
         let next_index = self.next_index;
-        let block = self.tool_blocks.entry(call.index).or_insert_with(|| {
-            ToolBlock {
+        let block = self
+            .tool_blocks
+            .entry(call.index)
+            .or_insert_with(|| ToolBlock {
                 index: next_index,
                 id: String::new(),
                 name: String::new(),
                 started: false,
                 pending_args: String::new(),
                 consecutive_whitespace: 0,
-                aborted: false,
-            }
-        });
+            });
         if block.index == next_index {
             self.next_index += 1;
-        }
-        if block.aborted {
-            return;
         }
 
         if let Some(id) = call.id {
@@ -356,13 +389,16 @@ impl Converter {
                     } else {
                         block.consecutive_whitespace = 0;
                     }
+                    if block.consecutive_whitespace >= RUNAWAY_WHITESPACE {
+                        return Err("upstream tool arguments contain runaway whitespace".into());
+                    }
                 }
-                if block.consecutive_whitespace >= RUNAWAY_WHITESPACE {
-                    block.aborted = true;
-                    None
-                } else if block.started {
+                if block.started {
                     Some(args)
                 } else {
+                    if block.pending_args.len().saturating_add(args.len()) > 1024 * 1024 {
+                        return Err("upstream pending tool arguments exceed size limit".into());
+                    }
                     block.pending_args.push_str(&args);
                     None
                 }
@@ -396,6 +432,7 @@ impl Converter {
                 }),
             );
         }
+        Ok(())
     }
 
     /// Open any tool block that accumulated arguments before its id or name
@@ -403,7 +440,7 @@ impl Converter {
     fn start_late_tool_blocks(&mut self, out: &mut Vec<u8>) {
         let mut late: Vec<(u32, String, String, String)> = Vec::new();
         for (key, block) in self.tool_blocks.iter_mut() {
-            if block.started || block.aborted {
+            if block.started {
                 continue;
             }
             if block.pending_args.is_empty() && block.id.is_empty() && block.name.is_empty() {
@@ -420,7 +457,12 @@ impl Converter {
             } else {
                 block.name.clone()
             };
-            late.push((block.index, id, name, std::mem::take(&mut block.pending_args)));
+            late.push((
+                block.index,
+                id,
+                name,
+                std::mem::take(&mut block.pending_args),
+            ));
         }
         late.sort_unstable_by_key(|(index, _, _, _)| *index);
         for (index, id, name, pending) in late {

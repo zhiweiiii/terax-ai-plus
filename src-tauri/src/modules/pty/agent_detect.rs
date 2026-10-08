@@ -274,31 +274,128 @@ impl AgentDetector {
 
     fn match_agent(&self, cmd: &[u8]) -> Option<String> {
         let cmd = std::str::from_utf8(cmd).ok()?;
-        for token in cmd.split_whitespace() {
-            if token.starts_with('-') {
+        let mut command = true;
+        let mut option_value = false;
+        for token in command_words(cmd) {
+            if matches!(token.as_str(), ";" | "|" | "&") {
+                command = true;
+                option_value = false;
                 continue;
             }
-            let base = token.rsplit(['/', '\\']).next().unwrap_or(token);
+            if !command {
+                continue;
+            }
+            if option_value {
+                option_value = false;
+                continue;
+            }
+            if token.starts_with('-') {
+                option_value = matches!(
+                    token.as_str(),
+                    "-u" | "--user" | "-g" | "--group" | "--package" | "-p"
+                );
+                continue;
+            }
+            if token.split_once('=').is_some_and(|(name, _)| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }) {
+                continue;
+            }
+            let base = token
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&token)
+                .to_ascii_lowercase();
+            let base = [".exe", ".cmd", ".bat", ".ps1", ".js"]
+                .iter()
+                .find_map(|extension| base.strip_suffix(extension))
+                .unwrap_or(&base);
+            if matches!(
+                base,
+                "env"
+                    | "exec"
+                    | "command"
+                    | "sudo"
+                    | "npx"
+                    | "npm"
+                    | "pnpm"
+                    | "bun"
+                    | "node"
+                    | "dlx"
+            ) || matches!(base, "run" | "x")
+            {
+                continue;
+            }
             if let Some(agent) = self.agents.iter().find(|a| {
                 base.strip_prefix(a.as_str())
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
             }) {
                 return Some(agent.clone());
             }
+            command = false;
         }
         None
     }
 }
 
+fn command_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut characters = command.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '`' && quote != Some('\'') {
+            if let Some(escaped) = characters.next() {
+                word.push(escaped);
+            }
+            continue;
+        }
+        if character == '\\'
+            && quote != Some('\'')
+            && characters.peek().is_some_and(|next| {
+                matches!(next, '"' | '\'' | ';' | '|' | '&')
+                    || (quote.is_none() && next.is_whitespace())
+            })
+        {
+            word.push(characters.next().expect("peeked character"));
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                word.push(character);
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_whitespace() || matches!(character, ';' | '|' | '&') {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            if matches!(character, ';' | '|' | '&') {
+                words.push(character.to_string());
+            }
+        } else {
+            word.push(character);
+        }
+    }
+    if quote.is_some() {
+        return Vec::new();
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
 fn resume_id(cmd: &[u8]) -> Option<String> {
-    let tokens: Vec<&str> = std::str::from_utf8(cmd).ok()?.split_whitespace().collect();
+    let tokens = command_words(std::str::from_utf8(cmd).ok()?);
     tokens.windows(2).find_map(|pair| {
-        if !matches!(pair[0], "resume" | "--resume" | "--session-id") {
+        if !matches!(pair[0].as_str(), "resume" | "--resume" | "--session-id") {
             return None;
         }
-        let id = pair[1].trim_matches(['\'', '"']);
-        (id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
-            .then(|| id.to_string())
+        let id = pair[1].as_str();
+        crate::modules::sessions::valid_id(id).then(|| id.to_string())
     })
 }
 

@@ -18,6 +18,7 @@ const POLL_MS = 2000;
 
 export function WebStatusBadge() {
   const [status, setStatus] = useState<Status | null>(null);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -26,9 +27,15 @@ export function WebStatusBadge() {
     const poll = async () => {
       try {
         const s = await native.webStatus();
-        if (!disposed) setStatus(s);
+        if (!disposed) {
+          setStatus(s);
+          setError(false);
+        }
       } catch {
-        if (!disposed) setStatus(null);
+        if (!disposed) {
+          setStatus(null);
+          setError(true);
+        }
       }
       if (!disposed) timer = window.setTimeout(poll, POLL_MS);
     };
@@ -43,35 +50,45 @@ export function WebStatusBadge() {
   const running = status?.running ?? false;
   const count = status?.connections ?? 0;
   const failedLogins = status?.failed_logins ?? 0;
+  const description =
+    status === null
+      ? error
+        ? "远程服务状态暂不可用"
+        : "正在读取远程服务状态"
+      : running
+        ? `远程服务运行中，当前连接 ${count} 个${failedLogins > 0 ? `，密码错误 ${failedLogins} 次` : ""}`
+        : "远程服务未启动";
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="terax-pill-in ml-1.5 flex h-6 shrink-0 cursor-default items-center gap-1 rounded-full border border-border/50 bg-accent/50 px-2 text-[10.5px] font-medium text-muted-foreground">
+        <button
+          type="button"
+          aria-label={description}
+          className="terax-pill-in ml-1.5 flex h-6 shrink-0 cursor-default items-center gap-1 rounded-full border border-border/50 bg-accent/50 px-2 text-[10.5px] font-medium text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring"
+        >
           {running ? (
             <span className="size-1.5 rounded-full bg-emerald-500" />
           ) : (
-            <span className="size-1.5 rounded-full bg-destructive" />
+            <span
+              className={`size-1.5 rounded-full ${status === null ? "bg-amber-500" : "bg-destructive"}`}
+            />
           )}
           <HugeiconsIcon icon={RouterIcon} size={11} strokeWidth={2} />
-          <span>{count}</span>
+          <span>{status === null ? "?" : count}</span>
           {failedLogins > 0 ? (
             <span className="flex items-center gap-0.5 text-amber-500">
               <HugeiconsIcon icon={Key01Icon} size={10} strokeWidth={2} />
               <span>{failedLogins}</span>
             </span>
           ) : null}
-        </span>
+        </button>
       </TooltipTrigger>
       <TooltipContent
         side="top"
         className="max-w-64 text-[11px] leading-relaxed"
       >
-        {running
-          ? `远程服务运行中，当前连接 ${count} 个${
-              failedLogins > 0 ? `，密码错误 ${failedLogins} 次` : ""
-            }`
-          : "远程服务未启动"}
+        {description}
       </TooltipContent>
     </Tooltip>
   );

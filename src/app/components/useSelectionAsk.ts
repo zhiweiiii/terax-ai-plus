@@ -5,36 +5,38 @@ type Params = {
   onSend: (leafId?: number) => void;
 };
 
-/**
- * Tracks text selections inside the terminal / editor and surfaces the
- * "send to command line" button at the pointer. The button is always shown
- * when there is a non-empty selection, regardless of whether a Claude Code
- * or opencode terminal is running. Dismisses on any click outside the button.
- */
 export function useSelectionAsk({ captureActiveSelection, onSend }: Params) {
   const [popup, setPopup] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
-    const isInsideButton = (t: EventTarget | null) => {
-      const el = t as HTMLElement | null;
-      if (!el) return false;
-      return !!el.closest("[data-selection-ask]");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancelPending = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
     };
+    const isInsideButton = (target: EventTarget | null) =>
+      target instanceof Element && !!target.closest("[data-selection-ask]");
+
+    setPopup(null);
 
     const onDown = (e: MouseEvent) => {
       if (isInsideButton(e.target)) return;
+      cancelPending();
       setPopup(null);
     };
     const onUp = (e: MouseEvent) => {
       if (isInsideButton(e.target)) return;
-      const el = e.target as HTMLElement | null;
+      cancelPending();
+      if (e.button !== 0 || !(e.target instanceof Element)) return;
+      const el = e.target;
       // Terminal grid, CodeMirror editor, or rendered markdown preview.
       const inContentArea = el?.closest?.(
         ".xterm, .cm-editor, .markdown-preview",
       );
       if (!inContentArea) return;
       // Defer one tick so xterm/CodeMirror finalize the selection.
-      setTimeout(() => {
+      timer = setTimeout(() => {
+        timer = undefined;
         const text = captureActiveSelection();
         if (text && text.trim().length > 0) {
           setPopup({ x: e.clientX, y: e.clientY });
@@ -47,6 +49,7 @@ export function useSelectionAsk({ captureActiveSelection, onSend }: Params) {
     document.addEventListener("mousedown", onDown);
     document.addEventListener("mouseup", onUp);
     return () => {
+      cancelPending();
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("mouseup", onUp);
     };

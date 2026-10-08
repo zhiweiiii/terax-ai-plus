@@ -8,7 +8,9 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
-use super::{clip_output, merge_assistant_steps, push_part, Message, Part, Transcript, Working};
+use super::{
+    clip_output, merge_assistant_steps, push_part, timestamp, Message, Part, Transcript, Working,
+};
 
 fn session_id(file: &Path) -> Option<String> {
     let reader = BufReader::new(fs::File::open(file).ok()?.take(192 * 1024));
@@ -175,7 +177,7 @@ fn response_item(
             let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
                 return;
             };
-            let Some(&(step, part)) = pending_tools.get(call_id) else {
+            let Some((step, part)) = pending_tools.remove(call_id) else {
                 return;
             };
             let Some(Part::Tool {
@@ -250,7 +252,7 @@ fn message_text(content: &Value) -> Option<String> {
         .filter_map(|part| part.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("\n");
-    (!text.trim().is_empty()).then(|| text.trim().to_string())
+    (!text.trim().is_empty()).then_some(text)
 }
 
 fn value_text(value: &Value) -> Option<String> {
@@ -287,37 +289,4 @@ fn subject(text: String) -> Option<String> {
         return Some(flat);
     }
     Some(flat.chars().take(MAX).collect::<String>() + "…")
-}
-
-fn timestamp(value: &Value) -> i64 {
-    value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_iso8601_ms)
-        .unwrap_or(0)
-}
-
-fn parse_iso8601_ms(text: &str) -> Option<i64> {
-    if text.len() < 19 {
-        return None;
-    }
-    let number = |from: usize, to: usize| text.get(from..to)?.parse::<i64>().ok();
-    let year = number(0, 4)?;
-    let month = number(5, 7)?;
-    let day = number(8, 10)?;
-    let hour = number(11, 13)?;
-    let minute = number(14, 16)?;
-    let second = number(17, 19)?;
-    let millis = text
-        .get(20..23)
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(0);
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month_index = (month + 9) % 12;
-    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468;
-    Some(((days * 24 + hour) * 60 + minute) * 60_000 + second * 1000 + millis)
 }

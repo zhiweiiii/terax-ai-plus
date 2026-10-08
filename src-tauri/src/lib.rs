@@ -1,8 +1,7 @@
 pub mod modules;
 
 use modules::{
-    control, fs, gateway, git, history, lsp, pty, schedule, sessions, shell, usage,
-    web, workspace,
+    control, fs, gateway, git, history, lsp, pty, schedule, sessions, shell, usage, web, workspace,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -155,7 +154,12 @@ async fn open_settings_window(app: tauri::AppHandle, tab: Option<String>) -> Res
     // Whitelist the known settings tabs: the value rides into the settings
     // URL, so anything else would produce a malformed/odd path.
     const KNOWN_TABS: [&str; 6] = [
-        "general", "editor", "version-control", "themes", "shortcuts", "about",
+        "general",
+        "editor",
+        "version-control",
+        "themes",
+        "shortcuts",
+        "about",
     ];
     let safe_tab = tab.filter(|t| KNOWN_TABS.contains(&t.as_str()));
     let url_path = match safe_tab.as_deref() {
@@ -289,7 +293,6 @@ pub fn run() {
             schedule::schedule_rebind,
             pty::web_sync_tabs,
             pty::web_sync_spaces,
-            pty::web_sync_leaf_pty,
             pty::web_activate_leaf,
             web::web_status,
             web::web_snapshot_reply,
@@ -349,8 +352,6 @@ pub fn run() {
             git::commands::git_scan_repos,
             git::commands::git_workspace_snapshot,
             git::commands::git_fetch_all,
-            git::commands::git_commit_advanced,
-            git::commands::git_amend_specific_commit,
             git::commands::git_commit_reword,
             git::commands::git_pre_commit_checks,
             git::commands::git_config_user,
@@ -375,18 +376,14 @@ pub fn run() {
             git::commands::git_reset,
             git::commands::git_revert_commit,
             git::commands::git_cherry_pick,
-            git::commands::git_reword_commit,
-            git::commands::git_fixup_commit,
-            git::commands::git_squash_commit,
-            git::commands::git_drop_commit,
             git::commands::git_diff_range,
             git::commands::git_diff_commit_vs_worktree,
-            git::commands::git_create_patch,
             git::commands::git_branches_containing,
             shell::shell_run_command,
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,
+            workspace::wsl_native_paths,
             workspace::workspace_authorize,
             workspace::workspace_current_dir,
             control::control_frontend_ready,
@@ -435,10 +432,9 @@ pub fn run() {
                         state.shutdown();
                     }
                     web::stop();
+                    gateway::stop();
                 }
                 _ => {}
             }
         });
 }
-
-

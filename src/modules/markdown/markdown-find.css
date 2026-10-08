@@ -1,0 +1,8 @@
+::highlight(terax-markdown-find) {
+  background-color: color-mix(in srgb, var(--primary) 28%, transparent);
+}
+
+::highlight(terax-markdown-find-active) {
+  background-color: color-mix(in srgb, var(--primary) 65%, transparent);
+  color: var(--primary-foreground);
+}

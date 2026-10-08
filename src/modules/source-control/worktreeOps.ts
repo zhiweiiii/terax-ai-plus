@@ -1,6 +1,7 @@
 import { quoteShellArg } from "@/lib/shellQuote";
 import type { CommandOutput } from "@/lib/native";
 import { native } from "@/lib/native";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 
 export type WorktreeAddOptions = {
   /** New branch to create and check out in the worktree (-b). */
@@ -19,13 +20,16 @@ export async function gitWorktreeAdd(
   repoRoot: string,
   path: string,
   options?: WorktreeAddOptions,
+  workspace: WorkspaceEnv = currentWorkspaceEnv(),
 ): Promise<void> {
   const args = ["git", "worktree", "add"];
-  if (options?.branch) args.push("-b", quoteShellArg(options.branch));
-  args.push(quoteShellArg(path));
-  if (options?.commit) args.push(quoteShellArg(options.commit));
+  const quote = (value: string) =>
+    quoteShellArg(value, workspace.kind === "local");
+  if (options?.branch) args.push("-b", quote(options.branch));
+  args.push("--", quote(path));
+  if (options?.commit) args.push(quote(options.commit));
   assertOk(
-    await native.runCommand(args.join(" "), repoRoot, 60),
+    await native.runCommand(args.join(" "), repoRoot, 60, workspace),
     "Could not create worktree",
   );
 }
@@ -34,22 +38,23 @@ export async function gitWorktreeRemove(
   repoRoot: string,
   path: string,
   force = false,
+  workspace: WorkspaceEnv = currentWorkspaceEnv(),
 ): Promise<void> {
   const args = ["git", "worktree", "remove"];
   if (force) args.push("--force");
-  args.push(quoteShellArg(path));
+  args.push("--", quoteShellArg(path, workspace.kind === "local"));
   assertOk(
-    await native.runCommand(args.join(" "), repoRoot, 60),
+    await native.runCommand(args.join(" "), repoRoot, 60, workspace),
     "Could not remove worktree",
   );
 }
 
-
 export function defaultWorktreePath(repoRoot: string, branch: string): string {
-  const parts = repoRoot.split(/[\\/]/).filter(Boolean);
-  const repoName = parts.pop() ?? "repo";
-  const parent = parts.join("/");
+  const root = repoRoot.replace(/\\/g, "/").replace(/\/+$/, "");
+  const separator = root.lastIndexOf("/");
+  const repoName = root.slice(separator + 1) || "repo";
+  const parent = separator >= 0 ? root.slice(0, separator + 1) : "";
   const slug = branch.trim().replace(/[\\/]/g, "-") || "head";
   const dir = `${repoName}-wt-${slug}`;
-  return parent ? `${parent}/${dir}` : `${repoRoot}/${dir}`;
+  return parent ? `${parent}${dir}` : `${root}/${dir}`;
 }

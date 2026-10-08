@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
 use tauri::{Emitter, Manager};
@@ -37,11 +37,18 @@ struct RuntimeInfo {
 }
 
 struct ControlCore {
+    startup: Mutex<()>,
     runtime: OnceLock<RuntimeInfo>,
     frontend_ready: AtomicBool,
     shutting_down: AtomicBool,
     active_connections: AtomicUsize,
-    pending: Mutex<HashMap<String, SyncSender<FrontendResponse>>>,
+    pending: Mutex<HashMap<String, PendingResponse>>,
+    next_request: AtomicU64,
+}
+
+struct PendingResponse {
+    request_id: String,
+    sender: SyncSender<FrontendResponse>,
 }
 
 #[derive(Clone)]
@@ -50,11 +57,13 @@ pub struct ControlState(Arc<ControlCore>);
 impl Default for ControlState {
     fn default() -> Self {
         Self(Arc::new(ControlCore {
+            startup: Mutex::new(()),
             runtime: OnceLock::new(),
             frontend_ready: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             active_connections: AtomicUsize::new(0),
             pending: Mutex::new(HashMap::new()),
+            next_request: AtomicU64::new(1),
         }))
     }
 }
@@ -89,6 +98,11 @@ impl ControlState {
     pub fn shutdown(&self) {
         self.0.shutting_down.store(true, Ordering::Release);
         self.0.frontend_ready.store(false, Ordering::Release);
+        self.0
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         if let Some(runtime) = self.0.runtime.get() {
             remove_own_descriptor(&runtime.descriptor_path, &runtime.token);
             if let Some(dir) = &runtime.launcher_dir {
@@ -103,11 +117,17 @@ impl ControlState {
 }
 
 pub fn start(app: tauri::AppHandle, state: ControlState) -> Result<(), String> {
+    let _guard = state
+        .0
+        .startup
+        .lock()
+        .map_err(|_| "control startup unavailable")?;
     if state.0.runtime.get().is_some() {
         return Err("control server already initialized".to_string());
     }
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("bind local control socket: {error}"))?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let address = listener
         .local_addr()
         .map_err(|error| format!("read local control address: {error}"))?
@@ -171,12 +191,13 @@ pub fn start(app: tauri::AppHandle, state: ControlState) -> Result<(), String> {
 }
 
 fn accept_loop(listener: TcpListener, app: tauri::AppHandle, state: ControlState) {
-    for incoming in listener.incoming() {
-        if state.0.shutting_down.load(Ordering::Acquire) {
-            break;
-        }
-        let stream = match incoming {
-            Ok(stream) => stream,
+    while !state.0.shutting_down.load(Ordering::Acquire) {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
             Err(error) => {
                 if !state.0.shutting_down.load(Ordering::Acquire) {
                     log::warn!("control socket accept failed: {error}");
@@ -188,6 +209,7 @@ fn accept_loop(listener: TcpListener, app: tauri::AppHandle, state: ControlState
         if state.0.active_connections.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             state.release_connection();
             let mut stream = stream;
+            let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
             let response = ControlResponse::failure(
                 SERVER_RESPONSE_ID,
                 "server_busy",
@@ -215,6 +237,25 @@ fn accept_loop(listener: TcpListener, app: tauri::AppHandle, state: ControlState
 
 struct ConnectionGuard(ControlState);
 
+struct DeadlineReader<'a> {
+    stream: &'a mut TcpStream,
+    deadline: Instant,
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "control request timed out",
+            ));
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(bytes)
+    }
+}
+
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.release_connection();
@@ -225,7 +266,10 @@ fn handle_connection(mut stream: TcpStream, app: &tauri::AppHandle, state: &Cont
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
 
-    let request = match read_request(&mut BufReader::new(&mut stream)) {
+    let request = match read_request(&mut BufReader::new(DeadlineReader {
+        stream: &mut stream,
+        deadline: Instant::now() + IO_TIMEOUT,
+    })) {
         Ok(request) => request,
         Err(error) => {
             let _ = write_response(
@@ -293,6 +337,13 @@ fn route_request(
     app: &tauri::AppHandle,
     state: &ControlState,
 ) -> ControlResponse {
+    if state.0.shutting_down.load(Ordering::Acquire) {
+        return ControlResponse::failure(
+            SERVER_RESPONSE_ID,
+            "server_unavailable",
+            "control server is shutting down",
+        );
+    }
     if !valid_request_id(&request.id) {
         return ControlResponse::failure(
             SERVER_RESPONSE_ID,
@@ -445,9 +496,29 @@ fn forward_to_frontend(
     }
 
     let id = request.id.clone();
+    let frontend_id =
+        match state
+            .0
+            .next_request
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        {
+            Ok(id) => format!("frontend-{id}"),
+            Err(_) => {
+                return ControlResponse::failure(
+                    id,
+                    "server_busy",
+                    "control request counter exhausted",
+                )
+            }
+        };
     let (sender, receiver) = mpsc::sync_channel(1);
     {
         let mut pending = state.0.pending.lock().expect("control pending poisoned");
+        if state.0.shutting_down.load(Ordering::Acquire)
+            || !state.0.frontend_ready.load(Ordering::Acquire)
+        {
+            return ControlResponse::failure(id, "frontend_unavailable", "Terax UI is unavailable");
+        }
         if pending.len() >= MAX_PENDING_REQUESTS {
             return ControlResponse::failure(
                 id,
@@ -455,14 +526,20 @@ fn forward_to_frontend(
                 "too many pending frontend requests",
             );
         }
-        if pending.contains_key(&id) {
+        if pending.values().any(|pending| pending.request_id == id) {
             return ControlResponse::failure(id, "duplicate_id", "request id is already pending");
         }
-        pending.insert(id.clone(), sender);
+        pending.insert(
+            frontend_id.clone(),
+            PendingResponse {
+                request_id: id.clone(),
+                sender,
+            },
+        );
     }
 
     let frontend_request = FrontendRequest {
-        id: id.clone(),
+        id: frontend_id.clone(),
         method: request.method,
         params: request.params,
         caller: request.caller,
@@ -473,7 +550,7 @@ fn forward_to_frontend(
             .pending
             .lock()
             .expect("control pending poisoned")
-            .remove(&id);
+            .remove(&frontend_id);
         return ControlResponse::failure(
             id,
             "frontend_unavailable",
@@ -500,7 +577,7 @@ fn forward_to_frontend(
                 .pending
                 .lock()
                 .expect("control pending poisoned")
-                .remove(&id);
+                .remove(&frontend_id);
             ControlResponse::failure(id, "frontend_timeout", "Terax UI did not respond in time")
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => ControlResponse::failure(
@@ -513,7 +590,16 @@ fn forward_to_frontend(
 
 #[tauri::command]
 pub fn control_frontend_ready(state: tauri::State<'_, ControlState>, ready: bool) {
+    let ready = ready && !state.0.shutting_down.load(Ordering::Acquire);
     state.0.frontend_ready.store(ready, Ordering::Release);
+    if !ready {
+        state
+            .0
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
 }
 
 #[tauri::command]
@@ -528,7 +614,7 @@ pub fn control_respond(
         .lock()
         .expect("control pending poisoned")
         .remove(&request_id);
-    sender.is_some_and(|sender| sender.send(response).is_ok())
+    sender.is_some_and(|pending| pending.sender.try_send(response).is_ok())
 }
 
 fn write_response(stream: &mut TcpStream, response: &ControlResponse) -> std::io::Result<()> {
@@ -582,6 +668,7 @@ fn descriptor_path() -> Result<PathBuf, String> {
 }
 
 fn write_descriptor(path: &Path, descriptor: &ControlDescriptor) -> Result<(), String> {
+    let _lock = descriptor_lock(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| "control descriptor path has no parent".to_string())?;
@@ -607,12 +694,46 @@ fn write_descriptor(path: &Path, descriptor: &ControlDescriptor) -> Result<(), S
 }
 
 fn remove_own_descriptor(path: &Path, token: &str) {
-    let owned = std::fs::read(path)
+    let Ok(_lock) = descriptor_lock(path) else {
+        return;
+    };
+    let owned = std::fs::File::open(path)
+        .and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(MAX_MESSAGE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > MAX_MESSAGE_BYTES {
+                return Err(std::io::Error::other("control descriptor too large"));
+            }
+            Ok(bytes)
+        })
         .ok()
         .and_then(|bytes| serde_json::from_slice::<ControlDescriptor>(&bytes).ok())
         .is_some_and(|descriptor| constant_time_eq(descriptor.token.as_bytes(), token.as_bytes()));
     if owned {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+fn descriptor_lock(path: &Path) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(path.with_extension("lock"))
+        {
+            Ok(file) => return Ok(file),
+            Err(error) if error.raw_os_error() == Some(32) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(format!("lock control descriptor: {error}")),
+        }
     }
 }
 
@@ -764,5 +885,3 @@ fn remove_launcher_dir(bin_dir: &Path) {
         let _ = std::fs::remove_dir(run_dir);
     }
 }
-
-

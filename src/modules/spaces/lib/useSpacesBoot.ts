@@ -1,4 +1,5 @@
 import { native } from "@/lib/native";
+import { errorToast } from "@/lib/errorToast";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { Tab } from "@/modules/tabs";
 import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
@@ -45,6 +46,13 @@ export function useSpacesBoot({
   adoptWorkspaceEnv,
 }: Params) {
   const done = useRef(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!ready || done.current) return;
@@ -52,40 +60,40 @@ export function useSpacesBoot({
 
     void (async () => {
       try {
-        // Hydrate preferences on EVERY boot, not only on a first run.
-        //
-        // This used to sit inside the `spaces.length === 0` branch below, so
-        // any installation that had ever saved a workspace never initialised
-        // the store: it stayed on DEFAULT_PREFERENCES for the life of the
-        // window, and - because `init` is also what registers the change
-        // listener - no setting written anywhere ever reached it. Around three
-        // dozen places in the main window read this store, and every one of
-        // them was pinned to a default. It went unnoticed because the two most
-        // visible consumers do not use the store: the settings window calls
-        // `init` itself, and ThemeProvider reads `loadPreferences()` directly.
+        // Existing spaces also need live preference hydration.
         await usePreferencesStore
           .getState()
           .init()
-          .catch(() => {});
+          .catch((error) => errorToast("加载设置失败", error));
 
         const { spaces, activeId, states } = await loadAll();
+        if (!mounted.current) return;
 
         if (spaces.length === 0) {
-          const root = launchCwd ?? home ?? null;
+          const env = parseWorkspaceScopeKey(
+            usePreferencesStore.getState().defaultWorkspaceEnv,
+          );
+          const restoredHome = await adoptWorkspaceEnv(env);
+          if (!mounted.current) return;
+          const root =
+            env.kind === "local"
+              ? (launchCwd ?? restoredHome ?? home)
+              : restoredHome;
           const meta: SpaceMeta = {
             id: DEFAULT_SPACE_ID,
             name: "Default",
             root,
-            env: parseWorkspaceScopeKey(
-              usePreferencesStore.getState().defaultWorkspaceEnv,
-            ),
+            env,
             createdAt: Date.now(),
             updatedAt: Date.now(),
           };
           await saveSpacesList([meta]);
           await saveActiveId(DEFAULT_SPACE_ID);
+          if (!mounted.current) return;
           setActiveSpaceForNewTabs(DEFAULT_SPACE_ID);
           useSpaces.getState().hydrate([meta], DEFAULT_SPACE_ID);
+          const tab = freshTerminalTab(DEFAULT_SPACE_ID, root, allocId);
+          replaceTabs([tab], tab.id);
           return;
         }
 
@@ -106,6 +114,7 @@ export function useSpacesBoot({
         // below; env is set synchronously so cwd resolution picks WSL vs local.
         const env = activeSpaceEnv(spaces, active);
         const restoredHome = await adoptWorkspaceEnv(env);
+        if (!mounted.current) return;
 
         // Active space must never be empty, else its tab list shows nothing.
         if (!restored.some((t) => t.spaceId === active)) {
@@ -116,6 +125,7 @@ export function useSpacesBoot({
         await Promise.allSettled(
           uniqueCwds(restored).map((cwd) => native.workspaceAuthorize(cwd)),
         );
+        if (!mounted.current) return;
 
         const initialActiveIndex: Record<string, number> = {};
         for (const [id, st] of states)
@@ -128,8 +138,9 @@ export function useSpacesBoot({
         replaceTabs(restored, activeTab.id);
       } catch (e) {
         console.error("[terax] spaces boot failed:", e);
+        if (mounted.current) errorToast("加载工作区失败，原始数据已保留", e);
       } finally {
-        markBooted();
+        if (mounted.current) markBooted();
       }
     })();
   }, [

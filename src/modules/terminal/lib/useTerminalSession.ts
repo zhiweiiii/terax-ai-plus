@@ -1,11 +1,14 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
+import { quoteForShell, type ShellKind } from "@/lib/shellQuote";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { terminalInputOwner } from "@/modules/terminal/lib/inputPolicy";
+import { formatDroppedPaths } from "@/modules/terminal/lib/quoteShellPath";
 import {
   installTerminalDiagnostics,
   recordTerminalEvent,
   terminalDiagnosticsEnabled,
 } from "@/modules/terminal/lib/terminalDiagnostics";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import {
   useCallback,
@@ -22,6 +25,7 @@ import {
 } from "../block/lib/blockDecorations";
 import type { BlockMode } from "../block/lib/modeMachine";
 import { DormantRing } from "./dormantRing";
+import { gatewayPin, setGatewayPin } from "./gatewayPins";
 import {
   createShellIntegrationState,
   registerCwdHandler,
@@ -29,7 +33,6 @@ import {
   registerPromptTracker,
   type ShellIntegrationState,
 } from "./osc-handlers";
-import { gatewayPin } from "./gatewayPins";
 import { openPty, type PtySession } from "./pty-bridge";
 import "../block/block.css";
 import { ensureAgentActivityListener, isAgentActivePty } from "./agentActivity";
@@ -38,13 +41,13 @@ import {
   applyBackgroundActive,
   applyCursorBlink,
   applyCursorStyle,
+  applyExternalGrid,
   applyLetterSpacing,
   applyTheme as applyPoolTheme,
   applyScrollback,
   applyTerminalFont,
   applyWebglPreference,
   configureRendererPool,
-  applyExternalGrid,
   discardRetainedSlot,
   disposeLeafSlot,
   focusSlot,
@@ -75,7 +78,9 @@ type Callbacks = {
 type Session = {
   pty: PtySession | null;
   ptyOpening: boolean;
+  spawnEpoch: number;
   initialCwd: string | undefined;
+  workspace: WorkspaceEnv;
   lastCwd: string | null;
   pendingExit: number | null;
   shellExited: boolean;
@@ -86,6 +91,7 @@ type Session = {
   ready: Promise<void>;
   cols: number;
   rows: number;
+  resizeEpoch: number;
   container: HTMLDivElement | null;
   snapshot: string | null;
   dormantRing: DormantRing;
@@ -98,6 +104,7 @@ type Session = {
   // Set by the block shell-input; called to pull focus back when the xterm
   // grid steals it at the prompt (e.g. on a click), so typing stays in the bar.
   inputFocus: (() => void) | null;
+  inputPaste: ((text: string) => boolean) | null;
   // Per-leaf unsent shell-input text; the single workspace bar swaps it on focus change.
   inputDraft: string;
   // Live "input has text" flag from the block shell-input (gates the watermark).
@@ -112,6 +119,7 @@ type Session = {
   // OSC 133 C..D window (or blocks running mode): a foreground process owns
   // the terminal, so the leaf must keep its live grid while hidden.
   commandRunning: boolean;
+  foregroundBusy: boolean;
   promptConfirmTimer: ReturnType<typeof setTimeout> | null;
   promptEpoch: number;
   hiddenReleaseTimer: ReturnType<typeof setTimeout> | null;
@@ -156,6 +164,7 @@ export function whenSessionReady(
       const arr = readyWaiters.get(leafId);
       const i = arr?.findIndex((w) => w.timer === timer) ?? -1;
       if (arr && i >= 0) arr.splice(i, 1);
+      if (arr?.length === 0) readyWaiters.delete(leafId);
       resolve();
     }, timeoutMs);
     const arr = readyWaiters.get(leafId) ?? [];
@@ -168,32 +177,39 @@ const PENDING_INPUT_MAX = 256 * 1024;
 
 // Input typed before the pty attaches is queued and flushed on attach. Cap the
 // queue so a large paste into a still-spawning pane can't grow it without bound.
-function queuePendingInput(s: Session, data: string): void {
-  if (s.pendingInput.length + data.length > PENDING_INPUT_MAX) return;
+function queuePendingInput(s: Session, data: string): boolean {
+  if (s.pendingInput.length + data.length > PENDING_INPUT_MAX) return false;
   s.pendingInput += data;
+  return true;
+}
+
+function observePty(operation: Promise<unknown>, action: string): void {
+  void operation.catch((error) =>
+    console.warn(`[terax] PTY ${action} failed:`, error),
+  );
 }
 
 export function writeToSession(leafId: number, data: string): boolean {
   const s = sessions.get(leafId);
   if (!s || s.shellExited) return false;
   if (s.pty) {
-    void s.pty.write(data);
+    observePty(s.pty.write(data), "write");
     return true;
   }
-  queuePendingInput(s, data);
-  return true;
+  return queuePendingInput(s, data);
 }
 
-export function submitToLeaf(leafId: number, text: string): void {
+export function submitToLeaf(leafId: number, text: string): boolean {
   const s = sessions.get(leafId);
-  if (!s || s.shellExited) return;
-  s.everSubmitted = true;
+  if (!s || s.shellExited) return false;
   // Bracketed paste keeps a multiline command atomic; trailing CR runs it.
   const data = text.includes("\n")
     ? `\x1b[200~${text}\x1b[201~\r`
     : `${text}\r`;
-  if (s.pty) void s.pty.write(data);
-  else queuePendingInput(s, data);
+  if (s.pty) observePty(s.pty.write(data), "write");
+  else if (!queuePendingInput(s, data)) return false;
+  s.everSubmitted = true;
+  return true;
 }
 
 /**
@@ -205,17 +221,40 @@ export function pasteToLeaf(leafId: number, text: string): boolean {
   const s = sessions.get(leafId);
   if (!s || s.shellExited) return false;
   const data = `\x1b[200~${text}\x1b[201~`;
-  if (s.pty) void s.pty.write(data);
-  else queuePendingInput(s, data);
+  if (s.pty) observePty(s.pty.write(data), "write");
+  else if (!queuePendingInput(s, data)) return false;
   return true;
 }
 
 export function interruptLeaf(leafId: number): void {
-  sessions.get(leafId)?.pty?.write("\x03");
+  const pty = sessions.get(leafId)?.pty;
+  if (pty) observePty(pty.write("\x03"), "interrupt");
 }
 
 export function leafCwd(leafId: number): string | null {
   return sessions.get(leafId)?.lastCwd ?? null;
+}
+
+export function leafWorkspace(leafId: number): WorkspaceEnv | null {
+  const workspace = sessions.get(leafId)?.workspace;
+  return workspace ? { ...workspace } : null;
+}
+
+export function leafShellKind(leafId: number): ShellKind {
+  return sessions.get(leafId)?.pty?.shellKind ?? "unknown";
+}
+
+export function cdCommandForLeaf(leafId: number, path: string): string {
+  const session = sessions.get(leafId);
+  if (session?.pty && isAgentActivePty(session.pty.id))
+    throw new Error(
+      "Exit the coding agent before changing the shell directory",
+    );
+  const shell = leafShellKind(leafId);
+  const quoted = quoteForShell(path, shell);
+  if (shell === "powershell") return `Set-Location -LiteralPath ${quoted}\r`;
+  if (shell === "cmd") return `cd /d ${quoted}\r`;
+  return `cd -- ${quoted}\r`;
 }
 
 export function navigateFocusedBlocks(dir: -1 | 1): boolean {
@@ -264,6 +303,14 @@ export function focusLeafInput(leafId: number): void {
   sessions.get(leafId)?.inputFocus?.();
 }
 
+export function setLeafInputPaste(
+  leafId: number,
+  fn: ((text: string) => boolean) | null,
+): void {
+  const s = sessions.get(leafId);
+  if (s) s.inputPaste = fn;
+}
+
 export function getLeafDraft(leafId: number): string {
   return sessions.get(leafId)?.inputDraft ?? "";
 }
@@ -307,17 +354,9 @@ export function blockWatermarkState(leafId: number): WatermarkState {
 
 /**
  * Clear the scrollback and screen of the currently focused terminal, keeping
- * the active prompt line — macOS Terminal's ⌘K behaviour. Returns false when no
+ * the active prompt line. Returns false when no
  * focused terminal slot is bound (e.g. focus is in the editor or AI panel).
  */
-/** Leaf id of the visible, focused terminal pane, or null when none is. */
-export function focusedLeafId(): number | null {
-  for (const [leafId, s] of sessions) {
-    if (s.visibleNow && s.focusedNow) return leafId;
-  }
-  return null;
-}
-
 export function clearFocusedTerminal(): boolean {
   for (const [leafId, s] of sessions) {
     if (!s.visibleNow || !s.focusedNow) continue;
@@ -353,10 +392,14 @@ export function ptyIdForLeaf(leafId: number): number | null {
  */
 export function snapshotLeaf(leafId: number): string | null {
   const s = sessions.get(leafId);
+  const maxChars = 2 * 1024 * 1024;
   // The slot's own terminal first (bound or merely parked), then the snapshot
   // stored when a slot was taken away from this leaf. Only one of the two ever
   // holds anything: binding writes the stored copy back and clears it.
-  let out = serializeLeaf(leafId)?.snapshot ?? s?.snapshot ?? "";
+  const live = serializeLeaf(leafId, maxChars);
+  if (live && live.snapshot === null) return null;
+  let out = live?.snapshot ?? s?.snapshot ?? "";
+  if (out.length > maxChars) return null;
   // Output that arrived while the pane had no slot has not reached any
   // terminal yet, so it is appended the same way the desktop replays it when
   // the pane comes back.
@@ -367,7 +410,7 @@ export function snapshotLeaf(leafId: number): string | null {
     });
     out += decoder.decode();
   }
-  return out === "" ? null : out;
+  return out === "" || out.length > maxChars ? null : out;
 }
 
 function leafBusy(s: Session): boolean {
@@ -443,7 +486,12 @@ function confirmBlockPrompt(leafId: number): void {
 }
 
 async function releaseIfIdle(leafId: number, s: Session): Promise<void> {
+  const epoch = s.spawnEpoch;
+  s.foregroundBusy = true;
   const busy = await leafHasForegroundJob(leafId);
+  if (sessions.get(leafId) !== s || s.disposed || s.spawnEpoch !== epoch)
+    return;
+  s.foregroundBusy = busy;
   if (busy || s.disposed || s.visibleNow || !s.hasSlot) return;
   if (s.blocks || isLeafAltScreen(leafId) || leafBusy(s)) return;
   unbindLeafFromSlot(leafId, s);
@@ -456,7 +504,7 @@ async function leafHasForegroundJob(leafId: number): Promise<boolean> {
     return await invoke<boolean>("pty_has_foreground_job", { id: s.pty.id });
   } catch (e) {
     console.error("[terax] pty_has_foreground_job failed for leaf", leafId, e);
-    return false;
+    return true;
   }
 }
 
@@ -491,6 +539,40 @@ ensureAgentActivityListener((ptyId) => {
 });
 
 configureRendererPool({
+  async formatNativeLeafPaths(leafId, paths) {
+    const session = sessions.get(leafId);
+    if (!session || session.disposed || session.shellExited) return null;
+    const pty = session.pty;
+    const nativePaths =
+      session.workspace.kind === "wsl" &&
+      paths.some((path) => /^[A-Za-z]:[\\/]|^[\\/]{2}/.test(path))
+        ? await invoke<string[]>("wsl_native_paths", {
+            paths,
+            workspace: session.workspace,
+          })
+        : paths;
+    if (
+      sessions.get(leafId) !== session ||
+      session.disposed ||
+      session.shellExited ||
+      session.pty !== pty
+    )
+      return null;
+    return formatDroppedPaths(
+      nativePaths,
+      pty?.shellKind ?? "unknown",
+      pty ? isAgentActivePty(pty.id) : false,
+    );
+  },
+  formatLeafPaths(leafId, paths) {
+    const session = sessions.get(leafId);
+    if (!session || session.disposed || session.shellExited) return null;
+    return formatDroppedPaths(
+      paths,
+      session.pty?.shellKind ?? "unknown",
+      session.pty ? isAgentActivePty(session.pty.id) : false,
+    );
+  },
   resolveLeaf(leafId) {
     const s = sessions.get(leafId);
     if (!s) return null;
@@ -501,15 +583,18 @@ configureRendererPool({
           if (data.includes("\r")) void respawnSession(leafId);
           return;
         }
-        if (s.pty) void s.pty.write(data);
+        if (s.pty) observePty(s.pty.write(data), "write");
         else queuePendingInput(s, data);
       },
       resizePty: (cols, rows) => {
+        const pty = s.pty;
+        const epoch = ++s.resizeEpoch;
         s.cols = cols;
         s.rows = rows;
-        void s.pty
+        void pty
           ?.resize(cols, rows)
           .then((eff) => {
+            if (s.disposed || s.pty !== pty || s.resizeEpoch !== epoch) return;
             if (eff.cols === cols && eff.rows === rows) return;
             // Refused: the phone owns the session inside the cooldown. Render
             // at its grid rather than the one we asked for.
@@ -552,12 +637,20 @@ configureRendererPool({
     const s = sessions.get(leafId);
     return !!s && s.visibleNow && s.focusedNow;
   },
+  pasteLeafInput(leafId, text) {
+    const s = sessions.get(leafId);
+    if (!s || s.disposed || terminalInputOwner(s) !== "shell") return false;
+    if (s.inputPaste) return s.inputPaste(text);
+    s.inputDraft += text;
+    setLeafInputActivity(leafId, s.inputDraft.length > 0);
+    return true;
+  },
   isLeafBlocks(leafId) {
     return sessions.get(leafId)?.blocks ?? false;
   },
   isLeafBusy(leafId) {
     const s = sessions.get(leafId);
-    return !!s && leafBusy(s);
+    return !!s && (leafBusy(s) || s.foregroundBusy);
   },
   isLeafVisible(leafId) {
     return sessions.get(leafId)?.visibleNow ?? false;
@@ -576,6 +669,7 @@ function ensureSession(
   leafId: number,
   initialCwd?: string,
   blocks = false,
+  workspace: WorkspaceEnv = currentWorkspaceEnv(),
 ): Session {
   const existing = sessions.get(leafId);
   if (existing) return existing;
@@ -583,7 +677,9 @@ function ensureSession(
   const session: Session = {
     pty: null,
     ptyOpening: false,
+    spawnEpoch: 0,
     initialCwd,
+    workspace: { ...workspace },
     lastCwd: null,
     pendingExit: null,
     shellExited: false,
@@ -594,6 +690,7 @@ function ensureSession(
     ready: Promise.resolve(),
     cols: 0,
     rows: 0,
+    resizeEpoch: 0,
     container: null,
     snapshot: null,
     dormantRing: new DormantRing(),
@@ -604,11 +701,13 @@ function ensureSession(
     blockListeners: new Set(),
     blockDecorations: null,
     inputFocus: null,
+    inputPaste: null,
     inputDraft: "",
     inputActive: false,
     everSubmitted: false,
     altScreenAtRelease: false,
     commandRunning: false,
+    foregroundBusy: false,
     promptConfirmTimer: null,
     promptEpoch: 0,
     hiddenReleaseTimer: null,
@@ -705,18 +804,25 @@ async function openPtyForSession(
   s: Session,
   cwd: string | undefined,
 ): Promise<PtySession> {
+  const epoch = s.spawnEpoch;
   const startCols = s.cols > 0 ? s.cols : 80;
   const startRows = s.rows > 0 ? s.rows : 24;
   const pty = await openPty(
     startCols,
     startRows,
     {
-      onData: (bytes) => deliverPtyBytes(leafId, bytes),
+      onData: (bytes) => {
+        if (!s.disposed && sessions.get(leafId) === s && s.spawnEpoch === epoch)
+          deliverPtyBytes(leafId, bytes);
+      },
       onExit: (code) => {
+        if (s.disposed || sessions.get(leafId) !== s || s.spawnEpoch !== epoch)
+          return;
         s.shellExited = true;
         s.pty = null;
         s.pendingInput = "";
         s.commandRunning = false;
+        s.foregroundBusy = false;
         if (code !== 0) {
           // Park, keeping stdin so Enter can restart — do not disable it here.
           surfaceAbnormalExit(leafId, s, code);
@@ -735,6 +841,7 @@ async function openPtyForSession(
     usePreferencesStore.getState().terminalShell || undefined,
     leafId,
     gatewayPin(leafId),
+    s.workspace,
   );
   // Only resize if the bound dims changed during the spawn: a same-size
   // ResizePseudoConsole during conhost warmup is a known ConPTY trigger for
@@ -744,7 +851,7 @@ async function openPtyForSession(
     s.rows > 0 &&
     (s.cols !== startCols || s.rows !== startRows)
   ) {
-    void pty.resize(s.cols, s.rows);
+    observePty(pty.resize(s.cols, s.rows), "resize");
   }
   return pty;
 }
@@ -903,19 +1010,21 @@ function attachSession(
 
   if (!s.pty && !s.ptyOpening && !s.shellExited) {
     s.ptyOpening = true;
+    s.spawnEpoch += 1;
     openPtyWithRetry(leafId, s, s.initialCwd)
       .then((pty) => {
         s.ptyOpening = false;
-        if (s.disposed) {
-          pty.close();
+        if (s.disposed || s.shellExited) {
+          observePty(pty.close(), "close");
           return;
         }
         s.pty = pty;
         if (s.pendingInput) {
-          void pty.write(s.pendingInput);
+          observePty(pty.write(s.pendingInput), "write");
           s.pendingInput = "";
         }
-        if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+        if (s.cols > 0 && s.rows > 0)
+          observePty(pty.resize(s.cols, s.rows), "resize");
       })
       .catch((e) => {
         s.ptyOpening = false;
@@ -935,10 +1044,12 @@ function detachSession(leafId: number): void {
 export async function respawnSession(
   leafId: number,
   cwd?: string,
-): Promise<void> {
+): Promise<boolean> {
   const s = sessions.get(leafId);
-  if (!s || s.disposed) return;
-  s.pty?.close();
+  if (!s || s.disposed || s.ptyOpening) return false;
+  s.spawnEpoch += 1;
+  readyLeaves.delete(leafId);
+  if (s.pty) observePty(s.pty.close(), "close");
   s.pty = null;
   s.snapshot = null;
   s.dormantRing = new DormantRing();
@@ -947,6 +1058,7 @@ export async function respawnSession(
   s.pendingInput = "";
   s.altScreenAtRelease = false;
   s.commandRunning = false;
+  s.foregroundBusy = false;
   cancelPromptConfirm(s);
   s.awaitingRestart = false;
   cancelHiddenRelease(s);
@@ -968,19 +1080,21 @@ export async function respawnSession(
   } catch (e) {
     s.ptyOpening = false;
     if (!s.disposed) surfaceSpawnFailure(leafId, s, e);
-    return;
+    return false;
   }
   s.ptyOpening = false;
-  if (s.disposed) {
-    pty.close();
-    return;
+  if (s.disposed || s.shellExited) {
+    observePty(pty.close(), "close");
+    return false;
   }
   s.pty = pty;
   if (s.pendingInput) {
-    void pty.write(s.pendingInput);
+    observePty(pty.write(s.pendingInput), "write");
     s.pendingInput = "";
   }
-  if (s.cols > 0 && s.rows > 0) pty.resize(s.cols, s.rows);
+  if (s.cols > 0 && s.rows > 0)
+    observePty(pty.resize(s.cols, s.rows), "resize");
+  return true;
 }
 
 export async function leafHasForegroundProcess(
@@ -999,7 +1113,7 @@ export async function leafHasForegroundProcess(
       leafId,
       e,
     );
-    return false;
+    return true;
   }
 }
 
@@ -1007,15 +1121,17 @@ export function disposeSession(leafId: number): void {
   const s = sessions.get(leafId);
   if (!s) return;
   s.disposed = true;
+  s.spawnEpoch += 1;
   cancelPromptConfirm(s);
   cancelHiddenRelease(s);
   disposeLeafSlot(leafId);
   s.hasSlot = false;
   s.snapshot = null;
-  s.pty?.close();
+  if (s.pty) observePty(s.pty.close(), "close");
   s.pty = null;
   s.pendingInput = "";
   sessions.delete(leafId);
+  setGatewayPin(leafId, null);
   blockViewportListeners.delete(leafId);
   readyLeaves.delete(leafId);
   const waiters = readyWaiters.get(leafId);
@@ -1029,6 +1145,7 @@ export function disposeSession(leafId: number): void {
 }
 
 type Options = {
+  workspace: WorkspaceEnv;
   leafId: number;
   container: React.RefObject<HTMLDivElement | null>;
   visible: boolean;
@@ -1040,6 +1157,7 @@ type Options = {
 };
 
 export function useTerminalSession({
+  workspace,
   leafId,
   container,
   visible,
@@ -1057,10 +1175,17 @@ export function useTerminalSession({
   // would detach/rebind the renderer slot (disposing block markers) on each cd.
   const initialCwdRef = useRef(initialCwd);
   initialCwdRef.current = initialCwd;
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
 
   useEffect(() => {
     let cancelled = false;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks);
+    const s = ensureSession(
+      leafId,
+      initialCwdRef.current,
+      blocks,
+      workspaceRef.current,
+    );
     s.ready.then(() => {
       if (cancelled || s.disposed) return;
       const node = container.current;
@@ -1080,7 +1205,12 @@ export function useTerminalSession({
   const [blockMode, setBlockMode] = useState<BlockMode>("prompt");
   useEffect(() => {
     if (!blocks) return;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks);
+    const s = ensureSession(
+      leafId,
+      initialCwdRef.current,
+      blocks,
+      workspaceRef.current,
+    );
     setBlockMode(s.blockMode);
     const cb = () => setBlockMode(sessions.get(leafId)?.blockMode ?? "prompt");
     s.blockListeners.add(cb);
@@ -1161,7 +1291,7 @@ export function useTerminalSession({
     (data: string) => {
       const s = sessions.get(leafId);
       if (!s || s.shellExited) return;
-      if (s.pty) void s.pty.write(data);
+      if (s.pty) observePty(s.pty.write(data), "write");
       else queuePendingInput(s, data);
     },
     [leafId],

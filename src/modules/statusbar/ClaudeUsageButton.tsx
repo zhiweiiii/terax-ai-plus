@@ -8,7 +8,7 @@ import { errorToast } from "@/lib/errorToast";
 import { ChartLineData01Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 type UsageWindow = {
   label: string;
@@ -64,11 +64,13 @@ function ageLabel(fetchedAt: number): string {
 }
 
 function codexResetLabel(resetsAt: number | null): string | null {
-  if (resetsAt === null) return null;
+  if (resetsAt === null || !Number.isFinite(resetsAt)) return null;
+  const date = new Date(resetsAt * 1000);
+  if (!Number.isFinite(date.getTime())) return null;
   return new Intl.DateTimeFormat("zh-CN", {
     dateStyle: "short",
     timeStyle: "short",
-  }).format(new Date(resetsAt * 1000));
+  }).format(date);
 }
 
 function codexWindowTitle(window: CodexUsageWindow, fallback: string): string {
@@ -91,33 +93,48 @@ export function ClaudeUsageButton() {
   const [claudeUsage, setClaudeUsage] = useState<ClaudeUsage | null>(null);
   const [codexUsage, setCodexUsage] = useState<CodexUsage | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const revisionRef = useRef(0);
+  const mountedRef = useRef(true);
 
   /* First paint uses the cached answer only. Fetching on mount would spend a
      request every time the app starts, for a number nobody has asked to see. */
   useEffect(() => {
+    mountedRef.current = true;
+    const revision = revisionRef.current;
     void invoke<ClaudeUsage | null>("claude_usage_cached")
       .then((cached) => {
-        if (cached) setClaudeUsage(cached);
+        if (cached && mountedRef.current && revisionRef.current === revision)
+          setClaudeUsage(cached);
       })
       .catch(() => {
         /* A missing cache is the normal case, not an error worth a toast. */
       });
     void invoke<CodexUsage | null>("codex_usage_cached")
       .then((cached) => {
-        if (cached) setCodexUsage(cached);
+        if (cached && mountedRef.current && revisionRef.current === revision)
+          setCodexUsage(cached);
       })
       .catch(() => {
         /* A missing cache is the normal case, not an error worth a toast. */
       });
+    return () => {
+      mountedRef.current = false;
+      revisionRef.current++;
+    };
   }, []);
 
   const load = async (force: boolean) => {
+    if (!mountedRef.current || busyRef.current) return;
+    busyRef.current = true;
+    const revision = ++revisionRef.current;
     setBusy(true);
     try {
       const [claude, codex] = await Promise.allSettled([
         invoke<ClaudeUsage>("claude_usage", { force }),
         invoke<CodexUsage>("codex_usage", { force }),
       ]);
+      if (!mountedRef.current || revision !== revisionRef.current) return;
       if (claude.status === "fulfilled") setClaudeUsage(claude.value);
       else errorToast("读取 Claude Code 用量失败", claude.reason);
       if (codex.status === "fulfilled") setCodexUsage(codex.value);
@@ -125,7 +142,9 @@ export function ClaudeUsageButton() {
     } catch (e) {
       errorToast("读取用量失败", e);
     } finally {
-      setBusy(false);
+      busyRef.current = false;
+      if (mountedRef.current && revision === revisionRef.current)
+        setBusy(false);
     }
   };
 
@@ -231,7 +250,8 @@ export function ClaudeUsageButton() {
 
             {claudeUsage && !claudeUsage.error ? (
               <p className="text-[10px] text-muted-foreground">
-                更新于 {ageLabel(claudeUsage.fetchedAt)}，查询本身也会消耗一次请求
+                更新于 {ageLabel(claudeUsage.fetchedAt)}
+                ，查询本身也会消耗一次请求
               </p>
             ) : null}
           </UsageSection>
@@ -256,7 +276,8 @@ export function ClaudeUsageButton() {
             ) : null}
             {codexUsage && !codexUsage.error ? (
               <p className="text-[10px] text-muted-foreground">
-                {codexUsage.planType ? `${codexUsage.planType} · ` : ""}更新于 {ageLabel(codexUsage.fetchedAt)}
+                {codexUsage.planType ? `${codexUsage.planType} · ` : ""}更新于{" "}
+                {ageLabel(codexUsage.fetchedAt)}
               </p>
             ) : null}
           </UsageSection>
@@ -266,7 +287,13 @@ export function ClaudeUsageButton() {
   );
 }
 
-function UsageSection({ title, children }: { title: string; children: ReactNode }) {
+function UsageSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
   return (
     <section className="flex flex-col gap-2 border-t border-border/60 pt-2">
       <span className="text-[10.5px] font-medium text-muted-foreground">
@@ -291,7 +318,7 @@ function WindowRow({ title, window }: { title: string; window: UsageWindow }) {
         <div className="h-1 w-full overflow-hidden rounded-full bg-foreground/10">
           <div
             className={`h-full rounded-full ${barOf(percent)}`}
-            style={{ width: `${Math.min(100, percent)}%` }}
+            style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
           />
         </div>
       )}
@@ -325,7 +352,7 @@ function CodexWindowRow({
         <div className="h-1 w-full overflow-hidden rounded-full bg-foreground/10">
           <div
             className={`h-full rounded-full ${barOf(percent)}`}
-            style={{ width: `${Math.min(100, percent)}%` }}
+            style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
           />
         </div>
       )}

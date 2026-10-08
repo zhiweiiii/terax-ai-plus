@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions & ideas
-    url: https://github.com/crynta/Terax-AI/discussions
-    about: For general questions, usage help, and open-ended ideas, please start a Discussion instead of an issue.
+    url: https://github.com/zhiweiiii/terax-ai-plus/issues
+    about: Search this repository's existing issues for usage help and ideas.
   - name: Security vulnerabilities
-    url: https://github.com/crynta/Terax-AI/blob/main/SECURITY.md
+    url: https://github.com/zhiweiiii/terax-ai-plus/blob/main/SECURITY.md
     about: Do NOT open a public issue for security problems. Please follow the disclosure process in SECURITY.md.

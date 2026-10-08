@@ -10,7 +10,7 @@ import {
 
 export type BlockController = {
   blockMode: BlockMode;
-  submitCommand: (text: string) => void;
+  submitCommand: (text: string) => boolean;
   interrupt: () => void;
   getCwd: () => string | null;
 };

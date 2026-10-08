@@ -1,6 +1,6 @@
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { Extension } from "@codemirror/state";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { serverForLanguage } from "./presets";
 import { useLspRuntimeStore } from "./runtimeStore";
 import { acquireDocExtension, type LspDocHandle } from "./sessionManager";
@@ -10,7 +10,6 @@ export function useLspExtension(
   langId: string | null,
   ready: boolean,
 ): Extension | null {
-  const [ext, setExt] = useState<Extension | null>(null);
   const customServers = usePreferencesStore((s) => s.lspCustomServers);
   const lspActivation = usePreferencesStore((s) => s.lspActivation);
   const preset = serverForLanguage(langId, customServers, lspActivation);
@@ -20,32 +19,38 @@ export function useLspExtension(
   );
 
   const presetId = preset?.id;
-  // biome-ignore lint/correctness/useExhaustiveDependencies(generation): re-acquire after a server crash tears the session down
-  // biome-ignore lint/correctness/useExhaustiveDependencies(presetId): swapping the enabled server for a language must rebind the doc
+  const identity = useMemo(
+    () => ({ path, langId, ready, activation, generation, presetId }),
+    [path, langId, ready, activation, generation, presetId],
+  );
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
+  const [bound, setBound] = useState<{
+    identity: typeof identity;
+    extension: Extension;
+  } | null>(null);
+
   useEffect(() => {
-    if (!ready || !langId || activation !== "enabled") {
-      setExt(null);
-      return;
-    }
+    const { path, langId, ready, activation } = identity;
+    if (!ready || !langId || activation !== "enabled") return;
     let cancelled = false;
     let handle: LspDocHandle | null = null;
     acquireDocExtension(path, langId)
       .then((h) => {
         if (!h) return;
-        if (cancelled) {
+        if (cancelled || identityRef.current !== identity) {
           h.release();
           return;
         }
         handle = h;
-        setExt(h.extension);
+        setBound({ identity, extension: h.extension });
       })
       .catch((e) => console.error("[lsp] acquire failed", e));
     return () => {
       cancelled = true;
       handle?.release();
-      setExt(null);
     };
-  }, [path, langId, ready, activation, generation, presetId]);
+  }, [identity]);
 
-  return ext;
+  return bound?.identity === identity ? bound.extension : null;
 }

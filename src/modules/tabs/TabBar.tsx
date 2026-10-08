@@ -109,6 +109,31 @@ export function TabBar({
     fromId: number;
     active: boolean;
   } | null>(null);
+  const captureRef = useRef<{ element: HTMLElement; pointerId: number } | null>(
+    null,
+  );
+  const dropGapRef = useRef<number | null>(null);
+  const savedUserSelectRef = useRef<string | null>(null);
+  const releaseDrag = useCallback(() => {
+    drag.current = null;
+    dropGapRef.current = null;
+    const capture = captureRef.current;
+    captureRef.current = null;
+    if (capture?.element.hasPointerCapture(capture.pointerId))
+      capture.element.releasePointerCapture(capture.pointerId);
+    if (savedUserSelectRef.current !== null) {
+      document.body.style.userSelect = savedUserSelectRef.current;
+      savedUserSelectRef.current = null;
+    }
+  }, []);
+  useEffect(() => releaseDrag, [releaseDrag]);
+  useEffect(() => {
+    if (drag.current && !tabs.some((tab) => tab.id === drag.current?.fromId)) {
+      releaseDrag();
+      setDraggingId(null);
+      setDropGap(null);
+    }
+  }, [tabs, releaseDrag]);
 
   // Play the enter animation only for tabs opened after the first paint, never
   // the restored set and never on switch/reorder (triggers are keyed, so they
@@ -136,9 +161,15 @@ export function TabBar({
     const el = listRef.current?.querySelector<HTMLElement>(
       '[data-tab-active="true"]',
     );
-    setPill(el ? { left: el.offsetLeft, width: el.offsetWidth } : null);
+    const next = el ? { left: el.offsetLeft, width: el.offsetWidth } : null;
+    setPill((current) =>
+      current?.left === next?.left && current?.width === next?.width
+        ? current
+        : next,
+    );
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Selection and tab layout changes require remeasuring the committed DOM.
   useLayoutEffect(() => {
     measurePill();
   }, [measurePill, activeId, activeOwnerTabId, tabs]);
@@ -171,14 +202,18 @@ export function TabBar({
     return els.length;
   };
 
-  const endDrag = (currentTarget: HTMLElement) => {
-    const st = drag.current;
-    if (st) currentTarget.releasePointerCapture?.(st.pointerId);
-    drag.current = null;
+  const endDrag = () => {
+    releaseDrag();
     setDraggingId(null);
     setDropGap(null);
-    document.body.style.userSelect = "";
   };
+
+  const srcIndex = tabs.findIndex((tab) => tab.id === draggingId);
+  const showGap = (gap: number) =>
+    draggingId !== null &&
+    dropGap === gap &&
+    gap !== srcIndex &&
+    gap !== srcIndex + 1;
 
   // Horizontal wheel scroll without holding shift.
   useEffect(() => {
@@ -247,13 +282,6 @@ export function TabBar({
                   t.id === activeOwnerTabId);
               const isNew = !firstRender && !seen.has(t.id);
 
-              const srcIndex = tabs.findIndex((x) => x.id === draggingId);
-              const showGap = (gap: number) =>
-                draggingId !== null &&
-                dropGap === gap &&
-                gap !== srcIndex &&
-                gap !== srcIndex + 1;
-
               // While renaming, render a non-button cell so the <input> is not
               // nested inside the trigger <button> (invalid HTML, and WebKit
               // blocks focus/selection on inputs inside buttons).
@@ -292,6 +320,7 @@ export function TabBar({
                   data-tab-active={isActive ? "true" : undefined}
                   onPointerDown={(e) => {
                     if (e.button !== 0) return;
+                    if (drag.current) return;
                     if ((e.target as HTMLElement).closest("[data-no-drag]"))
                       return;
                     drag.current = {
@@ -299,6 +328,10 @@ export function TabBar({
                       startX: e.clientX,
                       fromId: t.id,
                       active: false,
+                    };
+                    captureRef.current = {
+                      element: e.currentTarget,
+                      pointerId: e.pointerId,
                     };
                     e.currentTarget.setPointerCapture(e.pointerId);
                   }}
@@ -309,21 +342,27 @@ export function TabBar({
                       if (Math.abs(e.clientX - st.startX) < 4) return;
                       st.active = true;
                       setDraggingId(st.fromId);
+                      savedUserSelectRef.current =
+                        document.body.style.userSelect;
                       document.body.style.userSelect = "none";
                     }
                     e.preventDefault();
-                    setDropGap(gapAtX(e.clientX));
+                    const gap = gapAtX(e.clientX);
+                    dropGapRef.current = gap;
+                    setDropGap(gap);
                   }}
                   onPointerUp={(e) => {
                     const st = drag.current;
-                    if (st?.active && dropGap !== null) {
-                      onReorder(st.fromId, dropGap);
+                    if (!st || st.pointerId !== e.pointerId) return;
+                    if (st.active && dropGapRef.current !== null) {
+                      onReorder(st.fromId, dropGapRef.current);
                     } else if (st && !st.active) {
                       onSelect(t.id);
                     }
-                    endDrag(e.currentTarget);
+                    endDrag();
                   }}
-                  onPointerCancel={(e) => endDrag(e.currentTarget)}
+                  onPointerCancel={() => endDrag()}
+                  onLostPointerCapture={() => endDrag()}
                   onDoubleClick={() => isPreview && onPin(t.id)}
                   onAuxClick={(e) => {
                     if (e.button === 1 && tabs.length > 1) {
@@ -373,11 +412,13 @@ export function TabBar({
                         }}
                       >
                         <DropdownMenuTrigger asChild>
-                          {/* span, not button: a button nested in the TabsTrigger button is invalid DOM and breaks WebKit focus. */}
+                          {/* biome-ignore lint/a11y/useSemanticElements: TabsTrigger already renders a button; nesting another breaks focus. */}
                           <span
                             role="button"
-                            tabIndex={-1}
+                            tabIndex={0}
+                            aria-label="Select file language"
                             data-no-drag
+                            onKeyDown={(event) => event.stopPropagation()}
                             onPointerDown={(e) => e.stopPropagation()}
                             onMouseDown={(e) => {
                               e.preventDefault();
@@ -475,16 +516,26 @@ export function TabBar({
                     </span>
                     {t.kind === "editor" && t.dirty ? (
                       <span
+                        role="img"
                         aria-label="Unsaved changes"
                         className="size-1.5 shrink-0 rounded-full bg-foreground/70"
                       />
                     ) : null}
                   </span>
                   {tabs.length > 1 && (
+                    // biome-ignore lint/a11y/useSemanticElements: TabsTrigger already renders a button; nesting another breaks focus.
                     <span
                       role="button"
+                      tabIndex={0}
                       aria-label="Close tab"
                       data-no-drag
+                      onKeyDown={(event) => {
+                        event.stopPropagation();
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onClose(t.id);
+                        }
+                      }}
                       onPointerDown={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -584,12 +635,9 @@ function DropIndicator() {
   );
 }
 
-function useTabAgentStatus(tab: Tab) {
+function useTabAgentStatus(tab: Extract<Tab, { kind: "terminal" }>) {
   const phases = useAgentActivityStore((s) => s.phases);
   const agents = useAgentActivityStore((s) => s.agents);
-  if (tab.kind !== "terminal" || tab.private) {
-    return { state: null, agent: null } as const;
-  }
   const ptyIds: number[] = [];
   for (const leaf of leafIds(tab.paneTree)) {
     const id = ptyIdForLeaf(leaf);
@@ -599,7 +647,6 @@ function useTabAgentStatus(tab: Tab) {
 }
 
 export function TabIcon({ tab }: { tab: Tab }) {
-  const agentStatus = useTabAgentStatus(tab);
   if (tab.kind === "editor" || tab.kind === "markdown") {
     const url =
       tab.kind === "editor" && tab.overrideLanguage
@@ -607,6 +654,7 @@ export function TabIcon({ tab }: { tab: Tab }) {
         : fileIconUrl(tab.title);
     return url ? (
       <img
+        key={url}
         src={url}
         alt=""
         className="size-3.5 shrink-0 object-contain"
@@ -659,6 +707,11 @@ export function TabIcon({ tab }: { tab: Tab }) {
       />
     );
   }
+  return <TerminalTabIcon tab={tab} />;
+}
+
+function TerminalTabIcon({ tab }: { tab: Extract<Tab, { kind: "terminal" }> }) {
+  const agentStatus = useTabAgentStatus(tab);
   if (agentStatus.state === "attention") {
     return (
       <HugeiconsIcon
@@ -748,6 +801,7 @@ function TabRenameInput({
       )}
       onKeyDown={(e) => {
         e.stopPropagation();
+        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
         if (e.key === "Enter") commit(e.currentTarget.value, true);
         else if (e.key === "Escape") finish(onCancel);
       }}

@@ -1,7 +1,11 @@
-import { resolveFontFamily } from "@/lib/fonts";
 import { openExternalUrl } from "@/lib/external-link";
+import { resolveFontFamily } from "@/lib/fonts";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { TerminalCursorStyle } from "@/modules/settings/store";
+import {
+  recordTerminalEvent,
+  terminalDiagnosticsEnabled,
+} from "@/modules/terminal/lib/terminalDiagnostics";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -9,19 +13,15 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { type FontWeight, Terminal } from "@xterm/xterm";
 import { toast } from "sonner";
+import { clipboardAttachmentPaths } from "./clipboardAttachments";
 import { shouldCursorBlink } from "./cursorBlink";
-import {
-  recordTerminalEvent,
-  terminalDiagnosticsEnabled,
-} from "@/modules/terminal/lib/terminalDiagnostics";
+import { terminalReadlineSequence } from "./keymap";
 import {
   readTerminalClipboard,
   writeTerminalClipboard,
 } from "./terminalClipboard";
-import { clipboardAttachmentText } from "./clipboardAttachments";
-import { pasteIntoTerminal } from "./terminalPaste";
-import { terminalReadlineSequence } from "./keymap";
 import { createTerminalLinkHandler } from "./terminalLinks";
+import { pasteIntoTerminal } from "./terminalPaste";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
@@ -32,6 +32,12 @@ export type SlotAdapter = {
   resolveLeaf(leafId: number): LeafBridge | null;
   evictLeaf(leafId: number): void;
   focusLeafInput(leafId: number): boolean;
+  pasteLeafInput(leafId: number, text: string): boolean;
+  formatLeafPaths(leafId: number, paths: string[]): string | null;
+  formatNativeLeafPaths(
+    leafId: number,
+    paths: string[],
+  ): Promise<string | null>;
   isLeafFocused(leafId: number): boolean;
   isLeafBlocks(leafId: number): boolean;
   isLeafBusy(leafId: number): boolean;
@@ -129,6 +135,30 @@ export function configureRendererPool(a: SlotAdapter): void {
   bindWindowActivityListeners();
 }
 
+export function formatPathsForLeaf(
+  leafId: number,
+  paths: string[],
+): string | null {
+  try {
+    return adapter?.formatLeafPaths(leafId, paths) ?? null;
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+    return null;
+  }
+}
+
+export async function formatNativePathsForLeaf(
+  leafId: number,
+  paths: string[],
+): Promise<string | null> {
+  try {
+    return (await adapter?.formatNativeLeafPaths(leafId, paths)) ?? null;
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : String(error));
+    return null;
+  }
+}
+
 export function forEachSlot(fn: (slot: Slot) => void): void {
   for (const s of slots) fn(s);
 }
@@ -167,6 +197,8 @@ export function poolSlotStats(): PoolSlotStat[] {
 // dropped path as a real paste while a plain shell gets the literal text.
 export function pasteIntoLeaf(leafId: number, text: string): boolean {
   const slot = slots.find((s) => s.currentLeafId === leafId);
+  if (slot?.term.options.disableStdin)
+    return adapter?.pasteLeafInput(leafId, text) ?? false;
   return pasteIntoTerminal(slot?.term ?? null, text);
 }
 
@@ -281,10 +313,16 @@ function createSlot(): Slot {
         // Accepted cost: opencode turns tracking on but never pastes, so
         // right-click paste does nothing there.
         if (term.modes.mouseTrackingMode !== "none") return;
+        const targetLeafId = slot.currentLeafId;
         void navigator.clipboard
           .readText()
           .then((text) => {
-            if (text) pasteIntoTerminal(term, text);
+            if (
+              text &&
+              targetLeafId !== null &&
+              slot.currentLeafId === targetLeafId
+            )
+              pasteIntoLeaf(targetLeafId, text);
           })
           .catch(() => {});
       },
@@ -396,7 +434,6 @@ function createSlot(): Slot {
     const bridge = adapter?.resolveLeaf(leafId);
     if (!bridge) return true;
     const readlineSequence = terminalReadlineSequence(event, {
-      isMac: false,
       isAlternateScreen: isAltScreen(slot),
     });
     if (readlineSequence) {
@@ -422,11 +459,22 @@ function createSlot(): Slot {
         const targetLeafId = slot.currentLeafId;
         void (async () => {
           // An image on the clipboard becomes a file path; otherwise paste text.
-          const attachment = await clipboardAttachmentText();
-          const text = attachment ?? (await readTerminalClipboard());
-          if (text && slot.currentLeafId === targetLeafId)
-            slot.term.paste(text);
-        })();
+          const attachment = await clipboardAttachmentPaths();
+          const plainText = attachment ? null : await readTerminalClipboard();
+          if (targetLeafId === null || slot.currentLeafId !== targetLeafId)
+            return;
+          const text = attachment
+            ? await formatNativePathsForLeaf(targetLeafId, attachment)
+            : plainText;
+          if (
+            text &&
+            targetLeafId !== null &&
+            slot.currentLeafId === targetLeafId
+          )
+            pasteIntoLeaf(targetLeafId, text);
+        })().catch((error) =>
+          console.error("[terax] clipboard paste failed:", error),
+        );
       }
       event.preventDefault();
       return false;
@@ -495,13 +543,19 @@ function pickSlotFor(leafId: number): PickResult {
   let bestScore = Number.POSITIVE_INFINITY;
   for (const s of slots) {
     if (s.currentLeafId === leafId) return { slot: s, previousLeafId: null };
+    if (
+      isAltScreen(s) ||
+      (s.currentLeafId !== null && adapter?.isLeafBusy(s.currentLeafId))
+    )
+      continue;
     const score = evictionScore(s);
     if (score < bestScore) {
       bestScore = score;
       best = s;
     }
   }
-  const chosen = best!;
+  if (!best) return { slot: createSlot(), previousLeafId: null };
+  const chosen = best;
   return { slot: chosen, previousLeafId: chosen.currentLeafId };
 }
 
@@ -769,21 +823,37 @@ export function releaseSlot(leafId: number): ReleaseOutput | null {
  *  written back into the slot on bind and dropped), so a leaf that is merely
  *  hidden has its buffer here and nowhere else. Null only when the slot was
  *  repurposed, and the caller then falls back to the stored snapshot. */
-export function serializeLeaf(leafId: number): SerializeOutput | null {
+export function serializeLeaf(
+  leafId: number,
+  maxChars?: number,
+): SerializeOutput | null {
   const slot =
     slots.find((s) => s.currentLeafId === leafId) ??
     slots.find((s) => s.currentLeafId === null && s.retainedLeafId === leafId);
-  return slot ? serializeSlot(slot) : null;
+  return slot ? serializeSlot(slot, maxChars) : null;
 }
 
-function serializeSlot(slot: Slot): SerializeOutput {
+function serializeSlot(slot: Slot, maxChars?: number): SerializeOutput {
   let snapshot: string | null = null;
   try {
-    const cap = Math.min(
+    let cap = Math.min(
       SNAPSHOT_SCROLLBACK_CAP,
       usePreferencesStore.getState().terminalScrollback,
     );
+    if (maxChars !== undefined) {
+      cap = Math.min(
+        cap,
+        Math.max(
+          0,
+          Math.floor(maxChars / (16 * slot.term.cols)) - slot.term.rows,
+        ),
+      );
+    }
     snapshot = slot.serializeAddon.serialize({ scrollback: cap });
+    if (maxChars !== undefined && snapshot.length > maxChars && cap > 0) {
+      snapshot = slot.serializeAddon.serialize({ scrollback: 0 });
+    }
+    if (maxChars !== undefined && snapshot.length > maxChars) snapshot = null;
   } catch (e) {
     console.warn("[terax] serialize failed:", e);
   }
@@ -919,6 +989,17 @@ const IDLE_SLOTS_KEEP_WARM = 1;
 function attachWebgl(slot: Slot): void {
   if (slot.webglAddon || !slot.term.element) return;
   if (!usePreferencesStore.getState().terminalWebglEnabled) return;
+  if (
+    slots.filter((candidate) => candidate.webglAddon).length >= POOL_MAX_SIZE
+  ) {
+    const inactive = slots.find(
+      (candidate) =>
+        candidate.webglAddon &&
+        (candidate.parked || candidate.currentLeafId === null),
+    );
+    if (!inactive) return;
+    disposeSlotWebgl(inactive);
+  }
   const elem = slot.term.element;
   const before = new Set<HTMLCanvasElement>(
     elem.querySelectorAll<HTMLCanvasElement>("canvas"),

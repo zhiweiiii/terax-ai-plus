@@ -31,8 +31,12 @@ async function copyText(text: string): Promise<void> {
   }
   const active = document.activeElement;
   const selection =
-    active instanceof HTMLTextAreaElement
-      ? ([active.selectionStart, active.selectionEnd] as const)
+    active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement
+      ? ([
+          active.selectionStart,
+          active.selectionEnd,
+          active.selectionDirection,
+        ] as const)
       : null;
   const field = document.createElement("textarea");
   field.value = text;
@@ -45,8 +49,18 @@ async function copyText(text: string): Promise<void> {
   } finally {
     field.remove();
     if (active instanceof HTMLElement) active.focus({ preventScroll: true });
-    if (active instanceof HTMLTextAreaElement && selection)
-      active.setSelectionRange(...selection);
+    if (
+      (active instanceof HTMLTextAreaElement ||
+        active instanceof HTMLInputElement) &&
+      selection &&
+      selection[0] !== null &&
+      selection[1] !== null
+    )
+      active.setSelectionRange(
+        selection[0],
+        selection[1],
+        selection[2] ?? undefined,
+      );
   }
   if (!copied) throw new Error("Clipboard unavailable");
 }

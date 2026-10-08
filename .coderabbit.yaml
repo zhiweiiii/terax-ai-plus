@@ -99,9 +99,9 @@ reviews:
         split.
     - path: "src-tauri/**/*.rs"
       instructions: >-
-        Rust backend owns all OS access. Verify OS-specific logic exists in the
-        matching cfg arm for every platform the change affects (unix, windows, macos);
-        a fix that only handles one platform is a regression on the others. Keep tauri
+        Rust backend owns all OS access. The native app targets Windows only;
+        WSL and Git Bash integration remain supported and must not be removed as
+        unused native Unix code. Keep tauri
         commands thin with logic in pure, testable functions. The secret-path deny-list
         must apply on both read and write and never be bypassed. Do not accept removal
         of SPAWN_LOCK or the per-session Job Object without an equivalent guarantee
@@ -120,7 +120,7 @@ reviews:
       instructions: >-
         Release pipeline is high blast radius. Flag anything that could break the
         auto-updater signature flow, latest.json, code signing, or cross-platform
-        artifact production. A broken release affects every user's auto-update.
+        Windows artifact production. A broken release affects every user's auto-update.
     - path: "**/*.{md,mdx}"
       instructions: >-
         Only flag substance, not style. Terax is positioned terminal-first; flag

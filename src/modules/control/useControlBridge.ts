@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type RefObject, useEffect } from "react";
-import { resolveControlContext } from "./lib/context";
-import { createReadinessQueue } from "./lib/readiness";
+import { resolveControlContext } from "@/modules/control/lib/context";
+import { createReadinessQueue } from "@/modules/control/lib/readiness";
 
 type ControlError = {
   code: string;
@@ -109,6 +109,7 @@ export function useControlBridge({
     let unlisten: (() => void) | undefined;
 
     const handleRequest = async (request: ControlRequest) => {
+      if (disposed) return;
       try {
         const context = resolveControlContext(
           tabsRef.current ?? [],
@@ -116,6 +117,12 @@ export function useControlBridge({
           activeSpaceIdRef.current ?? DEFAULT_SPACE_ID,
           request.caller.pane_id,
         );
+        if (!context) {
+          throw new RequestError(
+            "caller_unavailable",
+            "The calling terminal no longer exists",
+          );
+        }
         if (request.method === "identify") {
           await respond(request.id, { ok: true, result: context });
           return;
@@ -133,6 +140,12 @@ export function useControlBridge({
               console.warn("[terax] could not focus control target:", error);
             }
           }
+          if (disposed) {
+            throw new RequestError(
+              "frontend_unavailable",
+              "The control bridge has closed",
+            );
+          }
           const tabId = onOpen({ ...open, spaceId: context.space_id });
           if (tabId === null) {
             throw new RequestError(
@@ -140,9 +153,6 @@ export function useControlBridge({
               "Terax could not create an editor tab",
             );
           }
-          await new Promise<void>((resolve) =>
-            requestAnimationFrame(() => resolve()),
-          );
           await respond(request.id, {
             ok: true,
             result: {

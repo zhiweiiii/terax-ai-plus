@@ -17,12 +17,14 @@
 //!   lasts a week - so changing the password would have locked nobody out.
 //!   Rotating it is what makes a change mean something.
 //!
-//! Until a password is set the compile-time constant still answers, so an
-//! existing install keeps working and nobody is locked out by an update.
+//! Missing or damaged credentials deny access. There is no shared default.
 
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::{
+    fs,
+    io::{Read, Write},
+};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -45,55 +47,78 @@ fn credential_path() -> Option<PathBuf> {
     Some(dir.join("web-auth.json"))
 }
 
-fn cache() -> &'static Mutex<Option<Option<StoredCredential>>> {
-    static CACHE: OnceLock<Mutex<Option<Option<StoredCredential>>>> = OnceLock::new();
+type CredentialResult = Result<Option<StoredCredential>, String>;
+
+fn cache() -> &'static Mutex<Option<CredentialResult>> {
+    static CACHE: OnceLock<Mutex<Option<CredentialResult>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
 /// Read the stored credential, caching the result. The outer Option is "have
 /// we looked yet", the inner is "is there one".
-fn stored() -> Option<StoredCredential> {
+fn stored() -> CredentialResult {
     let mut guard = cache().lock().unwrap();
     if let Some(hit) = guard.as_ref() {
         return hit.clone();
     }
-    let loaded = credential_path()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|text| serde_json::from_str::<StoredCredential>(&text).ok());
+    let loaded = (|| {
+        let path = credential_path().ok_or("credential directory unavailable")?;
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("credential file unreadable".into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(16385)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "credential read failed")?;
+        if bytes.len() > 16384 {
+            return Err("credential file too large".into());
+        }
+        let credential: StoredCredential =
+            serde_json::from_slice(&bytes).map_err(|_| "invalid credential file")?;
+        if PasswordHash::new(&credential.hash).is_err()
+            || credential.token.len() != 32
+            || !credential
+                .token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("invalid credential file".into());
+        }
+        Ok(Some(credential))
+    })();
     *guard = Some(loaded.clone());
     loaded
 }
 
-fn invalidate_cache() {
-    *cache().lock().unwrap() = None;
-}
-
-/// Whether the user has set their own password, as opposed to still running on
-/// the one compiled in. Drives what the settings page offers.
+/// Damaged credentials remain configured so settings offers a reset.
 pub fn has_custom_password() -> bool {
-    stored().is_some()
+    !matches!(stored(), Ok(None))
 }
 
 /// Check a password from the login form.
-pub fn verify(password: &str) -> bool {
+pub fn verify(password: &str) -> Option<String> {
     match stored() {
-        Some(cred) => {
+        Ok(Some(cred)) => {
             let Ok(parsed) = PasswordHash::new(&cred.hash) else {
-                return false;
+                return None;
             };
             Argon2::default()
                 .verify_password(password.as_bytes(), &parsed)
-                .is_ok()
+                .ok()
+                .map(|_| cred.token)
         }
-        // No stored credential yet: fall back to the compile-time digest so an
-        // install that predates this keeps working.
-        None => super::legacy_password_matches(password),
+        Ok(None) | Err(_) => None,
     }
 }
 
 /// The value the `terax_web` cookie carries.
-pub fn session_token() -> String {
-    stored().map(|c| c.token).unwrap_or_else(super::legacy_token)
+pub fn session_token() -> Option<String> {
+    match stored() {
+        Ok(Some(credential)) => Some(credential.token),
+        Ok(None) | Err(_) => None,
+    }
 }
 
 /// Replace the password. Returns an error string suitable for showing to the
@@ -102,13 +127,15 @@ pub fn set_password(password: &str) -> Result<(), String> {
     if password.chars().count() < MIN_PASSWORD_CHARS {
         return Err(format!("密码至少需要 {MIN_PASSWORD_CHARS} 个字符"));
     }
+    if password.len() > 256 {
+        return Err("密码不能超过 256 字节".into());
+    }
     // Salt from the OS source directly: argon2 only exposes its own RNG helper
     // when rand_core's std feature is on, and `getrandom` is already a
     // dependency here.
     let mut salt_bytes = [0u8; 16];
     getrandom::fill(&mut salt_bytes).map_err(|_| "无法读取系统随机源".to_string())?;
-    let salt = SaltString::encode_b64(&salt_bytes)
-        .map_err(|_| "无法生成密码盐".to_string())?;
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(|_| "无法生成密码盐".to_string())?;
     let hash = Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map_err(|_| "无法生成密码哈希".to_string())?
@@ -116,12 +143,23 @@ pub fn set_password(password: &str) -> Result<(), String> {
 
     let cred = StoredCredential {
         hash,
-        token: random_token(),
+        token: random_token()?,
     };
     let path = credential_path().ok_or_else(|| "找不到可写的配置目录".to_string())?;
     let body = serde_json::to_string(&cred).map_err(|_| "无法序列化凭据".to_string())?;
-    fs::write(&path, body).map_err(|e| format!("无法写入凭据文件：{e}"))?;
-    invalidate_cache();
+    let mut guard = cache().lock().unwrap();
+    let write = || -> std::io::Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing credential directory"))?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(body.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    write().map_err(|e| format!("无法写入凭据文件：{e}"))?;
+    *guard = Some(Ok(Some(cred)));
     Ok(())
 }
 
@@ -131,8 +169,8 @@ const MIN_PASSWORD_CHARS: usize = 6;
 
 /// 32 hex characters from the OS random source. The token is a bearer value:
 /// whoever holds it is signed in, so it must not be derived from the password.
-fn random_token() -> String {
+fn random_token() -> Result<String, String> {
     let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).expect("os random source");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::fill(&mut bytes).map_err(|_| "无法读取系统随机源".to_string())?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }

@@ -189,15 +189,6 @@ pub struct GitBranchListResult {
     pub branches: Vec<GitBranchEntry>,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct GitCommitOptions {
-    pub amend: bool,
-    pub no_verify: bool,
-    pub allow_empty: bool,
-    pub gpg_sign: bool,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitPreCommitChecksResult {

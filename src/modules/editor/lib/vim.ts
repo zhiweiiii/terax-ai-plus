@@ -2,7 +2,7 @@ import type { Extension } from "@codemirror/state";
 import { type EditorView, ViewPlugin } from "@codemirror/view";
 import { Vim } from "@replit/codemirror-vim";
 
-export type VimHandlers = { save: () => void; close: () => void };
+export type VimHandlers = { save: () => Promise<boolean>; close: () => void };
 
 const handlers = new WeakMap<EditorView, VimHandlers>();
 
@@ -35,7 +35,11 @@ export function initVimGlobals(): void {
 
   Vim.defineEx("write", "w", (cm: CmAdapter) => {
     const view = getView(cm);
-    if (view) handlers.get(view)?.save();
+    if (view)
+      void handlers
+        .get(view)
+        ?.save()
+        .catch((error) => console.error("[vim] save failed", error));
   });
 
   Vim.defineEx("quit", "q", (cm: CmAdapter) => {
@@ -47,16 +51,26 @@ export function initVimGlobals(): void {
     const view = getView(cm);
     if (!view) return;
     const h = handlers.get(view);
-    h?.save();
-    h?.close();
+    if (h)
+      void h
+        .save()
+        .then((saved) => {
+          if (saved && handlers.has(view)) h.close();
+        })
+        .catch((error) => console.error("[vim] save failed", error));
   });
 
   Vim.defineEx("xit", "x", (cm: CmAdapter) => {
     const view = getView(cm);
     if (!view) return;
     const h = handlers.get(view);
-    h?.save();
-    h?.close();
+    if (h)
+      void h
+        .save()
+        .then((saved) => {
+          if (saved && handlers.has(view)) h.close();
+        })
+        .catch((error) => console.error("[vim] save failed", error));
   });
 
   // Arrow keys are forwarded by the plugin to the editor scope handlers,

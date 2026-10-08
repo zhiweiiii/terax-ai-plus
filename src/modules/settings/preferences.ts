@@ -4,7 +4,7 @@ import {
   loadPreferences,
   onPreferencesChange,
   type Preferences,
-} from "./store";
+} from "@/modules/settings/store";
 
 type State = Preferences & {
   hydrated: boolean;
@@ -51,18 +51,27 @@ export const usePreferencesStore = create<State>((set) => ({
   init: () => {
     if (initPromise) return initPromise;
     initPromise = (async () => {
+      let unsubscribe: (() => void) | undefined;
+      const changes: Partial<Preferences> = {};
+      let loading = true;
       try {
-        const prefs = await loadPreferences();
-        set({ ...prefs, hydrated: true });
-        mirrorBgFastPath(prefs.backgroundKind, prefs.backgroundImageId);
-        void onPreferencesChange((key, value) => {
+        unsubscribe = await onPreferencesChange((key, value) => {
+          if (loading) {
+            Object.assign(changes, { [key]: value });
+            return;
+          }
           set({ [key]: value } as Partial<State>);
           if (key === "backgroundKind" || key === "backgroundImageId") {
             const s = usePreferencesStore.getState();
             mirrorBgFastPath(s.backgroundKind, s.backgroundImageId);
           }
         });
+        const prefs = { ...(await loadPreferences()), ...changes };
+        loading = false;
+        set({ ...prefs, hydrated: true });
+        mirrorBgFastPath(prefs.backgroundKind, prefs.backgroundImageId);
       } catch (e) {
+        unsubscribe?.();
         initPromise = null;
         throw e;
       }

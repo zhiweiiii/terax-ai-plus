@@ -8,8 +8,8 @@
 .cm-history-popover {
   display: flex;
   flex-direction: column;
-  min-width: 22rem;
-  max-width: 40rem;
+  min-width: min(22rem, calc(100vw - 16px));
+  max-width: min(40rem, calc(100vw - 16px));
   overflow: hidden;
   border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
   border-radius: 10px;
@@ -19,7 +19,7 @@
 }
 
 .cm-history-list {
-  max-height: 24rem;
+  max-height: min(24rem, 60vh);
   overflow-y: auto;
   padding: 4px;
 }
@@ -62,7 +62,7 @@
 }
 
 .cm-tooltip-autocomplete > ul {
-  max-height: 21rem;
+  max-height: min(21rem, 60vh);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
 }
@@ -201,6 +201,7 @@
   position: absolute;
   top: 8px;
   right: 8px;
+  max-width: calc(100% - 16px);
   padding: 2px 4px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
@@ -229,6 +230,8 @@
 
 .bt-search-input {
   width: 9rem;
+  min-width: 0;
+  flex: 1 1 9rem;
   background: transparent;
   border: none;
   outline: none;

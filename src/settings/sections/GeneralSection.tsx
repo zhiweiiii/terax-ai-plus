@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -5,10 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Slider } from "@/components/ui/slider";
+import { SettingSlider } from "@/settings/components/SettingSlider";
 import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
@@ -16,13 +15,14 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { errorToast } from "@/lib/errorToast";
 import { cn } from "@/lib/utils";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import type { ThemePref } from "@/modules/settings/store";
 import {
+  setAgentKeyPassthrough,
   setAutostart,
   setDefaultWorkspaceEnv,
-  setAgentKeyPassthrough,
   setExplorerGitDecorations,
   setRestoreWindowState,
   setTerminalCursorBlink,
@@ -38,7 +38,8 @@ import {
   TERMINAL_FONT_SIZES,
   TERMINAL_SCROLLBACK_PRESETS,
 } from "@/modules/settings/store";
-import { useTheme } from "@/modules/theme";
+import { useTheme } from "@/modules/theme/ThemeProvider";
+import { savePreference } from "@/settings/lib/savePreference";
 import {
   ComputerIcon,
   Moon02Icon,
@@ -47,7 +48,8 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { SectionHeader } from "../components/SectionHeader";
 import { SettingRow } from "../components/SettingRow";
 
@@ -106,14 +108,26 @@ export function GeneralSection() {
   const terminalFontSize = usePreferencesStore((s) => s.terminalFontSize);
   const terminalScrollback = usePreferencesStore((s) => s.terminalScrollback);
   const zoomLevel = usePreferencesStore((s) => s.zoomLevel);
+  const autostartInFlight = useRef(false);
+  const autostartGeneration = useRef(0);
+  const mountedRef = useRef(true);
+  const [autostartBusy, setAutostartBusy] = useState(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      autostartGeneration.current++;
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
+    const generation = autostartGeneration.current;
     void isEnabled()
       .then((on) => {
-        if (!alive) return;
+        if (!alive || generation !== autostartGeneration.current) return;
         if (on !== usePreferencesStore.getState().autostart) {
-          void setAutostart(on);
+          savePreference(setAutostart(on));
         }
       })
       .catch(() => undefined);
@@ -123,21 +137,40 @@ export function GeneralSection() {
   }, []);
 
   useEffect(() => {
+    let alive = true;
     void invoke<ShellInfo[]>("pty_list_shells")
-      .then(setShells)
-      .catch(() => {});
+      .then((value) => {
+        if (alive) setShells(value);
+      })
+      .catch((error) => {
+        if (alive) errorToast("Could not list shells", error);
+      });
     void invoke<{ name: string }[]>("wsl_list_distros")
-      .then(setWslDistros)
-      .catch(() => {});
+      .then((value) => {
+        if (alive) setWslDistros(value);
+      })
+      .catch((error) => {
+        if (alive) errorToast("Could not list WSL distributions", error);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const onToggleAutostart = async (next: boolean) => {
+    if (autostartInFlight.current) return;
+    autostartInFlight.current = true;
+    autostartGeneration.current++;
+    setAutostartBusy(true);
     try {
       if (next) await enable();
       else await disable();
       await setAutostart(next);
     } catch (e) {
-      console.error("autostart toggle failed", e);
+      if (mountedRef.current) errorToast("Could not change autostart", e);
+    } finally {
+      autostartInFlight.current = false;
+      if (mountedRef.current) setAutostartBusy(false);
     }
   };
 
@@ -182,12 +215,13 @@ export function GeneralSection() {
               {Math.round(zoomLevel * 100)}%
             </span>
           </div>
-          <Slider
+          <SettingSlider
+            label="界面缩放比例"
             value={[zoomLevel]}
             min={ZOOM_MIN}
             max={ZOOM_MAX}
             step={ZOOM_STEP}
-            onValueChange={(v) => void setZoomLevel(v[0] ?? 1)}
+            onValueChange={(v) => savePreference(setZoomLevel(v[0] ?? 1))}
           />
         </div>
       </div>
@@ -200,7 +234,8 @@ export function GeneralSection() {
         >
           <Switch
             checked={agentKeyPassthrough}
-            onCheckedChange={(v) => void setAgentKeyPassthrough(v)}
+            aria-label="快捷键交给运行中的 agent"
+            onCheckedChange={(v) => savePreference(setAgentKeyPassthrough(v))}
           />
         </SettingRow>
       </div>
@@ -213,7 +248,10 @@ export function GeneralSection() {
         >
           <Switch
             checked={explorerGitDecorations}
-            onCheckedChange={(v) => void setExplorerGitDecorations(v)}
+            aria-label="文件浏览器 Git 状态标记"
+            onCheckedChange={(v) =>
+              savePreference(setExplorerGitDecorations(v))
+            }
           />
         </SettingRow>
       </div>
@@ -229,18 +267,18 @@ export function GeneralSection() {
               <TooltipProvider delayDuration={200}>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span
+                    <button
+                      type="button"
                       className="cursor-help text-[11px] text-muted-foreground/70 leading-none"
                       aria-label="关于 WebGL 渲染器的更多说明"
                     >
                       ⓘ
-                    </span>
+                    </button>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="max-w-65 text-[11px]">
-                    xterm 的 WebGL 渲染器会把字形缓存在 GPU 纹理图集中。在部分
-                    macOS 环境下 (尤其是配合 Nerd Font 时)，图集会损坏，导致终端
-                    文字无法辨认。此时可关闭此项作为兜底方案: 性能会略有下降，但
-                    DOM 渲染器能正确显示文字。
+                    xterm 的 WebGL 渲染器会把字形缓存在 GPU
+                    纹理图集中。在部分显卡或字体环境下，图集可能损坏，导致终端文字无法辨认。此时可关闭此项作为兜底方案:
+                    性能会略有下降，但 DOM 渲染器能正确显示文字。
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -250,28 +288,28 @@ export function GeneralSection() {
         >
           <Switch
             checked={terminalWebglEnabled}
-            onCheckedChange={(v) => void setTerminalWebglEnabled(v)}
+            aria-label="使用 WebGL 渲染器"
+            onCheckedChange={(v) => savePreference(setTerminalWebglEnabled(v))}
           />
         </SettingRow>
         <SettingRow
           title="光标闪烁"
-          description="让终端光标闪烁。默认关闭以降低空闲时的 CPU 占用，与 VS Code 和 macOS 终端保持一致。"
+          description="让终端光标闪烁。默认关闭以降低空闲时的 CPU 占用。"
         >
           <Switch
             checked={terminalCursorBlink}
-            onCheckedChange={(v) => void setTerminalCursorBlink(v)}
+            aria-label="终端光标闪烁"
+            onCheckedChange={(v) => savePreference(setTerminalCursorBlink(v))}
           />
         </SettingRow>
-        <SettingRow
-          title="光标样式"
-          description="终端光标的形状。"
-        >
+        <SettingRow title="光标样式" description="终端光标的形状。">
           <Select
             value={terminalCursorStyle}
-            onValueChange={(v) => void setTerminalCursorStyle(v)}
+            onValueChange={(v) => savePreference(setTerminalCursorStyle(v))}
           >
             <SelectTrigger
               value={terminalCursorStyle}
+              aria-label="终端光标样式"
               className="h-8 w-28 text-[12px]"
             >
               <SelectValue />
@@ -291,18 +329,16 @@ export function GeneralSection() {
         </SettingRow>
         <FontFamilyInput
           value={terminalFontFamily}
-          onCommit={(v) => void setTerminalFontFamily(v)}
+          onCommit={(v) => savePreference(setTerminalFontFamily(v))}
         />
-        <SettingRow
-          title="字重"
-          description="终端字符的粗细"
-        >
+        <SettingRow title="字重" description="终端字符的粗细">
           <Select
             value={terminalFontWeight}
-            onValueChange={(v) => void setTerminalFontWeight(v)}
+            onValueChange={(v) => savePreference(setTerminalFontWeight(v))}
           >
             <SelectTrigger
               value={terminalFontWeight}
+              aria-label="终端字重"
               className="h-8 w-28 text-[12px]"
             >
               <SelectValue />
@@ -333,11 +369,12 @@ export function GeneralSection() {
           <Select
             value={terminalShell || SHELL_AUTO}
             onValueChange={(v) =>
-              void setTerminalShell(v === SHELL_AUTO ? "" : v)
+              savePreference(setTerminalShell(v === SHELL_AUTO ? "" : v))
             }
           >
             <SelectTrigger
               value={terminalShell || SHELL_AUTO}
+              aria-label="集成终端 Shell"
               className="h-8 w-40 text-[12px]"
             >
               <SelectValue />
@@ -361,10 +398,11 @@ export function GeneralSection() {
           >
             <Select
               value={defaultWorkspaceEnv}
-              onValueChange={(v) => void setDefaultWorkspaceEnv(v)}
+              onValueChange={(v) => savePreference(setDefaultWorkspaceEnv(v))}
             >
               <SelectTrigger
                 value={defaultWorkspaceEnv}
+                aria-label="默认工作区环境"
                 className="h-8 w-40 text-[12px]"
               >
                 <SelectValue />
@@ -403,9 +441,15 @@ export function GeneralSection() {
         >
           <Select
             value={String(terminalLetterSpacing)}
-            onValueChange={(v) => void setTerminalLetterSpacing(Number(v))}
+            onValueChange={(v) =>
+              savePreference(setTerminalLetterSpacing(Number(v)))
+            }
           >
-            <SelectTrigger size="sm" className="h-8 w-28 text-[12px]">
+            <SelectTrigger
+              aria-label="终端字符间距"
+              size="sm"
+              className="h-8 w-28 text-[12px]"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -420,9 +464,15 @@ export function GeneralSection() {
         <SettingRow title="字号" description="终端文字大小。">
           <Select
             value={String(terminalFontSize)}
-            onValueChange={(v) => void setTerminalFontSize(Number(v))}
+            onValueChange={(v) =>
+              savePreference(setTerminalFontSize(Number(v)))
+            }
           >
-            <SelectTrigger size="sm" className="h-8 w-28 text-[12px]">
+            <SelectTrigger
+              aria-label="终端字号"
+              size="sm"
+              className="h-8 w-28 text-[12px]"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -444,9 +494,15 @@ export function GeneralSection() {
         >
           <Select
             value={String(terminalScrollback)}
-            onValueChange={(v) => void setTerminalScrollback(Number(v))}
+            onValueChange={(v) =>
+              savePreference(setTerminalScrollback(Number(v)))
+            }
           >
-            <SelectTrigger size="sm" className="h-8 w-36 text-[12px]">
+            <SelectTrigger
+              aria-label="终端回滚缓冲行数"
+              size="sm"
+              className="h-8 w-36 text-[12px]"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -467,12 +523,11 @@ export function GeneralSection() {
       <div className="flex flex-col gap-2">
         <Label>启动</Label>
         <div className="flex flex-col gap-2">
-          <SettingRow
-            title="开机自启"
-            description="登录系统时自动打开 Terax。"
-          >
+          <SettingRow title="开机自启" description="登录系统时自动打开 Terax。">
             <Switch
               checked={autostart}
+              aria-label="开机自启"
+              disabled={autostartBusy}
               onCheckedChange={(v) => void onToggleAutostart(v)}
             />
           </SettingRow>
@@ -482,7 +537,8 @@ export function GeneralSection() {
           >
             <Switch
               checked={restoreWindowState}
-              onCheckedChange={(v) => void setRestoreWindowState(v)}
+              aria-label="恢复窗口位置与大小"
+              onCheckedChange={(v) => savePreference(setRestoreWindowState(v))}
             />
           </SettingRow>
         </div>
@@ -510,27 +566,54 @@ function WebPassword() {
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [custom, setCustom] = useState<boolean | null>(null);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const generationRef = useRef(0);
 
   useEffect(() => {
+    mountedRef.current = true;
+    const generation = generationRef.current;
     void invoke<boolean>("web_has_custom_password")
-      .then(setCustom)
-      .catch(() => setCustom(null));
+      .then((current) => {
+        if (mountedRef.current && generation === generationRef.current)
+          setCustom(current);
+      })
+      .catch((error) => {
+        if (mountedRef.current && generation === generationRef.current)
+          errorToast("Could not read phone password status", error);
+      });
+    return () => {
+      mountedRef.current = false;
+      generationRef.current++;
+    };
   }, []);
 
   const mismatch = confirm !== "" && confirm !== value;
-  const canSave = value.length >= 6 && confirm === value && !busy;
+  const passwordBytes = new TextEncoder().encode(value).length;
+  const validPassword = Array.from(value).length >= 6 && passwordBytes <= 256;
+  const canSave = validPassword && confirm === value && !busy;
 
   const save = () => {
+    if (busyRef.current || !canSave) return;
+    busyRef.current = true;
+    const generation = ++generationRef.current;
     setBusy(true);
-    invoke("web_set_password", { password: value })
+    void invoke("web_set_password", { password: value })
       .then(() => {
+        if (!mountedRef.current || generation !== generationRef.current) return;
         setValue("");
         setConfirm("");
         setCustom(true);
         toast.success("密码已更新，已登录的手机需要重新输入");
       })
-      .catch((e) => toast.error(typeof e === "string" ? e : String(e)))
-      .finally(() => setBusy(false));
+      .catch((error) => {
+        if (mountedRef.current)
+          errorToast("Could not save phone password", error);
+      })
+      .finally(() => {
+        busyRef.current = false;
+        if (mountedRef.current) setBusy(false);
+      });
   };
 
   return (
@@ -540,13 +623,16 @@ function WebPassword() {
         title="访问密码"
         description={
           custom === false
-            ? "当前使用内置的默认密码。设置一个自己的密码，并让已登录的手机重新登录。"
+            ? "尚未设置访问密码，手机登录暂不可用。请先设置自己的密码。"
             : "修改后，所有已登录的手机都需要重新输入密码。"
         }
       >
         <div className="flex flex-col items-end gap-1.5">
           <Input
             type="password"
+            aria-label="New phone access password"
+            disabled={busy}
+            maxLength={256}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder="新密码（至少 6 位）"
@@ -555,6 +641,9 @@ function WebPassword() {
           />
           <Input
             type="password"
+            aria-label="Confirm phone access password"
+            disabled={busy}
+            maxLength={256}
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
             placeholder="再输入一次"
@@ -564,6 +653,11 @@ function WebPassword() {
           <Button size="sm" disabled={!canSave} onClick={save}>
             {busy ? "保存中…" : "保存密码"}
           </Button>
+          {passwordBytes > 256 ? (
+            <p className="text-[11px] text-destructive">
+              密码不能超过 256 字节
+            </p>
+          ) : null}
         </div>
       </SettingRow>
     </div>
@@ -598,12 +692,18 @@ function FontFamilyInput({
     >
       <input
         type="text"
+        aria-label="终端字体"
         value={draft}
         placeholder="自动检测"
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
+          if (
+            !e.nativeEvent.isComposing &&
+            e.keyCode !== 229 &&
+            e.key === "Enter"
+          )
+            e.currentTarget.blur();
         }}
         className="h-8 w-48 rounded-md border border-border bg-background px-2.5 text-[12px] outline-none focus:border-foreground/40"
       />

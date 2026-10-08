@@ -1,9 +1,10 @@
 import { useLayoutEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 type Props = {
   initial: string;
   placeholder?: string;
-  onCommit: (value: string) => void;
+  onCommit: (value: string) => boolean | Promise<boolean>;
   onCancel: () => void;
 };
 
@@ -22,8 +23,14 @@ export function InlineInput({
   const ref = useRef<HTMLInputElement>(null);
   const committedRef = useRef(false);
   const settledRef = useRef(false);
+  const interactedRef = useRef(false);
+  const composingRef = useRef(false);
+  const aliveRef = useRef(false);
+  const [pending, setPending] = useState(false);
 
   useLayoutEffect(() => {
+    aliveRef.current = true;
+    settledRef.current = false;
     const el = ref.current;
     if (!el) return;
     // Two-tick focus to win against parent click handlers and Radix portal
@@ -45,21 +52,38 @@ export function InlineInput({
       else el.select();
     };
     focus();
-    const raf = requestAnimationFrame(() => focus());
+    const raf = requestAnimationFrame(() => {
+      if (!interactedRef.current) focus();
+    });
     const timer = setTimeout(() => {
-      focus();
+      if (!interactedRef.current) focus();
       settledRef.current = true;
     }, 170);
     return () => {
+      aliveRef.current = false;
       cancelAnimationFrame(raf);
       clearTimeout(timer);
     };
   }, [initial]);
 
-  const commit = () => {
+  const commit = async () => {
     if (committedRef.current) return;
     committedRef.current = true;
-    onCommit(value);
+    setPending(true);
+    let accepted = false;
+    try {
+      accepted = await onCommit(value);
+    } catch (error) {
+      toast.error(`Could not save filename: ${String(error)}`);
+    } finally {
+      if (aliveRef.current) {
+        setPending(false);
+        if (!accepted) {
+          committedRef.current = false;
+          ref.current?.focus({ preventScroll: true });
+        }
+      }
+    }
   };
   const cancel = () => {
     if (committedRef.current) return;
@@ -72,22 +96,45 @@ export function InlineInput({
       ref={ref}
       value={value}
       placeholder={placeholder}
-      onChange={(e) => setValue(e.target.value)}
+      aria-busy={pending}
+      readOnly={pending}
+      onPointerDown={() => {
+        interactedRef.current = true;
+      }}
+      onCompositionStart={() => {
+        composingRef.current = true;
+        interactedRef.current = true;
+      }}
+      onCompositionEnd={() => {
+        composingRef.current = false;
+      }}
+      onChange={(e) => {
+        interactedRef.current = true;
+        setValue(e.target.value);
+      }}
       onKeyDown={(e) => {
+        interactedRef.current = true;
+        if (
+          composingRef.current ||
+          e.nativeEvent.isComposing ||
+          e.keyCode === 229
+        )
+          return;
         if (e.key === "Enter") {
           e.preventDefault();
-          commit();
+          void commit();
         } else if (e.key === "Escape") {
           e.preventDefault();
           cancel();
         }
       }}
       onBlur={() => {
+        if (composingRef.current) return;
         if (!settledRef.current) {
           ref.current?.focus({ preventScroll: true });
           return;
         }
-        commit();
+        void commit();
       }}
       className="flex-1 min-w-0 truncate rounded-sm border border-border bg-background px-1.5 py-0.5 text-xs text-foreground outline-none ring-0 focus:border-ring"
     />

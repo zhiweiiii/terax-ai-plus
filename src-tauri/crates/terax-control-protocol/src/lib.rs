@@ -125,5 +125,3 @@ pub struct OpenParams {
 fn default_focus() -> bool {
     true
 }
-
-

@@ -1,6 +1,7 @@
 //! Relay definitions and the credential that guards the local gateway.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
@@ -116,7 +117,10 @@ impl Provider {
     /// one backend. Matched on the host because the requirement belongs to that
     /// service, not to the wire format.
     pub fn wants_session_header(&self) -> bool {
-        self.base_url.to_ascii_lowercase().contains("opencode.ai")
+        reqwest::Url::parse(self.base_url.trim())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
     }
 
     /// Resolve what Claude Code asked for into what this relay serves.
@@ -160,7 +164,9 @@ fn strip_context_marker(model: &str) -> &str {
     let model = model.trim();
     let marker = "[1m]";
     if model.len() >= marker.len()
-        && model[model.len() - marker.len()..].eq_ignore_ascii_case(marker)
+        && model
+            .get(model.len() - marker.len()..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(marker))
     {
         return model[..model.len() - marker.len()].trim_end();
     }
@@ -185,26 +191,41 @@ fn token_path() -> Option<PathBuf> {
 /// The bearer value Claude Code must present. Persisted so a shell configured
 /// before a restart keeps working; without that every restart would silently
 /// break every open terminal.
-pub fn token() -> String {
-    static TOKEN: OnceLock<String> = OnceLock::new();
+pub fn token() -> Result<String, String> {
+    static TOKEN: OnceLock<Result<String, String>> = OnceLock::new();
     TOKEN
         .get_or_init(|| {
-            let path = token_path();
-            if let Some(existing) = path
-                .as_ref()
-                .and_then(|p| fs::read_to_string(p).ok())
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty())
-            {
-                return existing;
+            let path = token_path().ok_or("gateway token directory unavailable")?;
+            match read_token(&path) {
+                Ok(existing) => return Ok(existing),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("gateway token unavailable: {error}")),
             }
             let mut bytes = [0u8; 16];
-            getrandom::fill(&mut bytes).expect("os random source");
+            getrandom::fill(&mut bytes).map_err(|e| e.to_string())?;
             let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-            if let Some(path) = path {
-                let _ = fs::write(path, &token);
+            let mut tmp =
+                tempfile::NamedTempFile::new_in(path.parent().ok_or("missing token directory")?)
+                    .map_err(|e| e.to_string())?;
+            tmp.write_all(token.as_bytes()).map_err(|e| e.to_string())?;
+            tmp.as_file().sync_all().map_err(|e| e.to_string())?;
+            match tmp.persist_noclobber(&path) {
+                Ok(_) => Ok(token),
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    read_token(&path).map_err(|e| e.to_string())
+                }
+                Err(error) => Err(error.error.to_string()),
             }
-            token
         })
         .clone()
+}
+
+fn read_token(path: &std::path::Path) -> std::io::Result<String> {
+    let mut text = String::new();
+    fs::File::open(path)?.take(65).read_to_string(&mut text)?;
+    let token = text.trim();
+    if text.len() > 64 || token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(std::io::Error::other("invalid gateway token"));
+    }
+    Ok(token.to_string())
 }

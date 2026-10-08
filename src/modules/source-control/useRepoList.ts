@@ -1,5 +1,6 @@
 import { type GitRepoHead, native } from "@/lib/native";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 
 // Per-project repo selections kept in memory; older projects fall off.
 const SELECTION_MEMORY_LIMIT = 16;
@@ -8,8 +9,7 @@ type UseRepoListResult = {
   repos: GitRepoHead[];
   activeRepo: string | null;
   setActiveRepo: (root: string) => void;
-  /** Drop the explicit selection; the panel then spans every repo. */
-  clearActiveRepo: () => void;
+
   scan: () => Promise<void>;
   isLoading: boolean;
 };
@@ -22,11 +22,23 @@ type UseRepoListResult = {
  * If exactly one repo is found it is auto-selected.
  */
 export function useRepoList(basePath: string | null): UseRepoListResult {
+  const env = useWorkspaceEnvStore((s) => s.env);
+  const key = `${workspaceScopeKey(env)}:${basePath ?? ""}`;
+  const contextRef = useRef(key);
+  contextRef.current = key;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      scanTokenRef.current++;
+    };
+  }, []);
   const [repos, setRepos] = useState<GitRepoHead[]>([]);
   const [activeRepo, setActiveRepoState] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const resultKeyRef = useRef<string | null>(null);
   const lastPathRef = useRef<string | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRepoRef = useRef<string | null>(activeRepo);
   activeRepoRef.current = activeRepo;
   // Scans race whenever workspaces are switched quickly: without a token the
@@ -49,12 +61,19 @@ export function useRepoList(basePath: string | null): UseRepoListResult {
     }
   };
 
-  const doScan = async (path: string) => {
+  const doScan = useCallback(async (path: string, scanKey: string) => {
+    if (!mountedRef.current || scanKey !== contextRef.current) return;
     const token = ++scanTokenRef.current;
     setIsLoading(true);
     try {
       const heads = await native.gitScanRepos(path, 1);
-      if (token !== scanTokenRef.current) return;
+      if (
+        !mountedRef.current ||
+        scanKey !== contextRef.current ||
+        token !== scanTokenRef.current
+      )
+        return;
+      resultKeyRef.current = scanKey;
       setRepos(heads);
       if (heads.length === 1) {
         setActiveRepoState(heads[0].repoRoot);
@@ -63,7 +82,7 @@ export function useRepoList(basePath: string | null): UseRepoListResult {
         // screen with no entry in the list backing it.
         setActiveRepoState(null);
       } else {
-        const remembered = selectionByPathRef.current.get(path);
+        const remembered = selectionByPathRef.current.get(scanKey);
         const keep =
           remembered && heads.some((h) => h.repoRoot === remembered)
             ? remembered
@@ -74,14 +93,25 @@ export function useRepoList(basePath: string | null): UseRepoListResult {
         setActiveRepoState(keep);
       }
     } catch (err) {
-      if (token !== scanTokenRef.current) return;
+      if (
+        !mountedRef.current ||
+        scanKey !== contextRef.current ||
+        token !== scanTokenRef.current
+      )
+        return;
       console.warn("[terax] repo scan failed:", err);
+      resultKeyRef.current = scanKey;
       setRepos([]);
       setActiveRepoState(null);
     } finally {
-      if (token === scanTokenRef.current) setIsLoading(false);
+      if (
+        mountedRef.current &&
+        scanKey === contextRef.current &&
+        token === scanTokenRef.current
+      )
+        setIsLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     // Clear on null/empty path.
@@ -90,45 +120,44 @@ export function useRepoList(basePath: string | null): UseRepoListResult {
       setRepos([]);
       setActiveRepoState(null);
       lastPathRef.current = null;
+      setIsLoading(false);
       return;
     }
 
     // Same path — skip re-scan.
-    if (basePath === lastPathRef.current) return;
-    const switched = lastPathRef.current !== null;
-    lastPathRef.current = basePath;
+    if (key === lastPathRef.current) return;
+    lastPathRef.current = key;
 
-    // Drop the previous project's repos before the new scan lands. Holding
-    // them meant `effectiveRepoRoot` kept resolving to a repo the new project
-    // does not contain, so the panel spent the scan aimed at the old repo and
-    // showed its branch. Empty is the honest intermediate state, and the
-    // single-repo path resolves the new context on its own meanwhile.
-    if (switched) {
-      setRepos([]);
-      setActiveRepoState(null);
-    }
+    resultKeyRef.current = null;
+    setRepos([]);
+    setActiveRepoState(null);
 
     // Fire scan immediately — 500ms debounce is too slow for initial detection.
-    void doScan(basePath);
-  }, [basePath]); // eslint-disable-line react-hooks/exhaustive-deps
+    void doScan(basePath, key);
+    return () => {
+      scanTokenRef.current++;
+      lastPathRef.current = null;
+    };
+  }, [basePath, key, doScan]);
 
   const scan = async () => {
     if (!basePath) return;
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    await doScan(basePath);
+    await doScan(basePath, key);
   };
 
   const setActiveRepo = (root: string) => {
-    if (repos.some((h) => h.repoRoot === root)) {
+    if (contextRef.current === key && repos.some((h) => h.repoRoot === root)) {
       setActiveRepoState(root);
-      if (basePath) rememberSelection(basePath, root);
+      if (basePath) rememberSelection(key, root);
     }
   };
 
-  const clearActiveRepo = () => setActiveRepoState(null);
-
-  return { repos, activeRepo, setActiveRepo, clearActiveRepo, scan, isLoading };
+  const current = resultKeyRef.current === key;
+  return {
+    repos: current ? repos : [],
+    activeRepo: current ? activeRepo : null,
+    setActiveRepo,
+    scan,
+    isLoading,
+  };
 }

@@ -1,29 +1,66 @@
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::path::Path;
+use std::sync::Mutex;
 use std::thread;
 
 use crate::modules::git::errors::{GitError, Result};
 use crate::modules::git::parser::parse_porcelain_v2;
 use crate::modules::git::process::{
     ensure_git_available, ensure_success, git_show_text, git_stdout_line_opt, git_stdout_lines,
-    read_text_file, run_git, run_git_with_env, run_git_with_input,
+    read_text_file, run_git, run_git_with_input,
 };
 use crate::modules::git::types::{
     DiscardEntry, GitBranchEntry, GitBranchListResult, GitCloneOptions, GitCommitFileChange,
-    GitCommitOptions, GitCommitResult, GitCompareResult, GitConfigUserResult, GitDiffContentResult,
-    GitDiffResult, GitFetchResult, GitLogEntry, GitLogFilterOptions, GitMergeResult,
-    GitMultiRepoEntry, GitOutput, GitPanelSnapshot, GitPreCommitChecksResult, GitPushOptions,
-    GitPushResult, GitRebaseResult, GitRemoteEntry, GitRepoHead, GitRepoInfo, GitStatusSnapshot,
-    GitTagCreateOptions, GitWorkspaceSnapshot, TextSource, DEFAULT_TIMEOUT_SECS, MAX_OUTPUT_BYTES,
-    NETWORK_TIMEOUT_SECS,
+    GitCommitResult, GitCompareResult, GitConfigUserResult, GitDiffContentResult, GitDiffResult,
+    GitFetchResult, GitLogEntry, GitLogFilterOptions, GitMergeResult, GitMultiRepoEntry, GitOutput,
+    GitPanelSnapshot, GitPreCommitChecksResult, GitPushOptions, GitPushResult, GitRebaseResult,
+    GitRemoteEntry, GitRepoHead, GitRepoInfo, GitStatusSnapshot, GitTagCreateOptions,
+    GitWorkspaceSnapshot, TextSource, DEFAULT_TIMEOUT_SECS, NETWORK_TIMEOUT_SECS,
 };
 use crate::modules::git::utils::{
-    authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream,
-    ResolvedGitDirectory,
+    authorized_repo_root, canonical_dir, resolve_within_repo, split_upstream, ResolvedGitDirectory,
 };
 use crate::modules::workspace::{WorkspaceEnv, WorkspaceRegistry};
+
+fn parallel_jobs<T: Send, R: Send>(items: Vec<T>, job: impl Fn(T) -> R + Sync) -> Result<Vec<R>> {
+    let workers = items.len().min(4);
+    let pending = Mutex::new(items.into_iter());
+    let results = Mutex::new(Vec::new());
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let pending = &pending;
+            let results = &results;
+            let job = &job;
+            handles.push(
+                thread::Builder::new()
+                    .name("terax-git-batch".into())
+                    .stack_size(512 * 1024)
+                    .spawn_scoped(scope, move || loop {
+                        let item = pending.lock().unwrap_or_else(|e| e.into_inner()).next();
+                        let Some(item) = item else {
+                            break;
+                        };
+                        let result = job(item);
+                        results
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(result);
+                    })
+                    .map_err(|e| GitError::Spawn(e.to_string()))?,
+            );
+        }
+        let mut failed = false;
+        for handle in handles {
+            failed |= handle.join().is_err();
+        }
+        if failed {
+            return Err(GitError::Spawn("git batch worker failed".into()));
+        }
+        Ok(())
+    })?;
+    Ok(results.into_inner().unwrap_or_else(|e| e.into_inner()))
+}
 
 pub fn resolve_repo(
     registry: &WorkspaceRegistry,
@@ -321,12 +358,7 @@ pub fn unstage(
     if !looks_like_no_head(&output) {
         return ensure_success(&output, "git reset failed");
     }
-    let mut rm_args: Vec<OsString> = vec![
-        "rm".into(),
-        "--cached".into(),
-        "-r".into(),
-        "--".into(),
-    ];
+    let mut rm_args: Vec<OsString> = vec!["rm".into(), "--cached".into(), "-r".into(), "--".into()];
     for p in &resolved {
         rm_args.push(p.clone().into());
     }
@@ -689,50 +721,59 @@ pub fn commit_files(
         return Err(GitError::command("git diff-tree", "invalid commit sha"));
     }
 
+    let parents = git_stdout_line_opt(
+        &repo_root.workspace,
+        &repo_root.git_path,
+        ["rev-list", "--parents", "-n", "1", sha],
+    )?
+    .ok_or_else(|| GitError::command("git diff-tree", "commit not found"))?;
+    let parent = parents.split_ascii_whitespace().nth(1);
+    let diff_args = |mode: &str| {
+        let mut args = vec![
+            "diff-tree".to_string(),
+            "--no-commit-id".into(),
+            "-r".into(),
+            "-z".into(),
+            mode.into(),
+            "--root".into(),
+            "-M".into(),
+        ];
+        if let Some(parent) = parent {
+            args.push(parent.to_string());
+        }
+        args.push(sha.to_string());
+        args
+    };
     let output = run_git(
         &repo_root.workspace,
         Some(&repo_root.git_path),
-        [
-            OsStr::new("diff-tree"),
-            OsStr::new("--no-commit-id"),
-            OsStr::new("-r"),
-            OsStr::new("-z"),
-            OsStr::new("--name-status"),
-            OsStr::new("--numstat"),
-            OsStr::new(sha),
-        ],
+        diff_args("--name-status"),
         DEFAULT_TIMEOUT_SECS,
     )?;
     ensure_success(&output, "git diff-tree failed")?;
 
-    let (name_status_bytes, numstat_bytes) = split_name_status_numstat(&output.stdout);
-    let mut files = parse_diff_tree_name_status(name_status_bytes);
-    apply_numstat(&mut files, numstat_bytes);
-    Ok(files)
-}
-
-fn split_name_status_numstat(bytes: &[u8]) -> (&[u8], &[u8]) {
-    let s = std::str::from_utf8(bytes).unwrap_or("");
-    let tokens: Vec<(usize, &str)> = s
-        .split('\0')
-        .scan(0usize, |off, t| {
-            let start = *off;
-            *off += t.len() + 1;
-            Some((start, t))
-        })
-        .collect();
-    let mut split_at = bytes.len();
-    for (idx, tok) in tokens.iter().enumerate() {
-        if tok.1.contains('\t') {
-            split_at = tok.0;
-            // Walk back: numstat for R/C with -z emits "<a>\t<r>" then two
-            // NUL-separated paths. The two trailing path tokens belong to the
-            // numstat block, not name-status.
-            let _ = idx;
-            break;
-        }
+    if output.truncated {
+        return Err(GitError::command(
+            "git diff-tree",
+            "commit file list exceeds the output limit",
+        ));
     }
-    (&bytes[..split_at], &bytes[split_at..])
+    let mut files = parse_diff_tree_name_status(&output.stdout);
+    let stats = run_git(
+        &repo_root.workspace,
+        Some(&repo_root.git_path),
+        diff_args("--numstat"),
+        DEFAULT_TIMEOUT_SECS,
+    )?;
+    ensure_success(&stats, "git diff-tree numstat failed")?;
+    if stats.truncated {
+        return Err(GitError::command(
+            "git diff-tree",
+            "commit file statistics exceed the output limit",
+        ));
+    }
+    apply_numstat(&mut files, &stats.stdout);
+    Ok(files)
 }
 
 pub fn commit_file_diff(
@@ -985,52 +1026,6 @@ pub fn pull_ff_only(
 
 // ── Commit variants ───────────────────────────────────────────────────
 
-pub fn commit_advanced(
-    registry: &WorkspaceRegistry,
-    repo_root: &str,
-    message: &str,
-    options: &GitCommitOptions,
-    workspace: &WorkspaceEnv,
-) -> Result<GitCommitResult> {
-    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
-    ensure_git_available(&repo_root.workspace)?;
-    let trimmed = message.trim();
-    if trimmed.is_empty() && !options.amend {
-        return Err(GitError::EmptyCommitMessage);
-    }
-
-    let mut args: Vec<OsString> = vec!["commit".into()];
-    if options.amend {
-        args.push("--amend".into());
-    }
-    if options.no_verify {
-        args.push("--no-verify".into());
-    }
-    if options.allow_empty {
-        args.push("--allow-empty".into());
-    }
-    if options.gpg_sign {
-        args.push("-S".into());
-    }
-    if trimmed.is_empty() {
-        args.push("--no-edit".into());
-    } else {
-        args.push("-m".into());
-        args.push(trimmed.into());
-    }
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        args,
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    if output.exit_code != Some(0) && nothing_to_commit(&output) {
-        return Err(GitError::command("git commit", "nothing staged"));
-    }
-    ensure_success(&output, "git commit failed")?;
-    head_commit_summary(&repo_root)
-}
-
 fn head_commit_summary(repo_root: &ResolvedGitDirectory) -> Result<GitCommitResult> {
     let combined = git_stdout_lines(
         &repo_root.workspace,
@@ -1048,54 +1043,11 @@ fn head_commit_summary(repo_root: &ResolvedGitDirectory) -> Result<GitCommitResu
     })
 }
 
-pub fn amend_specific_commit(
-    registry: &WorkspaceRegistry,
-    repo_root: &str,
-    target_sha: &str,
-    message: &str,
-    workspace: &WorkspaceEnv,
-) -> Result<GitCommitResult> {
-    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
-    ensure_git_available(&repo_root.workspace)?;
-    if !sha_is_safe(target_sha) {
-        return Err(GitError::command("git amend", "invalid commit sha"));
-    }
-    let subject = git_stdout_line_opt(
-        &repo_root.workspace,
-        &repo_root.git_path,
-        ["log", "-1", "--format=%s", target_sha],
-    )?
-    .ok_or_else(|| GitError::command("git log", "target commit not found"))?;
-    let user_message = message.trim();
-    // autosquash matches on the "amend! <subject>" prefix, so the subject line
-    // always names the target; the typed message becomes the body when given.
-    let marker = if user_message.is_empty() || user_message == subject {
-        format!("amend! {subject}")
-    } else {
-        format!("amend! {subject}\n\n{user_message}")
-    };
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["commit", "--allow-empty", "-m", &marker],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    ensure_success(&output, "git commit --allow-empty failed")?;
-    let parent = format!("{target_sha}^");
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["rebase", "--autosquash", "--autostash", &parent],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    ensure_success(&output, "git rebase --autosquash failed")?;
-    head_commit_summary(&repo_root)
-}
-
 pub fn commit_reword(
     registry: &WorkspaceRegistry,
     repo_root: &str,
     message: &str,
+    expected_sha: &str,
     workspace: &WorkspaceEnv,
 ) -> Result<GitCommitResult> {
     let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
@@ -1104,10 +1056,16 @@ pub fn commit_reword(
     if trimmed.is_empty() {
         return Err(GitError::EmptyCommitMessage);
     }
+    if !sha_is_safe(expected_sha) || head_commit_summary(&repo_root)?.commit_sha != expected_sha {
+        return Err(GitError::command(
+            "git reword",
+            "HEAD changed; review the current commit before rewriting its message",
+        ));
+    }
     let output = run_git(
         &repo_root.workspace,
         Some(&repo_root.git_path),
-        ["commit", "--amend", "-m", trimmed],
+        ["commit", "--amend", "--only", "-m", trimmed],
         DEFAULT_TIMEOUT_SECS,
     )?;
     ensure_success(&output, "git commit --amend failed")?;
@@ -1153,9 +1111,9 @@ pub fn pre_commit_checks(
     if let Ok(Some(git_dir)) = git_stdout_line_opt(
         &repo_root.workspace,
         &repo_root.git_path,
-        ["rev-parse", "--git-dir"],
+        ["rev-parse", "--absolute-git-dir"],
     ) {
-        let git_dir = Path::new(&git_dir);
+        let git_dir = crate::modules::workspace::resolve_path(&git_dir, &repo_root.workspace);
         let in_progress = git_dir.join("rebase-merge").exists()
             || git_dir.join("rebase-apply").exists()
             || git_dir.join("MERGE_HEAD").exists();
@@ -1455,7 +1413,10 @@ pub fn tag_create(
         return Err(GitError::command("git tag", "invalid target commit sha"));
     }
     if options.annotated && options.message.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(GitError::command("git tag", "annotated tag requires a message"));
+        return Err(GitError::command(
+            "git tag",
+            "annotated tag requires a message",
+        ));
     }
     let mut args: Vec<OsString> = vec!["tag".into()];
     if options.annotated {
@@ -1571,7 +1532,10 @@ pub fn pull_advanced(
         "squash" => Some("--squash"),
         "no-commit" => Some("--no-commit"),
         other => {
-            return Err(GitError::command("git pull", format!("unknown strategy: {other}")));
+            return Err(GitError::command(
+                "git pull",
+                format!("unknown strategy: {other}"),
+            ));
         }
     };
     let args: Vec<&str> = match flag {
@@ -1605,11 +1569,14 @@ pub fn push_advanced(
         Some(u) => split_upstream(u),
         None => (None, None),
     };
-    let remote = match options.remote.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+    let remote = match options
+        .remote
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
         Some(r) => {
-            if r.len() > 64 || !r.chars().all(is_remote_name_char) {
-                return Err(GitError::command("git push", "invalid remote name"));
-            }
+            remote_name(r)?;
             r.to_string()
         }
         None => match upstream_remote.clone() {
@@ -1617,6 +1584,8 @@ pub fn push_advanced(
             None => return Err(GitError::NoUpstream),
         },
     };
+
+    remote_name(&remote)?;
 
     let local_branch = git_stdout_line_opt(
         &repo_root.workspace,
@@ -1716,11 +1685,7 @@ pub fn remote_list(
 ) -> Result<Vec<GitRemoteEntry>> {
     let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
     ensure_git_available(&repo_root.workspace)?;
-    let lines = git_stdout_lines(
-        &repo_root.workspace,
-        &repo_root.git_path,
-        ["remote", "-v"],
-    )?;
+    let lines = git_stdout_lines(&repo_root.workspace, &repo_root.git_path, ["remote", "-v"])?;
     let mut remotes: Vec<GitRemoteEntry> = Vec::new();
     for line in lines {
         if !line.ends_with("(fetch)") {
@@ -1744,7 +1709,11 @@ pub fn remote_list(
 }
 
 fn remote_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.len() > 64 || !name.chars().all(is_remote_name_char) {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.len() > 64
+        || !name.chars().all(is_remote_name_char)
+    {
         return Err(GitError::command("git remote", "invalid remote name"));
     }
     Ok(())
@@ -1848,12 +1817,7 @@ pub fn clone(
     }
     args.push(url.into());
     args.push(target_dir.into());
-    let output = run_git(
-        &parent.workspace,
-        None,
-        args,
-        NETWORK_TIMEOUT_SECS,
-    )?;
+    let output = run_git(&parent.workspace, None, args, NETWORK_TIMEOUT_SECS)?;
     ensure_success(&output, "git clone failed")?;
 
     if let Ok(dir) = canonical_dir(registry, target_dir, workspace) {
@@ -1907,19 +1871,39 @@ pub fn log_filtered(
         "--shortstat".into(),
         format_arg.into(),
     ];
-    if let Some(branch) = options.branch.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+    if let Some(branch) = options
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    {
         if branch.starts_with('-') {
             return Err(GitError::InvalidPath(branch.into()));
         }
         args.push(branch.into());
     }
-    if let Some(author) = options.author.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+    if let Some(author) = options
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
         args.push(format!("--author={author}").into());
     }
-    if let Some(since) = options.since.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(since) = options
+        .since
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         args.push(format!("--since={since}").into());
     }
-    if let Some(until) = options.until.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+    if let Some(until) = options
+        .until
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+    {
         args.push(format!("--until={until}").into());
     }
     if options.no_merges {
@@ -1996,7 +1980,12 @@ pub fn reset(
         "soft" => "--soft",
         "mixed" => "--mixed",
         "hard" => "--hard",
-        other => return Err(GitError::command("git reset", format!("unknown mode: {other}"))),
+        other => {
+            return Err(GitError::command(
+                "git reset",
+                format!("unknown mode: {other}"),
+            ))
+        }
     };
     let target = match target.map(str::trim).filter(|t| !t.is_empty()) {
         Some(t) => {
@@ -2056,249 +2045,6 @@ pub fn cherry_pick(
     ensure_success(&output, "git cherry-pick failed")
 }
 
-pub fn reword_commit(
-    registry: &WorkspaceRegistry,
-    repo_root: &str,
-    sha: &str,
-    message: &str,
-    workspace: &WorkspaceEnv,
-) -> Result<()> {
-    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
-    ensure_git_available(&repo_root.workspace)?;
-    if !sha_is_safe(sha) {
-        return Err(GitError::command("git rebase", "invalid commit sha"));
-    }
-    if message.trim().is_empty() {
-        return Err(GitError::EmptyCommitMessage);
-    }
-    scripted_rebase(&repo_root, sha, |todo| reword_todo(todo, sha), Some(message))
-}
-
-pub fn drop_commit(
-    registry: &WorkspaceRegistry,
-    repo_root: &str,
-    sha: &str,
-    workspace: &WorkspaceEnv,
-) -> Result<()> {
-    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
-    ensure_git_available(&repo_root.workspace)?;
-    if !sha_is_safe(sha) {
-        return Err(GitError::command("git rebase", "invalid commit sha"));
-    }
-    scripted_rebase(&repo_root, sha, |todo| drop_from_todo(todo, sha), None)
-}
-
-fn reword_todo(todo: &str, sha: &str) -> Result<String> {
-    let mut found = false;
-    let mut out = String::with_capacity(todo.len());
-    for line in todo.lines() {
-        let rest = line.strip_prefix("pick ");
-        let matches = rest
-            .and_then(|r| r.split_ascii_whitespace().next())
-            .is_some_and(|token| sha.starts_with(token));
-        if matches {
-            out.push_str(&format!("reword {}", rest.unwrap()));
-            found = true;
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    if !found {
-        return Err(GitError::command(
-            "git rebase",
-            "commit is not in the linear history of the current branch",
-        ));
-    }
-    Ok(out)
-}
-
-fn drop_from_todo(todo: &str, sha: &str) -> Result<String> {
-    let mut found = false;
-    let mut out = String::with_capacity(todo.len());
-    for line in todo.lines() {
-        let matches = line
-            .strip_prefix("pick ")
-            .and_then(|r| r.split_ascii_whitespace().next())
-            .is_some_and(|token| sha.starts_with(token));
-        if matches {
-            found = true;
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    if !found {
-        return Err(GitError::command(
-            "git rebase",
-            "commit is not in the linear history of the current branch",
-        ));
-    }
-    Ok(out)
-}
-
-/// Scripted `git rebase -i <sha>^`. Phase 1 runs the sequence editor with a
-/// capture script that copies the todo and exits non-zero (git aborts cleanly,
-/// leaving no state); phase 2 replays the edited todo with a sequence editor
-/// that copies our version back and, when `message` is given, a GIT_EDITOR
-/// that writes the new message.
-fn scripted_rebase(
-    repo_root: &ResolvedGitDirectory,
-    sha: &str,
-    transform: impl Fn(&str) -> Result<String>,
-    message: Option<&str>,
-) -> Result<()> {
-    let dir = temp_script_dir("rebase")?;
-    let todo_path = dir.join("todo");
-    let new_todo_path = dir.join("new_todo");
-    let capture_script = write_editor_script(&dir, "capture", &format!(
-        "cp \"$1\" \"{}\"",
-        path_in_script(&todo_path)
-    ), true)?;
-    let apply_script = write_editor_script(&dir, "apply", &format!(
-        "cp \"{}\" \"$1\"",
-        path_in_script(&new_todo_path)
-    ), false)?;
-
-    let base = format!("{sha}^");
-    let capture_output = run_git_with_env(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["rebase", "-i", &base],
-        [("GIT_SEQUENCE_EDITOR", capture_script.to_string_lossy().into_owned())],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    let original = match fs::read_to_string(&todo_path) {
-        Ok(todo) => todo,
-        Err(_) => {
-            let _ = fs::remove_dir_all(&dir);
-            return ensure_success(&capture_output, "git rebase failed");
-        }
-    };
-    let transformed = match transform(&original) {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = fs::remove_dir_all(&dir);
-            return Err(e);
-        }
-    };
-    fs::write(&new_todo_path, transformed)?;
-
-    let mut envs: Vec<(String, String)> = vec![(
-        "GIT_SEQUENCE_EDITOR".into(),
-        apply_script.to_string_lossy().into_owned(),
-    )];
-    if let Some(msg) = message {
-        let msg_path = dir.join("message");
-        fs::write(&msg_path, msg)?;
-        let editor_script = write_editor_script(&dir, "editor", &format!(
-            "cp \"{}\" \"$1\"",
-            path_in_script(&msg_path)
-        ), false)?;
-        envs.push(("GIT_EDITOR".into(), editor_script.to_string_lossy().into_owned()));
-    }
-
-    let result = run_git_with_env(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["rebase", "-i", "--autostash", &base],
-        envs.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-        DEFAULT_TIMEOUT_SECS,
-    );
-    let _ = fs::remove_dir_all(&dir);
-    let output = result?;
-    ensure_success(&output, "git rebase failed")
-}
-
-fn temp_script_dir(label: &str) -> Result<PathBuf> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("terax-{label}-{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-/// Git-for-Windows runs editors through its bundled sh, which cannot execute
-/// .cmd files and mangles backslashes, so the scripts are always POSIX sh with
-/// forward-slash paths.
-fn write_editor_script(dir: &Path, label: &str, body: &str, abort: bool) -> Result<PathBuf> {
-    let path = dir.join(format!("{label}.sh"));
-    let exit = if abort { "\nexit 1\n" } else { "\n" };
-    fs::write(&path, format!("#!/bin/sh\n{body}{exit}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms)?;
-    }
-    Ok(path)
-}
-
-fn path_in_script(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-pub fn fixup_commit(
-    registry: &WorkspaceRegistry,
-    repo_root: &str,
-    sha: &str,
-    workspace: &WorkspaceEnv,
-) -> Result<()> {
-    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
-    ensure_git_available(&repo_root.workspace)?;
-    if !sha_is_safe(sha) {
-        return Err(GitError::command("git commit", "invalid commit sha"));
-    }
-    let fixup = format!("--fixup={sha}");
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["commit", &fixup],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    ensure_success(&output, "git commit --fixup failed")?;
-    let parent = format!("{sha}^");
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["rebase", "--autosquash", "--autostash", &parent],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    ensure_success(&output, "git rebase --autosquash failed")
-}
-
-pub fn squash_commit(
-    registry: &WorkspaceRegistry,
-    repo_root: &str,
-    sha: &str,
-    workspace: &WorkspaceEnv,
-) -> Result<()> {
-    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
-    ensure_git_available(&repo_root.workspace)?;
-    if !sha_is_safe(sha) {
-        return Err(GitError::command("git commit", "invalid commit sha"));
-    }
-    let squash = format!("--squash={sha}");
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["commit", &squash],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    ensure_success(&output, "git commit --squash failed")?;
-    let parent = format!("{sha}^");
-    let output = run_git(
-        &repo_root.workspace,
-        Some(&repo_root.git_path),
-        ["rebase", "--autosquash", "--autostash", &parent],
-        DEFAULT_TIMEOUT_SECS,
-    )?;
-    ensure_success(&output, "git rebase --autosquash failed")
-}
-
 pub fn diff_range(
     registry: &WorkspaceRegistry,
     repo_root: &str,
@@ -2353,43 +2099,6 @@ pub fn diff_commit_vs_worktree(
         diff_text,
         truncated: output.truncated,
     })
-}
-
-pub fn create_patch(
-    registry: &WorkspaceRegistry,
-    repo_root: &str,
-    shas: &[String],
-    workspace: &WorkspaceEnv,
-) -> Result<String> {
-    let repo_root = authorized_repo_root(registry, repo_root, workspace)?;
-    ensure_git_available(&repo_root.workspace)?;
-    let mut patch = String::new();
-    let mut truncated = false;
-    for sha in shas {
-        if !sha_is_safe(sha) {
-            return Err(GitError::command("git show", "invalid commit sha"));
-        }
-        let output = run_git(
-            &repo_root.workspace,
-            Some(&repo_root.git_path),
-            ["show", "--no-color", sha],
-            DEFAULT_TIMEOUT_SECS,
-        )?;
-        ensure_success(&output, "git show failed")?;
-        let text = match String::from_utf8(output.stdout) {
-            Ok(t) => t,
-            Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
-        };
-        patch.push_str(&text);
-        if patch.len() >= MAX_OUTPUT_BYTES {
-            truncated = true;
-            break;
-        }
-    }
-    if truncated {
-        patch.truncate(MAX_OUTPUT_BYTES);
-    }
-    Ok(patch)
 }
 
 pub fn branches_containing(
@@ -2466,7 +2175,10 @@ pub fn list_branches(
     if let Ok(lines) = git_stdout_lines(
         &repo_root.workspace,
         &repo_root.git_path,
-        ["branch", "--format=%(refname:short)%00%(HEAD)%00%(upstream:short)"],
+        [
+            "branch",
+            "--format=%(refname:short)%00%(HEAD)%00%(upstream:short)",
+        ],
     ) {
         for line in &lines {
             let mut parts = line.split('\0');
@@ -2586,10 +2298,7 @@ pub fn list_branches(
                 && !existing.is_head;
             if should_replace {
                 let is_head = existing.is_head || b.is_head;
-                deduped[existing_idx] = GitBranchEntry {
-                    is_head,
-                    ..b
-                };
+                deduped[existing_idx] = GitBranchEntry { is_head, ..b };
             } else if b.is_head && !existing.is_head {
                 let mut updated = deduped[existing_idx].clone();
                 updated.is_head = true;
@@ -2621,7 +2330,11 @@ fn push_worktree(
         b.clone()
     } else if let Some(ref sha) = head_sha {
         // if detached HEAD with no branch — show shortened SHA as name
-        let short = if sha.len() >= 7 { &sha[..7] } else { sha.as_str() };
+        let short = if sha.len() >= 7 {
+            &sha[..7]
+        } else {
+            sha.as_str()
+        };
         format!("(detached @ {})", short)
     } else {
         return;
@@ -2650,7 +2363,12 @@ fn remote_checkout_plan(
     let is_remote = git_stdout_line_opt(
         &repo_root.workspace,
         &repo_root.git_path,
-        ["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{branch_name}")],
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{branch_name}"),
+        ],
     )
     .ok()
     .flatten()
@@ -2661,7 +2379,12 @@ fn remote_checkout_plan(
     let local_exists = git_stdout_line_opt(
         &repo_root.workspace,
         &repo_root.git_path,
-        ["rev-parse", "--verify", "--quiet", &format!("refs/heads/{short}")],
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{short}"),
+        ],
     )
     .ok()
     .flatten()
@@ -2733,10 +2456,25 @@ pub fn checkout_branch(
 
 /// Directories whose children are never scanned for git repos.
 const SCAN_DENYLIST: &[&str] = &[
-    "node_modules", "target", ".venv", "venv", "__pycache__", ".git",
-    ".terraform", "dist", "build", ".next", ".nuxt", "vendor",
-    "bower_components", ".tox", ".mypy_cache", ".pytest_cache",
-    ".ruby-lsp", ".svelte-kit", ".angular",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+    ".terraform",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "vendor",
+    "bower_components",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruby-lsp",
+    ".svelte-kit",
+    ".angular",
 ];
 
 /// Maximum subdirectories to scan before giving up.
@@ -2748,6 +2486,15 @@ pub fn scan_repos(
     max_depth: u32,
     workspace: &WorkspaceEnv,
 ) -> Result<Vec<GitRepoHead>> {
+    scan_repos_inner(registry, base_dir, max_depth, workspace).map(|(heads, _)| heads)
+}
+
+fn scan_repos_inner(
+    registry: &WorkspaceRegistry,
+    base_dir: &str,
+    max_depth: u32,
+    workspace: &WorkspaceEnv,
+) -> Result<(Vec<GitRepoHead>, bool)> {
     let cwd = canonical_dir(registry, base_dir, workspace)?;
     if !registry.is_authorized(&cwd.local_path) {
         return Err(GitError::PathOutsideWorkspace(cwd.local_path));
@@ -2756,6 +2503,8 @@ pub fn scan_repos(
 
     let depth = max_depth.clamp(1, 5) as usize;
     let mut candidates: Vec<(String, usize)> = Vec::new();
+    let mut scanned = 0;
+    let mut truncated = false;
 
     // Also check the base directory itself — it might be a git repo.
     let base_dot_git = cwd.local_path.join(".git");
@@ -2769,6 +2518,8 @@ pub fn scan_repos(
         &cwd.git_path,
         depth,
         &mut candidates,
+        &mut scanned,
+        &mut truncated,
     )?;
 
     log::info!(
@@ -2777,31 +2528,19 @@ pub fn scan_repos(
         cwd.git_path
     );
 
-    // Resolve each candidate in parallel so a slow repo doesn't block others.
-    let (tx, rx) = mpsc::channel();
-    let mut spawned = 0usize;
-    for (git_path, _candidate_depth) in candidates {
-        let workspace = cwd.workspace.clone();
-        let tx = tx.clone();
-        spawned += 1;
-        thread::spawn(move || {
-            let _ = tx.send(resolve_repo_head(&workspace, &git_path));
-        });
-    }
-    drop(tx);
-
-    let mut heads: Vec<GitRepoHead> = Vec::with_capacity(spawned);
-    for head in rx.into_iter().flatten() {
-        log::info!("git scan: found repo {} branch {}", head.repo_root, head.branch);
-        heads.push(head);
-    }
+    let mut heads: Vec<GitRepoHead> = parallel_jobs(candidates, |(git_path, _)| {
+        resolve_repo_head(&cwd.workspace, &git_path)
+    })?
+    .into_iter()
+    .flatten()
+    .collect();
 
     log::info!("git scan: {} repo(s) resolved", heads.len());
 
     // Sort by repo_root so the list is stable.
     heads.sort_by(|a, b| a.repo_root.cmp(&b.repo_root));
 
-    Ok(heads)
+    Ok((heads, truncated))
 }
 
 fn collect_git_dirs(
@@ -2810,6 +2549,8 @@ fn collect_git_dirs(
     git_base: &str,
     max_depth: usize,
     out: &mut Vec<(String, usize)>,
+    scanned: &mut usize,
+    truncated: &mut bool,
 ) -> Result<()> {
     if max_depth == 0 {
         return Ok(());
@@ -2818,9 +2559,6 @@ fn collect_git_dirs(
         return Ok(());
     };
     for entry in entries.flatten() {
-        if out.len() >= SCAN_DIR_LIMIT {
-            break;
-        }
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -2834,17 +2572,29 @@ fn collect_git_dirs(
         }
 
         if ft.is_dir() {
+            if *scanned >= SCAN_DIR_LIMIT {
+                *truncated = true;
+                break;
+            }
+            *scanned += 1;
+            let git_path = if workspace.is_wsl() {
+                format!("{}/{}", git_base.trim_end_matches('/'), name_str)
+            } else {
+                crate::modules::fs::to_canon(entry.path())
+            };
             let git_child = entry.path().join(".git");
             if git_child.exists() {
-                let git_path = if workspace.is_wsl() {
-                    // For WSL we use the original base + subdir convention.
-                    format!("{}/{}", git_base.trim_end_matches('/'), name_str)
-                } else {
-                    crate::modules::fs::to_canon(entry.path())
-                };
                 out.push((git_path, max_depth));
             } else {
-                collect_git_dirs(&entry.path(), workspace, git_base, max_depth - 1, out)?;
+                collect_git_dirs(
+                    &entry.path(),
+                    workspace,
+                    &git_path,
+                    max_depth - 1,
+                    out,
+                    scanned,
+                    truncated,
+                )?;
             }
         }
     }
@@ -2857,7 +2607,11 @@ fn resolve_repo_head(workspace: &WorkspaceEnv, repo_root: &str) -> Option<GitRep
             let is_detached = head == "HEAD";
             Some(GitRepoHead {
                 repo_root: repo_root.to_string(),
-                branch: if is_detached { "(detached)".to_string() } else { head },
+                branch: if is_detached {
+                    "(detached)".to_string()
+                } else {
+                    head
+                },
                 is_detached,
             })
         }
@@ -2879,9 +2633,8 @@ pub fn workspace_snapshot(
     max_depth: u32,
     workspace: &WorkspaceEnv,
 ) -> Result<GitWorkspaceSnapshot> {
-    let heads = scan_repos(registry, base_dir, max_depth, workspace)?;
+    let (heads, truncated) = scan_repos_inner(registry, base_dir, max_depth, workspace)?;
     let root = canonical_dir(registry, base_dir, workspace)?.git_path;
-    let truncated = heads.len() >= SCAN_DIR_LIMIT;
 
     let mut repos: Vec<GitMultiRepoEntry> = Vec::with_capacity(heads.len());
     let mut total_changed = 0u32;
@@ -2905,7 +2658,7 @@ pub fn workspace_snapshot(
         };
 
         if let Some(ref s) = status_result {
-            total_changed += s.changed_files.len() as u32;
+            total_changed = total_changed.saturating_add(s.changed_files.len() as u32);
         }
 
         let has_status = status_result.is_some();
@@ -2987,52 +2740,40 @@ pub fn multi_fetch(
         resolved.push(r);
     }
 
-    let (tx, rx) = mpsc::channel();
-    for r in &resolved {
-        let root = r.git_path.clone();
-        let workspace = r.workspace.clone();
-        let tx = tx.clone();
-        thread::spawn(move || {
-            let result = match run_git(
-                &workspace,
-                Some(&root),
-                ["fetch", "--prune"],
-                NETWORK_TIMEOUT_SECS,
-            ) {
-                Ok(output) if output.exit_code == Some(0) => GitFetchResult {
-                    repo_root: root,
-                    ok: true,
-                    error: None,
-                },
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    let detail = if !stderr.is_empty() {
-                        stderr
-                    } else {
-                        "fetch exited with non-zero status".to_string()
-                    };
-                    GitFetchResult {
-                        repo_root: root,
-                        ok: false,
-                        error: Some(detail),
-                    }
-                }
-                Err(e) => GitFetchResult {
+    let mut results = parallel_jobs(resolved, |r| {
+        let root = r.git_path;
+        let workspace = r.workspace;
+        match run_git(
+            &workspace,
+            Some(&root),
+            ["fetch", "--prune"],
+            NETWORK_TIMEOUT_SECS,
+        ) {
+            Ok(output) if output.exit_code == Some(0) => GitFetchResult {
+                repo_root: root,
+                ok: true,
+                error: None,
+            },
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let detail = if !stderr.is_empty() {
+                    stderr
+                } else {
+                    "fetch exited with non-zero status".to_string()
+                };
+                GitFetchResult {
                     repo_root: root,
                     ok: false,
-                    error: Some(e.to_string()),
-                },
-            };
-            let _ = tx.send(result);
-        });
-    }
-    drop(tx);
-
-    let mut results: Vec<GitFetchResult> = Vec::with_capacity(resolved.len());
-    for result in rx {
-        results.push(result);
-    }
+                    error: Some(detail),
+                }
+            }
+            Err(e) => GitFetchResult {
+                repo_root: root,
+                ok: false,
+                error: Some(e.to_string()),
+            },
+        }
+    })?;
     results.sort_by(|a, b| a.repo_root.cmp(&b.repo_root));
     Ok(results)
 }
-

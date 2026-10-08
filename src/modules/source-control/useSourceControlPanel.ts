@@ -2,17 +2,22 @@ import {
   type GitChangedFile,
   type GitCommitResult,
   type GitDiscardEntry,
-  type GitLogEntry,
   type GitRepoHead,
   type GitRepoInfo,
   type GitStatusSnapshot,
-  native,
+  native as nativeCommands,
 } from "@/lib/native";
 import {
   invalidateDiff,
   invalidateRepoDiffs,
   workingDiffKey,
 } from "@/modules/editor/lib/diffCache";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  type WorkspaceEnv,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PushPlan } from "./useMultiRepoSourceControl";
 import { type RepoStatusEntry, repoDisplayName } from "./useRepoStatuses";
@@ -32,6 +37,7 @@ export type PushPreviewBridge = {
 const RECONCILE_DEBOUNCE_MS = 180;
 
 export type DiffSelection = {
+  repoRoot: string;
   path: string;
   mode: DiffMode;
 };
@@ -78,7 +84,14 @@ export type PendingDiscard = {
   label: string;
 };
 
+export type SourceControlPanelAction = (
+  key: string,
+  work: (workspace: WorkspaceEnv, ensureCurrent: () => void) => Promise<void>,
+) => Promise<boolean>;
+
 type SourceControlPanelState = {
+  runAction: SourceControlPanelAction;
+  isCurrent: () => boolean;
   panelState: PanelState;
   repo: GitRepoInfo | null;
   status: GitStatusSnapshot | null;
@@ -103,14 +116,6 @@ type SourceControlPanelState = {
   unstagedEmptyText: string;
   pendingDiscard: PendingDiscard | null;
   setCommitMessage: (value: string) => void;
-  amendEnabled: boolean;
-  setAmendEnabled: (value: boolean) => void;
-  amendTargetSha: string | null;
-  setAmendTargetSha: (value: string | null) => void;
-  recentCommits: GitLogEntry[];
-  refreshRecentCommits: () => Promise<void>;
-  /** Specific-commit amend only makes sense on a single repository. */
-  amendSpecificSupported: boolean;
   commitAndPush: () => Promise<void>;
   preCommitWarnings: string[] | null;
   confirmPreCommitWarnings: () => Promise<void>;
@@ -200,7 +205,13 @@ function sameSelection(
   a: DiffSelection | null,
   b: DiffSelection | null,
 ): boolean {
-  return !!a && !!b && a.path === b.path && a.mode === b.mode;
+  return (
+    !!a &&
+    !!b &&
+    a.repoRoot === b.repoRoot &&
+    a.path === b.path &&
+    a.mode === b.mode
+  );
 }
 
 function optimisticStage(
@@ -326,6 +337,41 @@ const NOOP_REPO_STATUSES: RepoStatusBundle = {
   refreshAll: async () => {},
 };
 
+function entriesForStatus(
+  repoRoot: string,
+  snapshot: GitStatusSnapshot,
+): SourceControlFileEntry[] {
+  const seen = new Set<string>();
+  const out: SourceControlFileEntry[] = [];
+  for (const file of snapshot.changedFiles) {
+    if (seen.has(file.path)) continue;
+    seen.add(file.path);
+    const checkState: CheckState =
+      file.staged && file.unstaged
+        ? "indeterminate"
+        : file.staged
+          ? "checked"
+          : "unchecked";
+    const statusCode = file.unstaged
+      ? statusCodeForMode("-", file)
+      : statusCodeForMode("+", file);
+    out.push({
+      // Paths repeat across repos, so the row key has to carry the repo too.
+      key: `${repoRoot}\u0000${file.path}`,
+      repoRoot,
+      path: file.path,
+      originalPath: file.originalPath,
+      statusCode,
+      statusLabel: file.statusLabel,
+      checkState,
+      staged: file.staged,
+      unstaged: file.unstaged,
+      untracked: file.untracked,
+    });
+  }
+  return out;
+}
+
 export function useSourceControlPanel(
   isOpen: boolean,
   summary: SourceControlSummary,
@@ -342,11 +388,62 @@ export function useSourceControlPanel(
   repoStatuses: RepoStatusBundle = NOOP_REPO_STATUSES,
   pushPreview?: PushPreviewBridge,
 ): SourceControlPanelState {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const contextKey = JSON.stringify([
+    workspaceScopeKey(workspace),
+    summary.contextPath,
+    summary.repo?.repoRoot,
+    summary.status?.branch,
+  ]);
+  const contextRef = useRef({ key: contextKey });
+  if (contextRef.current.key !== contextKey)
+    contextRef.current = { key: contextKey };
+  const context = contextRef.current;
+  const mountedRef = useRef(true);
+  const actionBusyRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const isCurrent = useCallback(
+    () =>
+      mountedRef.current &&
+      contextRef.current === context &&
+      currentWorkspaceScopeKey() === workspaceScopeKey(workspace),
+    [context, workspace],
+  );
+  const ensureCurrent = useCallback(() => {
+    if (!isCurrent())
+      throw new Error(
+        "Workspace or branch changed; remaining Git operations cancelled",
+      );
+  }, [isCurrent]);
+  const native = useMemo(
+    () =>
+      new Proxy(nativeCommands, {
+        get(target, property: keyof typeof nativeCommands) {
+          const command = target[property];
+          return async (...args: unknown[]) => {
+            ensureCurrent();
+            const result = await (
+              command as (...args: unknown[]) => Promise<unknown>
+            )(...args);
+            ensureCurrent();
+            return result;
+          };
+        },
+      }),
+    [ensureCurrent],
+  );
   const [panelState, setPanelState] = useState<PanelState>("closed");
   const [repo, setRepo] = useState<GitRepoInfo | null>(null);
   const [status, setStatus] = useState<GitStatusSnapshot | null>(null);
   const [selected, setSelected] = useState<DiffSelection | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  const commitMessageRef = useRef(commitMessage);
+  commitMessageRef.current = commitMessage;
   const [localActionBusy, setLocalActionBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -361,9 +458,6 @@ export function useSourceControlPanel(
     | { scope: "all"; repoRoot: string; entries: SourceControlEntry[] }
     | null
   >(null);
-  const [amendEnabled, setAmendEnabled] = useState(false);
-  const [amendTargetSha, setAmendTargetSha] = useState<string | null>(null);
-  const [recentCommits, setRecentCommits] = useState<GitLogEntry[]>([]);
   const [preCommitWarnings, setPreCommitWarnings] = useState<string[] | null>(
     null,
   );
@@ -373,9 +467,56 @@ export function useSourceControlPanel(
   const [rewordMessage, setRewordMessage] = useState("");
   const selectedRef = useRef<DiffSelection | null>(null);
   const reconcileTimerRef = useRef(0);
-  const recentCommitsRequestRef = useRef(0);
   const repoRootRef = useRef<string | null>(null);
   const branchRef = useRef<string | null>(null);
+  const rewordShaRef = useRef<string | null>(null);
+  const pendingDiscardScopeRef = useRef(context);
+  const warningScopeRef = useRef(context);
+  const rewordScopeRef = useRef(context);
+  const stagedSignature = useMemo(
+    () =>
+      JSON.stringify([
+        summary.status?.changedFiles.filter((file) => file.staged),
+        repoStatuses.entries.map((entry) => [
+          entry.repoRoot,
+          entry.status.changedFiles.filter((file) => file.staged),
+        ]),
+      ]),
+    [summary.status, repoStatuses.entries],
+  );
+  const commitSignature = useMemo(
+    () => ({ context, commitMessage, stagedSignature }),
+    [context, commitMessage, stagedSignature],
+  );
+  const warningSignatureRef = useRef<typeof commitSignature | null>(null);
+
+  const runAction = useCallback(
+    async (
+      key: string,
+      work: (
+        workspace: WorkspaceEnv,
+        ensureCurrent: () => void,
+      ) => Promise<void>,
+    ) => {
+      if (actionBusyRef.current || summary.busyAction || !isCurrent())
+        return false;
+      actionBusyRef.current = true;
+      setLocalActionBusy(key);
+      setActionError(null);
+      try {
+        await work(workspace, ensureCurrent);
+        ensureCurrent();
+        return true;
+      } catch (error) {
+        if (isCurrent()) setActionError(normalizeError(error));
+        return false;
+      } finally {
+        actionBusyRef.current = false;
+        if (isCurrent()) setLocalActionBusy(null);
+      }
+    },
+    [summary.busyAction, isCurrent, workspace, ensureCurrent],
+  );
 
   useEffect(() => {
     selectedRef.current = selected;
@@ -410,41 +551,6 @@ export function useSourceControlPanel(
   } = repoStatuses;
 
   const activeRepoRoot = repo?.repoRoot ?? null;
-
-  function entriesForStatus(
-    repoRoot: string,
-    snapshot: GitStatusSnapshot,
-  ): SourceControlFileEntry[] {
-    const seen = new Set<string>();
-    const out: SourceControlFileEntry[] = [];
-    for (const file of snapshot.changedFiles) {
-      if (seen.has(file.path)) continue;
-      seen.add(file.path);
-      const checkState: CheckState =
-        file.staged && file.unstaged
-          ? "indeterminate"
-          : file.staged
-            ? "checked"
-            : "unchecked";
-      const statusCode = file.unstaged
-        ? statusCodeForMode("-", file)
-        : statusCodeForMode("+", file);
-      out.push({
-        // Paths repeat across repos, so the row key has to carry the repo too.
-        key: `${repoRoot}\u0000${file.path}`,
-        repoRoot,
-        path: file.path,
-        originalPath: file.originalPath,
-        statusCode,
-        statusLabel: file.statusLabel,
-        checkState,
-        staged: file.staged,
-        unstaged: file.unstaged,
-        untracked: file.untracked,
-      });
-    }
-    return out;
-  }
 
   const repoGroups = useMemo<RepoFileGroup[]>(() => {
     if (!multiRepo) return [];
@@ -552,7 +658,6 @@ export function useSourceControlPanel(
       if (repoRootRef.current !== null) {
         repoRootRef.current = null;
         branchRef.current = null;
-        setAmendTargetSha(null);
         setRewordTarget(null);
       }
       return;
@@ -578,31 +683,37 @@ export function useSourceControlPanel(
 
     if (repoRootRef.current !== summary.repo.repoRoot) {
       repoRootRef.current = summary.repo.repoRoot;
-      setAmendTargetSha(null);
       setRewordTarget(null);
     }
     if (branchRef.current !== summary.status.branch) {
       branchRef.current = summary.status.branch;
-      setAmendTargetSha(null);
       setRewordTarget(null);
     }
 
     const current = selectedRef.current;
+    const selectionStatus =
+      current?.repoRoot === summary.repo.repoRoot
+        ? summary.status
+        : repoStatusEntries.find(
+            (entry) => entry.repoRoot === current?.repoRoot,
+          )?.status;
     const exists =
       !!current &&
-      summary.status.changedFiles.some((file) => {
+      !!selectionStatus &&
+      selectionStatus.changedFiles.some((file) => {
         if (file.path !== current.path) return false;
         return current.mode === "+" ? file.staged : file.unstaged;
       });
 
     if (!exists && current) {
-      const samePathOtherMode = summary.status.changedFiles.find(
+      const samePathOtherMode = selectionStatus?.changedFiles.find(
         (file) =>
           file.path === current.path &&
           (current.mode === "+" ? file.unstaged : file.staged),
       );
       if (samePathOtherMode) {
         const moved: DiffSelection = {
+          repoRoot: current.repoRoot,
           path: samePathOtherMode.path,
           mode: current.mode === "+" ? "-" : "+",
         };
@@ -622,12 +733,14 @@ export function useSourceControlPanel(
     summary.localError,
     summary.repo,
     summary.status,
+    repoStatusEntries,
   ]);
 
   const selectEntry = useCallback(
     async (entry: SourceControlEntry) => {
       if (!repo) return;
       const nextSelection: DiffSelection = {
+        repoRoot: repo.repoRoot,
         path: entry.path,
         mode: entry.mode,
       };
@@ -657,36 +770,42 @@ export function useSourceControlPanel(
       targetRepoRoot?: string,
     ) => {
       const root = targetRepoRoot ?? repo?.repoRoot;
-      if (!root || summary.busyAction) return;
+      if (!root || summary.busyAction || actionBusyRef.current || !isCurrent())
+        return false;
+      actionBusyRef.current = true;
       const isActive = root === repo?.repoRoot;
-      setLocalActionBusy(busyKey);
-      setActionMessage(null);
-      setActionError(null);
-      if (optimistic) {
-        if (isActive) summary.applyStatus(optimistic);
-        else applyOtherStatus(root, optimistic);
-      }
-      for (const path of affected) {
-        invalidateDiff(workingDiffKey(root, path, "+"));
-        invalidateDiff(workingDiffKey(root, path, "-"));
-      }
       try {
+        setLocalActionBusy(busyKey);
+        setActionMessage(null);
+        setActionError(null);
+        if (optimistic) {
+          if (isActive) summary.applyStatus(optimistic);
+          else applyOtherStatus(root, optimistic);
+        }
+        for (const path of affected) {
+          invalidateDiff(workingDiffKey(root, path, "+"));
+          invalidateDiff(workingDiffKey(root, path, "-"));
+        }
         await ipc();
         // Only the active repo has the debounced reconcile behind it; a
         // secondary repo has to be re-read directly or its optimistic state
         // would be the last word.
         if (isActive) scheduleReconcile();
         else await refreshOtherRepo(root);
+        return isCurrent();
       } catch (error) {
+        if (!isCurrent()) return false;
         setActionError(normalizeError(error));
         if (isActive) {
           cancelReconcile();
           await summary.refresh({ remote: "never" }).catch(() => {});
         } else {
-          await refreshOtherRepo(root);
+          await refreshOtherRepo(root).catch(() => {});
         }
+        return false;
       } finally {
-        setLocalActionBusy(null);
+        actionBusyRef.current = false;
+        if (isCurrent()) setLocalActionBusy(null);
       }
     },
     [
@@ -696,6 +815,7 @@ export function useSourceControlPanel(
       repo,
       scheduleReconcile,
       summary,
+      isCurrent,
     ],
   );
 
@@ -710,7 +830,7 @@ export function useSourceControlPanel(
         [entry.path],
       );
     },
-    [repo, runMutation],
+    [repo, runMutation, native],
   );
 
   const unstageEntry = useCallback(
@@ -724,44 +844,62 @@ export function useSourceControlPanel(
         [entry.path],
       );
     },
-    [repo, runMutation],
+    [repo, runMutation, native],
   );
 
   const requestDiscardEntry = useCallback(
     (entry: SourceControlEntry) => {
-      if (!repo || summary.busyAction) return;
+      if (!repo || summary.busyAction || actionBusyRef.current || !isCurrent())
+        return;
+      setActionError(null);
+      pendingDiscardScopeRef.current = context;
       setPendingDiscard({ scope: "single", repoRoot: repo.repoRoot, entry });
     },
-    [repo, summary.busyAction],
+    [repo, summary.busyAction, context, isCurrent],
   );
 
   const requestDiscardAll = useCallback(() => {
-    if (!repo || summary.busyAction || unstagedEntries.length === 0) return;
+    if (
+      !repo ||
+      summary.busyAction ||
+      actionBusyRef.current ||
+      !isCurrent() ||
+      unstagedEntries.length === 0
+    )
+      return;
+    setActionError(null);
+    pendingDiscardScopeRef.current = context;
     setPendingDiscard({
       scope: "all",
       repoRoot: repo.repoRoot,
       entries: unstagedEntries,
     });
-  }, [repo, summary.busyAction, unstagedEntries]);
+  }, [repo, summary.busyAction, unstagedEntries, context, isCurrent]);
 
   const cancelPendingDiscard = useCallback(() => {
     setPendingDiscard(null);
   }, []);
 
   const confirmPendingDiscard = useCallback(async () => {
-    if (!repo || !pendingDiscard) return;
+    if (
+      !repo ||
+      !pendingDiscard ||
+      !isCurrent() ||
+      pendingDiscardScopeRef.current !== context ||
+      actionBusyRef.current
+    )
+      return;
     const list =
       pendingDiscard.scope === "single"
         ? [pendingDiscard.entry]
         : pendingDiscard.entries;
     const discardRepoRoot = pendingDiscard.repoRoot;
-    setPendingDiscard(null);
     const entries: GitDiscardEntry[] = list.map((entry) => ({
       path: entry.path,
       untracked: entry.untracked,
     }));
     const paths = new Set(list.map((entry) => entry.path));
-    await runMutation(
+    const succeeded = await runMutation(
       pendingDiscard.scope === "single"
         ? `discard:${list[0].path}`
         : "discard:all",
@@ -770,7 +908,8 @@ export function useSourceControlPanel(
       [...paths],
       discardRepoRoot,
     );
-  }, [pendingDiscard, repo, runMutation]);
+    if (succeeded && isCurrent()) setPendingDiscard(null);
+  }, [pendingDiscard, repo, runMutation, isCurrent, context, native]);
 
   // Select-all spans every repo in multi-repo mode, one repo per call so each
   // gets its own optimistic update and reconcile.
@@ -799,7 +938,7 @@ export function useSourceControlPanel(
       () => native.gitStage(repo.repoRoot, [...paths]),
       [...paths],
     );
-  }, [multiRepo, repo, repoGroups, runMutation, unstagedEntries]);
+  }, [multiRepo, repo, repoGroups, runMutation, unstagedEntries, native]);
 
   const unstageAllEntries = useCallback(async () => {
     if (multiRepo) {
@@ -826,14 +965,18 @@ export function useSourceControlPanel(
       () => native.gitUnstage(repo.repoRoot, [...paths]),
       [...paths],
     );
-  }, [multiRepo, repo, repoGroups, runMutation, stagedEntries]);
+  }, [multiRepo, repo, repoGroups, runMutation, stagedEntries, native]);
 
   const selectFile = useCallback(
     async (entry: SourceControlFileEntry) => {
       const root = entry.repoRoot || repo?.repoRoot;
       if (!root) return;
       const mode: DiffMode = entry.unstaged ? "-" : "+";
-      const nextSelection: DiffSelection = { path: entry.path, mode };
+      const nextSelection: DiffSelection = {
+        repoRoot: root,
+        path: entry.path,
+        mode,
+      };
       if (sameSelection(selected, nextSelection)) {
         setActionError(null);
         setActionMessage(null);
@@ -878,7 +1021,7 @@ export function useSourceControlPanel(
         );
       }
     },
-    [repo, runMutation],
+    [repo, runMutation, native],
   );
 
   const toggleAll = useCallback(async () => {
@@ -888,7 +1031,10 @@ export function useSourceControlPanel(
 
   const requestDiscardFile = useCallback(
     (entry: SourceControlFileEntry) => {
-      if (!repo || summary.busyAction) return;
+      if (!repo || summary.busyAction || actionBusyRef.current || !isCurrent())
+        return;
+      setActionError(null);
+      pendingDiscardScopeRef.current = context;
       setPendingDiscard({
         scope: "single",
         repoRoot: entry.repoRoot || repo.repoRoot,
@@ -905,10 +1051,10 @@ export function useSourceControlPanel(
         },
       });
     },
-    [repo, summary.busyAction],
+    [repo, summary.busyAction, context, isCurrent],
   );
 
-  const runCommit = useCallback(
+  const executeCommit = useCallback(
     async (andPush: boolean, skipChecks: boolean) => {
       if (summary.busyAction) return;
       // Busy state goes up BEFORE the async pre-commit checks so the Commit
@@ -919,26 +1065,18 @@ export function useSourceControlPanel(
       setActionMessage(null);
       setActionError(null);
 
-      const targetSha = amendEnabled ? (amendTargetSha ?? "") : "";
-      const specificAmend = targetSha !== "";
-      // Repos with nothing staged are skipped rather than erroring: "commit
-      // everything I checked" should not fail because some group is untouched.
-      const targets = specificAmend
-        ? repo
+      const targets = multiRepo
+        ? repoGroups
+            .filter((group) => group.files.some((file) => file.staged))
+            .map((group) => ({ repoRoot: group.repoRoot, name: group.name }))
+        : repo && stagedEntries.length > 0
           ? [{ repoRoot: repo.repoRoot, name: repoDisplayName(repo.repoRoot) }]
-          : []
-        : multiRepo
-          ? repoGroups
-              .filter((g) => g.files.some((f) => f.staged))
-              .map((g) => ({ repoRoot: g.repoRoot, name: g.name }))
-          : repo
-            ? [
-                {
-                  repoRoot: repo.repoRoot,
-                  name: repoDisplayName(repo.repoRoot),
-                },
-              ]
-            : [];
+          : [];
+      if (!commitMessage.trim()) {
+        setActionError("Enter a commit message.");
+        setLocalActionBusy(null);
+        return;
+      }
       if (targets.length === 0) {
         setLocalActionBusy(null);
         return;
@@ -961,6 +1099,8 @@ export function useSourceControlPanel(
             ),
           ];
           if (warnings.length > 0) {
+            warningScopeRef.current = context;
+            warningSignatureRef.current = commitSignature;
             // The confirmation dialog re-invokes runCommit with skipChecks;
             // until then nothing is running, so release the busy state.
             setLocalActionBusy(null);
@@ -968,8 +1108,10 @@ export function useSourceControlPanel(
             setPreCommitWarnings(warnings);
             return;
           }
-        } catch {
-          // Pre-commit check tooling missing: the commit proceeds unchanged.
+        } catch (error) {
+          throw new Error(
+            `Could not complete pre-commit checks: ${normalizeError(error)}`,
+          );
         }
       }
 
@@ -1016,67 +1158,58 @@ export function useSourceControlPanel(
       const done: string[] = [];
       const failed: { name: string; error: string }[] = [];
       try {
-        // Amend reuses the previous message when the box is empty, mirroring
-        // `git commit --amend --no-edit`.
-        let effectiveMessage = commitMessage.trim();
-        if (!effectiveMessage && amendEnabled) {
-          if (specificAmend) {
-            effectiveMessage =
-              recentCommits.find((c) => c.sha === targetSha)?.subject ?? "";
-          } else {
-            const log = await native.gitLog(targets[0].repoRoot, { limit: 1 });
-            effectiveMessage = log[0]?.subject ?? "";
-          }
-        }
+        const effectiveMessage = commitMessage.trim();
         // Sequential: a shared commit message still means N independent commits,
         // and stopping mid-way has to leave a legible record of how far it got.
         for (const target of targets) {
           try {
-            const result: GitCommitResult = specificAmend
-              ? await native.gitAmendSpecificCommit(
-                  target.repoRoot,
-                  targetSha,
-                  effectiveMessage,
-                )
-              : await native.gitCommitAdvanced(
-                  target.repoRoot,
-                  effectiveMessage,
-                  {
-                    amend: amendEnabled,
-                  },
-                );
+            const result: GitCommitResult = await native.gitCommit(
+              target.repoRoot,
+              effectiveMessage,
+            );
             invalidateRepoDiffs(target.repoRoot);
+            if (!multiRepo) rewordShaRef.current = result.commitSha;
             done.push(`${target.name} ${result.commitSha.slice(0, 7)}`);
           } catch (error) {
             failed.push({ name: target.name, error: normalizeError(error) });
           }
         }
         let pushError: string | null = null;
-        let pushDeferred = false;
+        let pushed = false;
         if (andPush && failed.length === 0) {
           // When a push-preview bridge exists, hand the final push to the
           // preview dialog instead of pushing on the same click.
           if (pushPreview?.buildPushPlan) {
             try {
               const plan = await pushPreview.buildPushPlan();
+              ensureCurrent();
               if (plan.entries.length > 0) {
                 pushPreview.onPreviewPush(plan);
-                pushDeferred = true;
+              } else if (plan.skipped.length > 0) {
+                pushError =
+                  "Committed, but no push plan is available. Review the skipped repositories.";
               }
-            } catch {
-              // Plan failed (e.g. transient git error): fall through to a
-              // direct push rather than silently dropping the step.
+            } catch (error) {
+              ensureCurrent();
+              pushError = `Committed, but could not prepare push confirmation: ${normalizeError(error)}`;
             }
           }
-          if (!pushDeferred) {
+          if (!pushPreview?.buildPushPlan && !multiRepo) {
             const pushResult = await summary.runRemoteAction("push");
-            if (!pushResult.ok && pushResult.error)
-              pushError = pushResult.error;
+            ensureCurrent();
+            pushed = pushResult.ok;
+            if (!pushResult.ok)
+              pushError =
+                pushResult.error ?? "Commit completed, but push did not run";
+          } else if (!pushPreview?.buildPushPlan) {
+            pushError =
+              "Committed, but batch push confirmation is unavailable. Review a new push plan.";
           }
         }
         if (failed.length === 0) {
-          setCommitMessage("");
+          if (commitMessageRef.current === commitMessage) setCommitMessage("");
           if (!multiRepo && targets.length === 1) {
+            rewordScopeRef.current = context;
             setRewordTarget(targets[0].repoRoot);
           }
         }
@@ -1085,13 +1218,9 @@ export function useSourceControlPanel(
             targets.length === 1
               ? `Committed ${done[0]}`
               : `Committed ${done.length}/${targets.length} repos: ${done.join(", ")}`;
-          const message = amendEnabled
-            ? specificAmend
-              ? `${base} (merged into ${targetSha.slice(0, 7)})`
-              : `${base} (merged into recent commit)`
-            : base;
+          const message = base;
           setActionMessage(
-            andPush && !pushError && !pushDeferred
+            andPush && pushed
               ? `${message} and pushed${
                   summary.status?.upstream
                     ? ` to ${summary.status.upstream}`
@@ -1111,17 +1240,35 @@ export function useSourceControlPanel(
       }
     },
     [
-      amendEnabled,
-      amendTargetSha,
       commitMessage,
       multiRepo,
       pushPreview,
-      recentCommits,
       refreshOtherRepos,
       repo,
       repoGroups,
+      stagedEntries,
       summary,
+      native,
+      ensureCurrent,
+      context,
+      commitSignature,
     ],
+  );
+
+  const runCommit = useCallback(
+    async (andPush: boolean, skipChecks: boolean) => {
+      if (actionBusyRef.current || summary.busyAction || !isCurrent()) return;
+      actionBusyRef.current = true;
+      try {
+        await executeCommit(andPush, skipChecks);
+      } catch (error) {
+        if (isCurrent()) setActionError(normalizeError(error));
+      } finally {
+        actionBusyRef.current = false;
+        if (isCurrent()) setLocalActionBusy(null);
+      }
+    },
+    [executeCommit, summary.busyAction, isCurrent],
   );
 
   const commit = useCallback(async () => {
@@ -1133,9 +1280,25 @@ export function useSourceControlPanel(
   }, [runCommit]);
 
   const confirmPreCommitWarnings = useCallback(async () => {
+    if (
+      !preCommitWarnings ||
+      warningScopeRef.current !== context ||
+      !isCurrent()
+    )
+      return;
     setPreCommitWarnings(null);
-    await runCommit(pendingCommitAndPush, true);
-  }, [pendingCommitAndPush, runCommit]);
+    await runCommit(
+      pendingCommitAndPush,
+      warningSignatureRef.current === commitSignature,
+    );
+  }, [
+    pendingCommitAndPush,
+    runCommit,
+    preCommitWarnings,
+    context,
+    isCurrent,
+    commitSignature,
+  ]);
 
   const cancelPreCommitWarnings = useCallback(() => {
     setPreCommitWarnings(null);
@@ -1143,11 +1306,18 @@ export function useSourceControlPanel(
   }, []);
 
   const openReword = useCallback(() => {
-    if (!rewordTarget || summary.busyAction) return;
+    if (
+      !rewordTarget ||
+      summary.busyAction ||
+      actionBusyRef.current ||
+      rewordScopeRef.current !== context ||
+      !isCurrent()
+    )
+      return;
     setRewordMessage("");
     setActionError(null);
     setRewordOpen(true);
-  }, [rewordTarget, summary.busyAction]);
+  }, [rewordTarget, summary.busyAction, context, isCurrent]);
 
   const cancelReword = useCallback(() => {
     setRewordOpen(false);
@@ -1155,13 +1325,33 @@ export function useSourceControlPanel(
   }, []);
 
   const confirmReword = useCallback(async () => {
-    if (!rewordTarget || summary.busyAction) return;
+    if (
+      !rewordTarget ||
+      !rewordShaRef.current ||
+      summary.busyAction ||
+      actionBusyRef.current ||
+      !isCurrent() ||
+      rewordScopeRef.current !== context
+    )
+      return;
     const message = rewordMessage.trim();
     if (!message) return;
+    const expectedSha = rewordShaRef.current;
+    actionBusyRef.current = true;
     setLocalActionBusy("reword");
     setActionError(null);
     try {
-      await native.gitCommitReword(rewordTarget, message);
+      const [head] = await native.gitLog(rewordTarget, { limit: 1 });
+      if (head?.sha !== rewordShaRef.current)
+        throw new Error(
+          "The latest commit changed; review it again before rewording",
+        );
+      const result = await native.gitCommitReword(
+        rewordTarget,
+        message,
+        expectedSha,
+      );
+      rewordShaRef.current = result.commitSha;
       invalidateRepoDiffs(rewordTarget);
       setRewordOpen(false);
       setRewordMessage("");
@@ -1169,46 +1359,34 @@ export function useSourceControlPanel(
       await summary.refresh({ remote: "never" });
       if (multiRepo) await refreshOtherRepos();
     } catch (error) {
-      setActionError(normalizeError(error));
+      if (isCurrent()) setActionError(normalizeError(error));
     } finally {
-      setLocalActionBusy(null);
+      actionBusyRef.current = false;
+      if (isCurrent()) setLocalActionBusy(null);
     }
-  }, [multiRepo, refreshOtherRepos, rewordMessage, rewordTarget, summary]);
+  }, [
+    multiRepo,
+    refreshOtherRepos,
+    rewordMessage,
+    rewordTarget,
+    summary,
+    native,
+    isCurrent,
+    context,
+  ]);
 
   const push = useCallback(async () => {
     if (!repo) return;
     setActionMessage(null);
-    setActionError(null);
-    const result = await summary.runRemoteAction("push");
-    if (result.ok) {
+    await runAction("push", async (_workspace, ensureCurrent) => {
+      const result = await summary.runRemoteAction("push");
+      ensureCurrent();
+      if (!result.ok) throw new Error(result.error ?? "Push did not run");
       setActionMessage(
         status?.upstream ? `Pushed to ${status.upstream}` : "Push completed",
       );
-      return;
-    }
-    if (result.error) {
-      setActionError(result.error);
-    }
-  }, [repo, status?.upstream, summary]);
-
-  const refreshRecentCommits = useCallback(async () => {
-    if (!repo) {
-      setRecentCommits([]);
-      return;
-    }
-    const id = ++recentCommitsRequestRef.current;
-    try {
-      const log = await native.gitLog(repo.repoRoot, { limit: 30 });
-      if (id !== recentCommitsRequestRef.current) return;
-      setRecentCommits(log);
-    } catch {
-      if (id === recentCommitsRequestRef.current) setRecentCommits([]);
-    }
-  }, [repo]);
-
-  useEffect(() => {
-    if (amendEnabled) void refreshRecentCommits();
-  }, [amendEnabled, refreshRecentCommits]);
+    });
+  }, [repo, status?.upstream, summary, runAction]);
 
   const pendingDiscardView = useMemo<PendingDiscard | null>(() => {
     if (!pendingDiscard) return null;
@@ -1229,6 +1407,8 @@ export function useSourceControlPanel(
   }, [pendingDiscard]);
 
   return {
+    runAction,
+    isCurrent,
     panelState,
     repo,
     status,
@@ -1250,21 +1430,16 @@ export function useSourceControlPanel(
     selectionTransition,
     stagedEmptyText,
     unstagedEmptyText,
-    pendingDiscard: pendingDiscardView,
+    pendingDiscard:
+      pendingDiscardScopeRef.current === context ? pendingDiscardView : null,
     setCommitMessage,
-    amendEnabled,
-    setAmendEnabled,
-    amendTargetSha,
-    setAmendTargetSha,
-    recentCommits,
-    refreshRecentCommits,
-    amendSpecificSupported: !multiRepo,
     commitAndPush,
-    preCommitWarnings,
+    preCommitWarnings:
+      warningScopeRef.current === context ? preCommitWarnings : null,
     confirmPreCommitWarnings,
     cancelPreCommitWarnings,
-    rewordTarget,
-    rewordOpen,
+    rewordTarget: rewordScopeRef.current === context ? rewordTarget : null,
+    rewordOpen: rewordScopeRef.current === context && rewordOpen,
     rewordMessage,
     setRewordMessage,
     openReword,

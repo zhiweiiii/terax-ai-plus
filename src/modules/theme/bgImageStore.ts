@@ -7,19 +7,34 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   const p = new Promise<IDBDatabase>((resolve, reject) => {
+    let failed = false;
     const req = indexedDB.open(DB_NAME, VERSION);
     req.onupgradeneeded = () => {
       req.result.createObjectStore(STORE);
     };
     req.onsuccess = () => {
       const db = req.result;
+      if (failed) {
+        db.close();
+        return;
+      }
+      db.onversionchange = () => {
+        db.close();
+        if (dbPromise === p) dbPromise = null;
+      };
       db.onclose = () => {
         if (dbPromise === p) dbPromise = null;
       };
       resolve(db);
     };
-    req.onerror = () => reject(req.error);
-    req.onblocked = () => reject(new Error("IndexedDB blocked by another tab"));
+    req.onerror = () => {
+      failed = true;
+      reject(req.error);
+    };
+    req.onblocked = () => {
+      failed = true;
+      reject(new Error("IndexedDB blocked by another tab"));
+    };
   }).catch((e) => {
     if (dbPromise === p) dbPromise = null;
     throw e;
@@ -53,7 +68,10 @@ export async function getBgImage(id: string): Promise<Blob | null> {
   return new Promise<Blob | null>((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
     const req = tx.objectStore(STORE).get(id);
-    req.onsuccess = () => resolve((req.result as Blob | undefined) ?? null);
+    tx.oncomplete = () =>
+      resolve(req.result instanceof Blob ? req.result : null);
+    tx.onabort = () => reject(tx.error ?? new Error("Image read aborted"));
+    tx.onerror = () => reject(tx.error);
     req.onerror = () => reject(req.error);
   });
 }
@@ -65,6 +83,7 @@ export async function deleteBgImage(id: string): Promise<void> {
     tx.objectStore(STORE).delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error ?? new Error("Image deletion aborted"));
   });
 }
 
@@ -89,18 +108,30 @@ async function isAnimated(file: File): Promise<boolean> {
   );
   if (
     head.length < 30 ||
-    head[0] !== 0x52 || head[1] !== 0x49 || head[2] !== 0x46 || head[3] !== 0x46 ||
-    head[8] !== 0x57 || head[9] !== 0x45 || head[10] !== 0x42 || head[11] !== 0x50
-  ) return false;
+    head[0] !== 0x52 ||
+    head[1] !== 0x49 ||
+    head[2] !== 0x46 ||
+    head[3] !== 0x46 ||
+    head[8] !== 0x57 ||
+    head[9] !== 0x45 ||
+    head[10] !== 0x42 ||
+    head[11] !== 0x50
+  )
+    return false;
   if (
-    head[12] === 0x56 && head[13] === 0x50 && head[14] === 0x38 && head[15] === 0x58
+    head[12] === 0x56 &&
+    head[13] === 0x50 &&
+    head[14] === 0x38 &&
+    head[15] === 0x58
   ) {
     return (head[20] & 0x02) !== 0;
   }
   return false;
 }
 
-export async function importBgImageFromFile(file: File): Promise<{ id: string; blob: Blob }> {
+export async function importBgImageFromFile(
+  file: File,
+): Promise<{ id: string; blob: Blob }> {
   if (!file.type.startsWith("image/")) {
     throw new Error("This file isn't an image.");
   }

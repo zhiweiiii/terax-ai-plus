@@ -29,7 +29,9 @@ function renderParsed(parent: HTMLElement, source: string): void {
   });
   const definitions = new Map<string, Definition>();
   const pending: MarkdownNode[] = [...tree.children].reverse();
+  let nodeCount = 0;
   while (pending.length > 0) {
+    if (++nodeCount > 10000) throw new Error("Markdown node limit exceeded");
     const node = pending.pop();
     if (!node) continue;
     if (node.type === "definition" && !definitions.has(node.identifier))

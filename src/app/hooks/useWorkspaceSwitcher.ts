@@ -1,4 +1,10 @@
-import { type RefObject, useCallback, useEffect, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { homeDir } from "@tauri-apps/api/path";
 import { native } from "@/lib/native";
 import type { Tab } from "@/modules/tabs";
@@ -35,48 +41,77 @@ export function useWorkspaceSwitcher({
   resetWorkspace,
   clearWorkspaceState,
 }: Params) {
+  const epoch = useRef(0);
+  const mounted = useRef(false);
+  const envRef = useRef(workspaceEnv);
+  envRef.current = workspaceEnv;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      epoch.current++;
+    };
+  }, []);
+
   const [home, setHome] = useState<string | null>(null);
   const [launchCwd, setLaunchCwd] = useState<string | null>(null);
   const [launchCwdResolved, setLaunchCwdResolved] = useState(false);
 
   useEffect(() => {
+    const request = epoch.current;
     homeDir()
       .then(async (p) => {
         const normalized = p.replace(/\\/g, "/");
+        if (!mounted.current || epoch.current !== request) return;
         setHome(normalized);
         try {
-          await native.workspaceAuthorize(normalized);
+          await native.workspaceAuthorize(normalized, LOCAL_WORKSPACE);
         } catch {
           // Bootstrap already authorizes home from Rust; ignore.
         }
       })
-      .catch(() => setHome(null));
+      .catch(() => {
+        if (mounted.current && epoch.current === request) setHome(null);
+      });
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     native
       .workspaceCurrentDir()
-      .then(setLaunchCwd)
-      .catch(() => setLaunchCwd(null))
-      .finally(() => setLaunchCwdResolved(true));
+      .then((cwd) => {
+        if (!disposed) setLaunchCwd(cwd);
+      })
+      .catch(() => {
+        if (!disposed) setLaunchCwd(null);
+      })
+      .finally(() => {
+        if (!disposed) setLaunchCwdResolved(true);
+      });
+    return () => {
+      disposed = true;
+    };
   }, []);
 
-  const authorizeHome = useCallback(async (nextHome: string) => {
-    setHome(nextHome);
-    setLaunchCwd(nextHome);
-    try {
-      await native.workspaceAuthorize(nextHome);
-    } catch {
-      // Non-fatal — git panel will surface "not authorized" if needed.
-    }
-  }, []);
+  const authorizeHome = useCallback(
+    async (nextHome: string, env: WorkspaceEnv) => {
+      try {
+        await native.workspaceAuthorize(nextHome, env);
+      } catch {
+        // Bootstrap authorization failures surface in the git panel.
+      }
+    },
+    [],
+  );
 
   const switchWorkspace = useCallback(
     async (env: WorkspaceEnv): Promise<boolean> => {
+      const request = ++epoch.current;
+      const currentEnv = envRef.current;
       if (
-        env.kind === workspaceEnv.kind &&
+        env.kind === currentEnv.kind &&
         (env.kind === "local" ||
-          (workspaceEnv.kind === "wsl" && env.distro === workspaceEnv.distro))
+          (currentEnv.kind === "wsl" && env.distro === currentEnv.distro))
       ) {
         return false;
       }
@@ -92,18 +127,28 @@ export function useWorkspaceSwitcher({
       try {
         nextHome = await resolveEnvHome(env);
       } catch (e) {
-        window.alert(String(e));
+        if (mounted.current && epoch.current === request)
+          window.alert(String(e));
         return false;
       }
 
+      await authorizeHome(nextHome, env);
+      if (!mounted.current || epoch.current !== request) return false;
+      if (tabsRef.current.some((tab) => tab.kind === "editor" && tab.dirty)) {
+        window.alert(
+          "Save or close unsaved editor tabs before switching workspace.",
+        );
+        return false;
+      }
       clearWorkspaceState();
-      setWorkspaceEnv(env.kind === "local" ? LOCAL_WORKSPACE : env);
-      await authorizeHome(nextHome);
+      envRef.current = env.kind === "local" ? LOCAL_WORKSPACE : env;
+      setWorkspaceEnv(envRef.current);
+      setHome(nextHome);
+      setLaunchCwd(nextHome);
       resetWorkspace(nextHome);
       return true;
     },
     [
-      workspaceEnv,
       setWorkspaceEnv,
       resetWorkspace,
       tabsRef,
@@ -114,14 +159,19 @@ export function useWorkspaceSwitcher({
 
   const adoptWorkspaceEnv = useCallback(
     async (env: WorkspaceEnv): Promise<string | null> => {
-      setWorkspaceEnv(env.kind === "local" ? LOCAL_WORKSPACE : env);
+      const request = ++epoch.current;
+      envRef.current = env.kind === "local" ? LOCAL_WORKSPACE : env;
+      setWorkspaceEnv(envRef.current);
       let nextHome: string;
       try {
         nextHome = await resolveEnvHome(env);
       } catch {
         return null;
       }
-      await authorizeHome(nextHome);
+      await authorizeHome(nextHome, env);
+      if (!mounted.current || epoch.current !== request) return null;
+      setHome(nextHome);
+      setLaunchCwd(nextHome);
       return nextHome;
     },
     [setWorkspaceEnv, authorizeHome],

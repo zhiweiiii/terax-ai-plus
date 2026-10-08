@@ -93,7 +93,9 @@ fn parse_unmerged(rest: &str) -> Option<GitChangedFile> {
     let xy = rest.get(..2)?;
     let path = skip_fields(rest, 9)?;
     let (i, w) = xy_chars(xy);
-    Some(make_file(i, w, path, None))
+    let mut file = make_file(i, w, path, None);
+    file.status_label = "Unmerged".into();
+    Some(file)
 }
 
 // porcelain v2 uses '.' to mean "unchanged"; downstream logic mirrors v1 spaces.
@@ -144,5 +146,3 @@ fn status_label(index_status: char, worktree_status: char) -> String {
         _ => "Changed".into(),
     }
 }
-
-

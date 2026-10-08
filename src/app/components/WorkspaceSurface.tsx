@@ -14,6 +14,7 @@ type GitDiffStackProps = ComponentProps<typeof GitDiffStack>;
 type GitHistoryStackProps = ComponentProps<typeof GitHistoryStack>;
 
 type Props = {
+  spaces: TerminalStackProps["spaces"];
   tabs: Tab[];
   activeId: number;
   activeTab: Tab | undefined;
@@ -46,6 +47,7 @@ type Props = {
  * buffers, editor scroll, ...) when switching tabs.
  */
 export function WorkspaceSurface({
+  spaces,
   tabs,
   activeId,
   activeTab,
@@ -86,6 +88,7 @@ export function WorkspaceSurface({
         aria-hidden={!isTerminalTab}
       >
         <TerminalStack
+          spaces={spaces}
           tabs={tabs}
           activeId={activeId}
           registerHandle={registerTerminalHandle}
@@ -102,6 +105,7 @@ export function WorkspaceSurface({
         aria-hidden={!isEditorTab}
       >
         <EditorStack
+          spaces={spaces}
           tabs={tabs}
           activeId={activeId}
           registerHandle={registerEditorHandle}
@@ -132,6 +136,7 @@ export function WorkspaceSurface({
         aria-hidden={!isMarkdownTab}
       >
         <MarkdownStack
+          spaces={spaces}
           tabs={tabs}
           activeId={activeId}
           registerHandle={registerMarkdownHandle}
@@ -147,6 +152,7 @@ export function WorkspaceSurface({
         aria-hidden={!isGitDiffTab}
       >
         <GitDiffStack
+          spaces={spaces}
           tabs={tabs}
           activeId={activeId}
           registerHandle={registerGitDiffHandle}

@@ -49,28 +49,32 @@ const VAR_BY_KEY: Record<keyof TerminalTokens, string> = {
 const KEYS = Object.keys(VAR_BY_KEY) as (keyof TerminalTokens)[];
 
 let probe: HTMLDivElement | null = null;
+let colors: Map<keyof TerminalTokens, HTMLSpanElement> | null = null;
 
-function getProbe(): HTMLDivElement {
-  if (probe?.isConnected) return probe;
+function getColorProbes(): Map<keyof TerminalTokens, HTMLSpanElement> {
+  if (probe?.isConnected && colors) return colors;
   const el = document.createElement("div");
   el.setAttribute("aria-hidden", "true");
   el.style.cssText =
     "position:absolute;visibility:hidden;pointer-events:none;contain:strict;width:0;height:0;";
-  document.body.appendChild(el);
+  const next = new Map<keyof TerminalTokens, HTMLSpanElement>();
+  for (const key of KEYS) {
+    const color = document.createElement("span");
+    color.style.color = `var(${VAR_BY_KEY[key]})`;
+    el.appendChild(color);
+    next.set(key, color);
+  }
   probe = el;
-  return el;
-}
-
-function resolve(el: HTMLDivElement, varName: string): string {
-  el.style.color = `var(${varName})`;
-  return getComputedStyle(el).color;
+  colors = next;
+  document.body.appendChild(el);
+  return next;
 }
 
 export function readTerminalTokens(): TerminalTokens {
-  const el = getProbe();
+  const probes = getColorProbes();
   const out = {} as TerminalTokens;
-  for (const k of KEYS) {
-    out[k] = resolve(el, VAR_BY_KEY[k]);
+  for (const [key, element] of probes) {
+    out[key] = getComputedStyle(element).color;
   }
   return out;
 }

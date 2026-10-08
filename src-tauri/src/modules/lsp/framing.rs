@@ -4,6 +4,7 @@ use std::fmt;
 
 // Cap so a misbehaving server can't make us buffer unbounded data.
 const MAX_CONTENT_LEN: usize = 64 * 1024 * 1024;
+const MAX_HEADER_LEN: usize = 16 * 1024;
 const HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -12,6 +13,7 @@ pub enum FramingError {
     InvalidContentLength(String),
     ContentTooLarge(usize),
     InvalidUtf8,
+    HeaderTooLarge,
 }
 
 impl fmt::Display for FramingError {
@@ -20,9 +22,13 @@ impl fmt::Display for FramingError {
             Self::MissingContentLength => write!(f, "lsp frame missing Content-Length header"),
             Self::InvalidContentLength(v) => write!(f, "lsp frame invalid Content-Length: {v}"),
             Self::ContentTooLarge(n) => {
-                write!(f, "lsp frame Content-Length {n} exceeds cap {MAX_CONTENT_LEN}")
+                write!(
+                    f,
+                    "lsp frame Content-Length {n} exceeds cap {MAX_CONTENT_LEN}"
+                )
             }
             Self::InvalidUtf8 => write!(f, "lsp frame payload is not valid UTF-8"),
+            Self::HeaderTooLarge => write!(f, "lsp frame headers exceed cap {MAX_HEADER_LEN}"),
         }
     }
 }
@@ -56,6 +62,9 @@ impl FrameDecoder {
                 Phase::Headers { scan_from } => {
                     match find_terminator(&self.buf, scan_from) {
                         Some(header_end) => {
+                            if header_end > MAX_HEADER_LEN {
+                                return Err(FramingError::HeaderTooLarge);
+                            }
                             let len = parse_content_length(&self.buf[..header_end])?;
                             if len > MAX_CONTENT_LEN {
                                 return Err(FramingError::ContentTooLarge(len));
@@ -64,9 +73,15 @@ impl FrameDecoder {
                             self.phase = Phase::Body { len };
                         }
                         None => {
+                            if self.buf.len() > MAX_HEADER_LEN + HEADER_TERMINATOR.len() - 1 {
+                                return Err(FramingError::HeaderTooLarge);
+                            }
                             // Terminator may straddle this chunk and the next.
                             self.phase = Phase::Headers {
-                                scan_from: self.buf.len().saturating_sub(HEADER_TERMINATOR.len() - 1),
+                                scan_from: self
+                                    .buf
+                                    .len()
+                                    .saturating_sub(HEADER_TERMINATOR.len() - 1),
                             };
                             return Ok(out);
                         }
@@ -117,5 +132,3 @@ fn parse_content_length(headers: &[u8]) -> Result<usize, FramingError> {
     }
     Err(FramingError::MissingContentLength)
 }
-
-

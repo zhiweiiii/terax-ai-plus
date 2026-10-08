@@ -56,6 +56,7 @@ fn git_non_ignored_names(dir: &Path, show_hidden: bool) -> HashSet<String> {
         .follow_links(false)
         .build()
         .flatten()
+        .filter(|entry| entry.depth() == 1)
         .filter_map(|d| d.file_name().to_str().map(str::to_string))
         .collect()
 }
@@ -138,10 +139,7 @@ pub async fn fs_read_dir(
     git_decorations: Option<bool>,
     workspace: Option<WorkspaceEnv>,
 ) -> Result<Vec<DirEntry>, String> {
-    blocking(move || {
-        fs_read_dir_impl(path, show_hidden, git_decorations, workspace)
-    })
-    .await
+    blocking(move || fs_read_dir_impl(path, show_hidden, git_decorations, workspace)).await
 }
 
 pub fn fs_read_dir_impl(
@@ -267,5 +265,3 @@ pub fn list_subdirs_impl(
     dirs.sort_by(|a, b| natural_cmp(a, b));
     Ok(dirs)
 }
-
-

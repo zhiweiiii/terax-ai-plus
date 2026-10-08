@@ -12,7 +12,7 @@ export type LspPreset = {
   env?: Record<string, string>;
   maxMemoryMb?: number;
   /** Absent for user-defined servers. */
-  install?: { command: string; docsUrl: string };
+  install?: { command?: string; docsUrl: string };
 };
 
 export const LSP_PRESETS: LspPreset[] = [
@@ -116,7 +116,6 @@ export const LSP_PRESETS: LspPreset[] = [
       ".clangd",
     ],
     install: {
-      command: "brew install llvm",
       docsUrl: "https://clangd.llvm.org/installation",
     },
   },
@@ -149,7 +148,6 @@ export const LSP_PRESETS: LspPreset[] = [
       },
     },
     install: {
-      command: "brew install jdtls",
       docsUrl: "https://github.com/eclipse-jdtls/eclipse.jdt.ls#installation",
     },
   },
@@ -161,7 +159,6 @@ export const LSP_PRESETS: LspPreset[] = [
     languages: { zig: "zig" },
     rootMarkers: ["build.zig"],
     install: {
-      command: "brew install zls",
       docsUrl: "https://zigtools.org/zls/install/",
     },
   },
@@ -173,7 +170,6 @@ export const LSP_PRESETS: LspPreset[] = [
     languages: { lua: "lua" },
     rootMarkers: [".luarc.json", ".luarc.jsonc"],
     install: {
-      command: "brew install lua-language-server",
       docsUrl: "https://luals.github.io/#install",
     },
   },
@@ -293,7 +289,6 @@ export const LSP_PRESETS: LspPreset[] = [
     languages: { swift: "swift" },
     rootMarkers: ["Package.swift"],
     install: {
-      command: "xcode-select --install",
       docsUrl: "https://github.com/swiftlang/sourcekit-lsp",
     },
   },
@@ -339,11 +334,4 @@ export function serverForLanguage(
     if (fresh) return fresh;
   }
   return candidates[0];
-}
-
-export function serverById(
-  id: string,
-  custom: LspCustomServer[],
-): LspPreset | null {
-  return allServers(custom).find((p) => p.id === id) ?? null;
 }

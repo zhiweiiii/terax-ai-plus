@@ -7,9 +7,9 @@ use std::time::Duration;
 use serde::Serialize;
 use shared_child::SharedChild;
 
-use crate::modules::workspace::{authorize_spawn_cwd, WorkspaceEnv, WorkspaceRegistry};
 #[cfg(windows)]
 use crate::modules::workspace::validate_wsl_distro_name;
+use crate::modules::workspace::{authorize_spawn_cwd, WorkspaceEnv, WorkspaceRegistry};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 300;
@@ -57,12 +57,9 @@ pub async fn shell_run_command(
 
     // The blocking spawn + wait runs on a worker thread so the Tauri async
     // runtime stays unblocked.
-    let (tx, rx) = mpsc::channel::<Result<CommandOutput, String>>();
-    thread::spawn(move || {
-        let _ = tx.send(run_blocking(trimmed, cwd_path, workspace, dur));
-    });
-
-    rx.recv().map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || run_blocking(trimmed, cwd_path, workspace, dur))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 fn run_blocking(
@@ -84,6 +81,12 @@ fn run_blocking(
         log::warn!("shell_run_command spawn failed: {e}");
         e.to_string()
     })?);
+    let process_job =
+        crate::modules::proc::job::ProcessJob::create_for(child.id()).map_err(|e| {
+            let _ = child.kill();
+            let _ = child.wait();
+            e.to_string()
+        })?;
     let mut stdout_pipe = child.take_stdout().ok_or_else(|| {
         let _ = child.kill();
         "no stdout pipe".to_string()
@@ -102,15 +105,23 @@ fn run_blocking(
         let _ = tx.send(waiter.wait());
     });
 
-    let (exit_code, timed_out) = match rx.recv_timeout(dur) {
+    let waited = rx.recv_timeout(dur);
+    drop(process_job);
+    let (exit_code, timed_out) = match waited {
         Ok(Ok(status)) => (status.code(), false),
-        Ok(Err(e)) => return Err(e.to_string()),
+        Ok(Err(e)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.to_string());
+        }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             let _ = child.kill();
             let _ = child.wait();
             (None, true)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            let _ = child.wait();
             return Err("shell wait thread disconnected".into());
         }
     };
@@ -156,7 +167,7 @@ pub(crate) fn build_oneshot_command(
             .map(|s| s.eq_ignore_ascii_case("cmd.exe"))
             .unwrap_or(false);
         if is_cmd {
-            cmd.arg("/C").arg(command);
+            return Err("PowerShell is required for background shell commands".into());
         } else {
             cmd.arg("-NoProfile").arg("-Command").arg(command);
         }
@@ -187,5 +198,3 @@ fn drain<R: Read>(reader: &mut R) -> (Vec<u8>, bool) {
     }
     (out, truncated)
 }
-
-

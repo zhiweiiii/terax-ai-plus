@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::time::UNIX_EPOCH;
-use std::{fs, io::Write};
+use std::{
+    fs,
+    io::{Read, Write},
+};
 
 use serde::Serialize;
 use tauri::Emitter;
@@ -60,12 +63,16 @@ pub async fn fs_read_file(
     workspace: Option<WorkspaceEnv>,
     force: Option<bool>,
 ) -> Result<ReadResult, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    read_file_sync(&resolve_path(&path, &workspace), force.unwrap_or(false))
+    super::blocking(move || {
+        let workspace = WorkspaceEnv::from_option(workspace);
+        read_file_sync(&resolve_path(&path, &workspace), force.unwrap_or(false))
+    })
+    .await
 }
 
 fn read_file_sync(p: &Path, force: bool) -> Result<ReadResult, String> {
-    let meta = std::fs::metadata(p).map_err(|e| {
+    let file = fs::File::open(p).map_err(|e| e.to_string())?;
+    let meta = file.metadata().map_err(|e| {
         log::debug!("fs_read_file stat({}) failed: {e}", p.display());
         e.to_string()
     })?;
@@ -80,10 +87,16 @@ fn read_file_sync(p: &Path, force: bool) -> Result<ReadResult, String> {
         return Ok(ReadResult::TooLarge { size, limit });
     }
 
-    let bytes = std::fs::read(p).map_err(|e| {
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(limit + 1).read_to_end(&mut bytes).map_err(|e| {
         log::debug!("fs_read_file read({}) failed: {e}", p.display());
         e.to_string()
     })?;
+
+    let size = bytes.len() as u64;
+    if size > limit {
+        return Ok(ReadResult::TooLarge { size, limit });
+    }
 
     // Null-byte sniff on the first chunk. Not perfect (misses UTF-16 BOM
     // cases) but catches the common "this is a PNG" mistake cheaply.
@@ -105,19 +118,33 @@ fn read_file_sync(p: &Path, force: bool) -> Result<ReadResult, String> {
 #[derive(Serialize, Clone)]
 struct FileWrittenEvent {
     path: String,
+    workspace: WorkspaceEnv,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
 }
 
 /// Atomic write via O_EXCL tempfile in the target's parent, then rename.
 /// The random suffix is what blocks pre-staged symlink attacks.
-fn write_atomic(target: &Path, content: &[u8]) -> std::io::Result<()> {
+fn write_atomic(
+    target: &Path,
+    content: &[u8],
+    expected_mtime: Option<u64>,
+    permissions: Option<fs::Permissions>,
+) -> std::io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
     let mut tmp = NamedTempFile::new_in(parent)?;
+    if let Some(permissions) = permissions {
+        tmp.as_file().set_permissions(permissions)?;
+    }
     tmp.as_file_mut().write_all(content)?;
     tmp.as_file_mut().sync_all()?;
+    if let Some(expected) = expected_mtime {
+        if mtime_millis(&fs::metadata(target)?) != expected {
+            return Err(std::io::Error::other("file changed on disk before save"));
+        }
+    }
     tmp.persist(target).map_err(|e| e.error)?;
     Ok(())
 }
@@ -130,31 +157,50 @@ pub async fn fs_write_file(
     content: String,
     workspace: Option<WorkspaceEnv>,
     source: Option<String>,
+    expected_mtime: Option<u64>,
     app: tauri::AppHandle,
 ) -> Result<u64, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    let target = resolve_path(&path, &workspace);
-    let original_permissions = fs::metadata(&target).ok().map(|m| m.permissions());
-    write_atomic(&target, content.as_bytes()).map_err(|e| {
-        log::warn!("fs_write_file({}) failed: {e}", target.display());
-        e.to_string()
-    })?;
+    super::blocking(move || {
+        static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = WRITE_LOCK
+            .lock()
+            .map_err(|_| "file write state unavailable")?;
+        let workspace = WorkspaceEnv::from_option(workspace);
+        let mut target = resolve_path(&path, &workspace);
+        if fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            target = fs::canonicalize(&target).map_err(|error| error.to_string())?;
+        }
+        let original_permissions = fs::metadata(&target).ok().map(|m| m.permissions());
+        if original_permissions
+            .as_ref()
+            .is_some_and(fs::Permissions::readonly)
+        {
+            return Err("file is read-only".into());
+        }
+        write_atomic(
+            &target,
+            content.as_bytes(),
+            expected_mtime,
+            original_permissions,
+        )
+        .map_err(|e| {
+            log::warn!("fs_write_file({}) failed: {e}", target.display());
+            e.to_string()
+        })?;
 
-    if let Some(perms) = original_permissions {
-        let _ = fs::set_permissions(&target, perms);
-    }
-    let mtime = fs::metadata(&target)
-        .map(|m| mtime_millis(&m))
-        .unwrap_or(0);
-    let _ = app.emit(
-        "fs:file-written",
-        FileWrittenEvent {
-            path: path.clone(),
-            source,
-        },
-    );
+        let mtime = fs::metadata(&target).map(|m| mtime_millis(&m)).unwrap_or(0);
+        let _ = app.emit(
+            "fs:file-written",
+            FileWrittenEvent {
+                path: path.clone(),
+                workspace,
+                source,
+            },
+        );
 
-    Ok(mtime)
+        Ok(mtime)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -162,33 +208,37 @@ pub async fn fs_canonicalize(
     path: String,
     workspace: Option<WorkspaceEnv>,
 ) -> Result<String, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    let p = resolve_path(&path, &workspace);
-    let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
-    Ok(super::to_canon(&canon))
+    super::blocking(move || {
+        let workspace = WorkspaceEnv::from_option(workspace);
+        let p = resolve_path(&path, &workspace);
+        let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
+        Ok(super::to_canon(&canon))
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    let p = resolve_path(&path, &workspace);
-    let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
-    // fs::metadata follows symlinks, so the link check needs symlink_metadata.
-    let kind = if std::fs::symlink_metadata(&p)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        StatKind::Symlink
-    } else if meta.is_dir() {
-        StatKind::Dir
-    } else {
-        StatKind::File
-    };
-    Ok(FileStat {
-        size: meta.len(),
-        mtime: mtime_millis(&meta),
-        kind,
+    super::blocking(move || {
+        let workspace = WorkspaceEnv::from_option(workspace);
+        let p = resolve_path(&path, &workspace);
+        let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
+        // fs::metadata follows symlinks, so the link check needs symlink_metadata.
+        let kind = if std::fs::symlink_metadata(&p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            StatKind::Symlink
+        } else if meta.is_dir() {
+            StatKind::Dir
+        } else {
+            StatKind::File
+        };
+        Ok(FileStat {
+            size: meta.len(),
+            mtime: mtime_millis(&meta),
+            kind,
+        })
     })
+    .await
 }
-
-

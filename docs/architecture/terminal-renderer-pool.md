@@ -10,7 +10,7 @@
 
 ## 槽位生命周期
 
-- `POOL_MAX_SIZE` 是 5。每个槽位拥有一个 xterm `Terminal`、`FitAddon`、`SerializeAddon`，以及可选的 `WebglAddon`。
+- `POOL_MAX_SIZE` 是 5，作为普通槽位预算与 WebGL 上下文硬上限。每个槽位拥有一个 xterm `Terminal`、`FitAddon`、`SerializeAddon`，以及可选的 `WebglAddon`。
 - 槽位按需创建，绑定时分配给某个 leaf。
 - `releaseSlot` 把槽位从 leaf 上解绑。leaf 空闲的话，槽位会被停靠（`display:none`），xterm 停止渲染但继续解析 PTY 字节。
 - 空闲槽位过了宽限期可能被回收，以控制池的大小。
@@ -28,7 +28,8 @@ leaf 重新可见时，`acquireSlot` 按顺序找：
 1. 已经绑在这个 leaf 上的槽位。
 2. 为这个 leaf 保留着的槽位（`retainedLeafId === leafId`）：快速路径，不需要回放快照。
 3. 干净的空闲槽位。
-4. 池已满时，淘汰得分最低的槽位。淘汰前会先用 `SerializeAddon` 把被保留的缓冲区序列化成快照，再抢走槽位。
+4. 池已满时，只从非忙碌、非 alternate 的槽位中淘汰得分最低者；保留的空闲缓冲区先序列化。
+5. 所有槽位都受保护时额外创建活网格，不破坏运行中 TUI。WebGL 仍最多五个，优先回收停靠上下文，其余可见网格使用 DOM 渲染。额外内存随用户同时运行的终端数量增加，不能以破坏其输出换取固定网格数量。
 
 ## DormantRing
 
@@ -44,6 +45,8 @@ leaf 重新可见时，`acquireSlot` 按顺序找：
 
 ## 快速路径与快照回放
 
+仅手机首屏调用传入 2 Mi 字符预算，序列化通过公开 scrollback 参数限制历史，必要时重试只取当前屏；连当前屏也过大时返回无首屏。存储快照和 dormant 输出合计也检查预算，不截断控制序列。桌面停靠/恢复调用不传手机预算，既有策略不变。
+
 如果这个 leaf 还有保留着的槽位，`bindSlot` 会跳过 `term.clear()` / `term.reset()`，直接把 DormantRing 排进活的缓冲区，省掉重新渲染一大张快照。
 
 如果只剩快照，`bindSlot` 清空终端、调整尺寸、写入快照，再排空 ring。对 alt 屏 TUI 则跳过快照，改为发一个 SIGWINCH，让 TUI 自己从头重绘：它的输出是增量的光标定位指令，叠在旧快照上没有意义。
@@ -54,13 +57,15 @@ WebGL addon 在槽位可见时创建，停靠一段时间后回收。休眠唤�
 
 ## 不变量
 
-- 池不能无限增长，上限是 `POOL_MAX_SIZE`。
+- 普通复用预算与 WebGL 上限为 `POOL_MAX_SIZE`，忙碌网格按实际同时运行会话保留；空闲网格经过宽限期回收。
 - 正在执行命令或处于 alt 屏的 leaf，绝不序列化、绝不淘汰。
 - 隐藏但忙碌的 leaf，保留活的网格并停靠（`display:none`）。
 - 隐藏且空闲的 leaf 释放槽位，但缓冲区继续解析字节。
 - DormantRing 只为完全没有槽位的 leaf 缓冲。
 
 ## 另见
+
+2026-10-03 真实 Edge 加载真实 xterm 和池实现验证：五个忙碌网格后创建第六个保留全部旧网格，不序列化或淘汰；第七个替换闲置第六个。实际 WebGL 上下文为五个。外部 IPC 使用模拟，不代表 Codex 在用户设备上的最终交互验收。
 
 - [`TERAX.md`](../../TERAX.md) - 架构事实来源
 - [`docs/README.md`](../README.md) - 贡献者指南索引

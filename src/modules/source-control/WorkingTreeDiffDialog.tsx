@@ -7,11 +7,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { type GitDiffResult, native } from "@/lib/native";
+import { native } from "@/lib/native";
 import { FileDiffIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useEffect, useState } from "react";
-import { errorToast } from "@/lib/errorToast";
+import { useCallback } from "react";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
+import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 
 /** Working-tree diff of the current branch, read-only in a scrollable panel. */
 export function WorkingTreeDiffDialog({
@@ -27,35 +28,27 @@ export function WorkingTreeDiffDialog({
   repoName: string;
   refName: string;
 }) {
-  const [diff, setDiff] = useState<GitDiffResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(true);
-
-  const load = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    setDiff(null);
-    try {
-      setDiff(await native.gitDiffWithRef(repoRoot, refName));
-    } catch (e) {
-      setError(String(e));
-      errorToast(`Could not diff ${refName} against the working tree`, e);
-    } finally {
-      setBusy(false);
-    }
-  }, [repoRoot, refName]);
-
-  useEffect(() => {
-    if (open) void load();
-  }, [open, load]);
-
-  // Drop stale results while closed so the next open starts clean.
-  useEffect(() => {
-    if (open) return;
-    setDiff(null);
-    setError(null);
-    setBusy(true);
-  }, [open]);
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const run = useCallback(
+    async () => [
+      await native.gitDiffWithRef(repoRoot, refName, null, workspace),
+    ],
+    [repoRoot, refName, workspace],
+  );
+  const {
+    results,
+    error,
+    loading: busy,
+    retry,
+  } = useAsyncQuery({
+    enabled: open,
+    term: "",
+    minLength: 0,
+    debounceMs: 0,
+    run,
+    scopeKey: JSON.stringify([repoRoot, refName, workspaceScopeKey(workspace)]),
+  });
+  const diff = results[0];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -78,7 +71,7 @@ export function WorkingTreeDiffDialog({
           <div className="grid gap-2 py-6 text-center">
             <div className="px-4 text-xs text-destructive">{error}</div>
             <div className="flex justify-center">
-              <Button variant="ghost" size="sm" onClick={() => void load()}>
+              <Button variant="ghost" size="sm" onClick={retry}>
                 重试
               </Button>
             </div>

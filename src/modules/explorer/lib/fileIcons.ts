@@ -693,7 +693,7 @@ const fileIcons: FileIcons = {
     ],
   },
   "eslint-ignore": {
-    fileNames: [".eslintignore", ".eslintcache,"],
+    fileNames: [".eslintignore", ".eslintcache"],
   },
   eslint: {
     fileNames: [
@@ -1183,7 +1183,7 @@ const fileIcons: FileIcons = {
     fileNames: [
       "knip.json",
       "knip.jsonc",
-      ".knip.jsonc",
+      ".knip.json",
       ".knip.jsonc",
       "knip.ts",
       "knip.js",
@@ -1703,11 +1703,11 @@ const fileIcons: FileIcons = {
   },
   puppeteer: {
     fileNames: [
-      ".puppeteerrc.cjs,",
-      ".puppeteerrc.js,",
+      ".puppeteerrc.cjs",
+      ".puppeteerrc.js",
       ".puppeteerrc",
-      ".puppeteerrc.json,",
-      ".puppeteerrc.yaml,",
+      ".puppeteerrc.json",
+      ".puppeteerrc.yaml",
       "puppeteer.config.js",
       "puppeteer.config.cjs",
     ],
@@ -2654,28 +2654,18 @@ const fileIcons: FileIcons = {
   },
 };
 
-const { languageIds, fileExtensions, fileNames } = Object.entries(
-  fileIcons,
-).reduce(
-  ({ languageIds, fileExtensions, fileNames }, [name, icon]) => ({
-    languageIds: {
-      ...languageIds,
-      ...icon.languageIds?.reduce((a, c) => ({ ...a, [c]: name }), {}),
-    },
-    fileExtensions: {
-      ...fileExtensions,
-      ...icon.fileExtensions?.reduce((a, c) => ({ ...a, [c]: name }), {}),
-    },
-    fileNames: {
-      ...fileNames,
-      ...icon.fileNames?.reduce((a, c) => ({ ...a, [c]: name }), {}),
-    },
-  }),
-  {
-    languageIds: {},
-    fileExtensions: {},
-    fileNames: {},
-  },
-);
+const languageIds: Record<string, string> = Object.create(null);
+const fileExtensions: Record<string, string> = Object.create(null);
+const fileNames: Record<string, string> = Object.create(null);
+
+for (const [name, icon] of Object.entries(fileIcons)) {
+  for (const id of icon.languageIds ?? []) languageIds[id] = name;
+  for (const ext of icon.fileExtensions ?? []) {
+    fileExtensions[ext.toLowerCase()] = name;
+  }
+  for (const filename of icon.fileNames ?? []) {
+    fileNames[filename.toLowerCase()] = name;
+  }
+}
 
 export { fileExtensions, fileIcons, fileNames, languageIds };

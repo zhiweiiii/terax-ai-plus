@@ -5,7 +5,7 @@
 #   1. 把被占用的旧产物改名挪开 (不关闭正在运行的 Terax)
 #   2. 类型检查
 #   3. 编译 CLI + 前端 + Rust 后端
-#   4. 生成 NSIS / MSI 安装包
+#   4. 生成 NSIS 安装包
 #
 # 打包过程中可以继续用正在开着的 Terax, 它跑的还是旧版本,
 # 想用新版本自己重启一下就行.
@@ -55,7 +55,7 @@ foreach ($dir in $outDirs) {
         if ($f.Name -like "*.locked-*") {
             # 上次挪开的, 现在没人占了就删掉
             if (-not (Test-FileLocked $f.FullName)) {
-                Remove-Item $f.FullName -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
             }
             continue
         }
@@ -68,7 +68,7 @@ if ($locked) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
     foreach ($f in $locked) {
         try {
-            Rename-Item $f.FullName -NewName "$($f.Name).locked-$stamp" -Force -ErrorAction Stop
+            Rename-Item -LiteralPath $f.FullName -NewName "$($f.Name).locked-$stamp" -ErrorAction Stop
             Write-Host "  已挪开 $($f.Name)" -ForegroundColor Gray
         } catch {
             Write-Host "  挪不开 $($f.FullName)" -ForegroundColor Red
@@ -81,40 +81,32 @@ if ($locked) {
 }
 
 $running = Get-Process -Name "terax-prod" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -like "$root*" }
+    Where-Object { $_.Path -and $_.Path.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase) }
 if ($running) {
     Write-Host "  正式版 Terax 保持运行 ($($running.Count) 个), 跑的仍是旧版本" -ForegroundColor Gray
 }
 
 Step "类型检查"
-& npx tsc --noEmit
+& pnpm check-types
 if ($LASTEXITCODE -ne 0) {
     Write-Host "类型检查失败, 停止打包" -ForegroundColor Red
     exit 1
 }
 Write-Host "  通过" -ForegroundColor Green
 
-Step "构建手机版 Web 页面"
-& node scripts/build-web.mjs
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Web 页面构建失败, 停止打包" -ForegroundColor Red
-    exit 1
-}
-Write-Host "  完成" -ForegroundColor Green
-
 Step "编译打包 (CLI + 前端 + Rust, 大约 5-6 分钟)"
 & pnpm tauri build
-
-# tauri build 最后会因为缺少更新签名私钥而报错退出,
-# 但安装包这时候已经生成好了 -- 所以按产物是否存在来判断成败.
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "编译打包失败，不使用旧产物判断成功" -ForegroundColor Red
+    exit 1
+}
 $version = (Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json).version
 $exe   = $releaseExe
 $nsis  = Join-Path $root "src-tauri\target\release\bundle\nsis\Terax_${version}_x64-setup.exe"
-$msi   = Join-Path $root "src-tauri\target\release\bundle\msi\Terax_${version}_x64_en-US.msi"
 
 Step "产物"
 $ok = $true
-foreach ($p in @($exe, $nsis, $msi)) {
+foreach ($p in @($exe, $nsis)) {
     if (Test-Path $p) {
         $size = [math]::Round((Get-Item $p).Length / 1MB, 1)
         $time = (Get-Item $p).LastWriteTime.ToString("HH:mm:ss")

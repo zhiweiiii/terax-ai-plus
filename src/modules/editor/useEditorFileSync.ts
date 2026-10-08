@@ -1,6 +1,10 @@
-import { parentDir, watchAdd, watchRemove } from "@/modules/explorer/lib/watch";
+import { pathIdentity } from "@/lib/pathIdentity";
 import { useAppEvent } from "@/modules/events";
+import { parentDir, watchAdd } from "@/modules/explorer/lib/watch";
+import type { MarkdownPreviewPaneHandle } from "@/modules/markdown/MarkdownPreviewPane";
+import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import type { Tab } from "@/modules/tabs";
+import { type WorkspaceEnv, workspaceScopeKey } from "@/modules/workspace";
 import { type RefObject, useEffect, useRef } from "react";
 import type { EditorPaneHandle } from "./EditorPane";
 
@@ -10,8 +14,10 @@ const POLL_INTERVAL_MS = 1500;
 
 type Params = {
   tabs: Tab[];
+  spaces: readonly SpaceMeta[];
   tabsRef: RefObject<Tab[]>;
   editorRefs: RefObject<Map<number, EditorPaneHandle>>;
+  markdownRefs: RefObject<Map<number, MarkdownPreviewPaneHandle>>;
 };
 
 /**
@@ -19,67 +25,104 @@ type Params = {
  * writes and fs-watch events, and maintains the watch set for the directories
  * of open editor files.
  */
-export function useEditorFileSync({ tabs, tabsRef, editorRefs }: Params) {
+export function useEditorFileSync({
+  tabs,
+  spaces,
+  tabsRef,
+  editorRefs,
+  markdownRefs,
+}: Params) {
+  const handle = (tab: Tab) =>
+    tab.kind === "editor"
+      ? editorRefs.current.get(tab.id)
+      : tab.kind === "markdown"
+        ? markdownRefs.current.get(tab.id)
+        : undefined;
   useAppEvent("fs:written", (payload) => {
-    if (payload.source === "editor") return;
-    const normalizedPath = payload.path.replace(/\\/g, "/");
+    const normalizedPath = pathIdentity(payload.path);
     const currentTabs = tabsRef.current;
     for (const t of currentTabs) {
-      if (t.kind !== "editor") continue;
-      if (t.path.replace(/\\/g, "/") === normalizedPath) {
-        editorRefs.current.get(t.id)?.reload();
+      if (t.kind !== "editor" && t.kind !== "markdown") continue;
+      if (payload.workspace) {
+        const space = spaces.find((item) => item.id === t.spaceId);
+        if (
+          !space ||
+          workspaceScopeKey(space.env) !== workspaceScopeKey(payload.workspace)
+        )
+          continue;
+      }
+      if (payload.source === "editor" && t.kind === "editor") continue;
+      if (pathIdentity(t.path) === normalizedPath) {
+        handle(t)?.reload();
       }
     }
   });
 
-  const editorWatchRef = useRef<Set<string>>(new Set());
+  const editorWatchRef = useRef<Map<string, () => void>>(new Map());
+  useEffect(
+    () => () => {
+      for (const release of editorWatchRef.current.values()) release();
+      editorWatchRef.current = new Map();
+    },
+    [],
+  );
   useEffect(() => {
-    const want = new Set<string>();
-    for (const t of tabs) if (t.kind === "editor") want.add(parentDir(t.path));
+    const want = new Map<string, { dir: string; workspace: WorkspaceEnv }>();
+    for (const t of tabs) {
+      if ((t.kind !== "editor" && t.kind !== "markdown") || t.cold) continue;
+      const space = spaces.find((item) => item.id === t.spaceId);
+      if (!space) continue;
+      const dir = parentDir(t.path);
+      want.set(`${workspaceScopeKey(space.env)}\0${dir}`, {
+        dir,
+        workspace: space.env,
+      });
+    }
     const prev = editorWatchRef.current;
-    const toAdd = [...want].filter((d) => !prev.has(d));
-    const toRemove = [...prev].filter((d) => !want.has(d));
-    watchAdd(toAdd);
-    watchRemove(toRemove);
-    editorWatchRef.current = want;
-  }, [tabs]);
+    for (const [dir, release] of prev) {
+      if (!want.has(dir)) {
+        release();
+        prev.delete(dir);
+      }
+    }
+    for (const [key, { dir, workspace }] of want) {
+      if (!prev.has(key)) prev.set(key, watchAdd([dir], workspace));
+    }
+  }, [tabs, spaces]);
 
   useAppEvent("fs:changed", (payload) => {
-    const changed = new Set(payload.paths.map((p) => p.replace(/\\/g, "/")));
+    const changed = new Set(payload.paths.map(pathIdentity));
     for (const t of tabsRef.current) {
-      if (t.kind !== "editor") continue;
-      if (changed.has(t.path.replace(/\\/g, "/"))) {
-        editorRefs.current.get(t.id)?.reload();
+      if (t.kind !== "editor" && t.kind !== "markdown") continue;
+      if (payload.workspace) {
+        const space = spaces.find((item) => item.id === t.spaceId);
+        if (
+          !space ||
+          workspaceScopeKey(space.env) !== workspaceScopeKey(payload.workspace)
+        )
+          continue;
+      }
+      if (payload.rescan) {
+        handle(t)?.revalidate();
+        continue;
+      }
+      if (changed.has(pathIdentity(t.path))) {
+        handle(t)?.reload();
       }
     }
   });
 
-  // Backstop for edits the watch above never reports. It misses whenever
-  // fs_watch_add was refused (the directory is outside every authorized
-  // workspace root, and both the command and the invoke swallow that), and
-  // whenever the tab's path differs in case from the canonical path notify
-  // echoes back, since the lookup is an exact string match.
-  //
-  // Re-reading on window focus and on tab activation covers all of those:
-  // an agent editing files in another window is exactly the case where focus
-  // returns afterwards. reload() is a no-op while the buffer is dirty and
-  // skips the re-render when disk already matches, so this stays cheap.
-  // Periodic sweep. The watch above is best-effort and silently misses whole
-  // classes of edits: fs_watch_add is refused for any directory outside an
-  // authorized workspace root (both the command and the invoke swallow that),
-  // and the event lookup is an exact string match, so a tab path whose case
-  // differs from the canonical path notify echoes back never matches.
-  //
-  // revalidate() stats first and only re-reads when the mtime moved, and it
-  // returns early while the buffer is dirty, so the steady-state cost is one
-  // stat per mounted pane per tick.
+  // Watches are best-effort outside authorized roots or after native IO failure.
+  // Visible panes stat first; dirty buffers never reload automatically.
   useEffect(() => {
     const timer = setInterval(() => {
       if (document.hidden) return;
       for (const t of tabsRef.current) {
         if (t.kind === "editor") editorRefs.current.get(t.id)?.revalidate();
+        else if (t.kind === "markdown")
+          markdownRefs.current.get(t.id)?.revalidate();
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [tabsRef, editorRefs]);
+  }, [tabsRef, editorRefs, markdownRefs]);
 }

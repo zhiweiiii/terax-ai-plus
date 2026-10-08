@@ -3,33 +3,29 @@ use crate::modules::workspace::{resolve_path, WorkspaceEnv};
 
 /// Creates a new empty file. Fails if the file already exists.
 #[tauri::command]
-pub async fn fs_create_file(
-    path: String,
-    workspace: Option<WorkspaceEnv>,
-) -> Result<(), String> {
+pub async fn fs_create_file(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     blocking(move || fs_create_file_impl(path, workspace)).await
 }
 
 pub fn fs_create_file_impl(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
     let p = resolve_path(&path, &workspace);
-    if p.exists() {
-        return Err(format!("already exists: {}", p.display()));
-    }
-    std::fs::write(&p, "").map_err(|e| {
-        log::debug!("fs_create_file_impl({}) failed: {e}", p.display());
-        e.to_string()
-    })
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+        .map(|_| ())
+        .map_err(|e| {
+            log::debug!("fs_create_file_impl({}) failed: {e}", p.display());
+            e.to_string()
+        })
 }
 
 /// Creates a new directory. Fails if the directory already exists.
 /// Parents are created as needed — matches the common "new folder" UX
 /// where typing "a/b/c" creates the full chain.
 #[tauri::command]
-pub async fn fs_create_dir(
-    path: String,
-    workspace: Option<WorkspaceEnv>,
-) -> Result<(), String> {
+pub async fn fs_create_dir(path: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
     blocking(move || fs_create_dir_impl(path, workspace)).await
 }
 
@@ -47,7 +43,11 @@ pub fn fs_create_dir_impl(path: String, workspace: Option<WorkspaceEnv>) -> Resu
 
 /// Renames (or moves) a path. Refuses to overwrite an existing target.
 #[tauri::command]
-pub async fn fs_rename(from: String, to: String, workspace: Option<WorkspaceEnv>) -> Result<(), String> {
+pub async fn fs_rename(
+    from: String,
+    to: String,
+    workspace: Option<WorkspaceEnv>,
+) -> Result<(), String> {
     blocking(move || fs_rename_impl(from, to, workspace)).await
 }
 
@@ -103,7 +103,13 @@ pub fn fs_delete_impl(path: String, workspace: Option<WorkspaceEnv>) -> Result<(
 }
 
 fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    if src.is_dir() {
+    let metadata = std::fs::symlink_metadata(src)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "copying symbolic links is not supported",
+        ));
+    }
+    if metadata.is_dir() {
         std::fs::create_dir(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
@@ -111,7 +117,13 @@ fn copy_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Resu
         }
         Ok(())
     } else {
-        std::fs::copy(src, dst).map(|_| ())
+        let mut input = std::fs::File::open(src)?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dst)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.set_permissions(metadata.permissions())
     }
 }
 
@@ -133,13 +145,20 @@ pub fn fs_copy_impl(
     workspace: Option<WorkspaceEnv>,
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let dest = resolve_path(&dest_dir, &workspace);
+    let dest =
+        std::fs::canonicalize(resolve_path(&dest_dir, &workspace)).map_err(|e| e.to_string())?;
     for source in &sources {
         let src = std::path::PathBuf::from(source);
         let name = src
             .file_name()
             .ok_or_else(|| format!("invalid source: {source}"))?;
         let target = dest.join(name);
+        if src.is_dir() {
+            let canonical = std::fs::canonicalize(&src).map_err(|e| e.to_string())?;
+            if dest.starts_with(&canonical) {
+                return Err("cannot copy a directory into itself".into());
+            }
+        }
         if target.exists() {
             return Err(format!("already exists: {}", target.display()));
         }
@@ -154,5 +173,3 @@ pub fn fs_copy_impl(
     }
     Ok(())
 }
-
-

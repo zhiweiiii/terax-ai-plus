@@ -1,7 +1,12 @@
 import { native } from "@/lib/native";
+import { pathIdentity } from "@/lib/pathIdentity";
 import { useAppEvent } from "@/modules/events";
 import type { SidebarViewId } from "@/modules/sidebar";
 import type { Tab } from "@/modules/tabs";
+import {
+  currentWorkspaceScopeKey,
+  workspaceScopeKey,
+} from "@/modules/workspace/env";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   activeRepositoryContextPath,
@@ -122,38 +127,59 @@ export function useSourceControlContext({
     const pending = pendingRef.current;
     if (inActive) {
       pending.active = true;
-      pending.others.clear();
     } else {
       pending.others.add(repoRoot);
     }
     if (timerRef.current) window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => {
       timerRef.current = 0;
-      if (pending.active) {
-        pending.active = false;
-        pending.others.clear();
-        void effectiveRef.current.refresh({ remote: "never" });
-      } else {
-        const others = [...pending.others];
-        pending.others.clear();
-        for (const root of others) void refreshRepoRef.current(root);
+      const refreshActive = pending.active;
+      pending.active = false;
+      const others = [...pending.others];
+      pending.others.clear();
+      if (refreshActive)
+        void effectiveRef.current
+          .refresh({ remote: "never" })
+          .catch((error) => console.warn("[terax] Git refresh failed:", error));
+      const activeRoot = effectiveRef.current.repo?.repoRoot;
+      for (const root of others) {
+        if (refreshActive && root === activeRoot) continue;
+        if (reposRef.current.some((repo) => repo.repoRoot === root))
+          void refreshRepoRef
+            .current(root)
+            .catch((error) =>
+              console.warn("[terax] Git refresh failed:", error),
+            );
       }
     }, 150);
   };
 
   useAppEvent("fs:changed", (payload) => {
-    const norm = (p: string) => p.replace(/\\/g, "/").toLowerCase();
-    const changed = payload.paths.map(norm);
-    const activeRoot = effectiveRef.current.repo?.repoRoot ?? null;
-    if (activeRoot && changed.some((p) => p.startsWith(norm(activeRoot)))) {
-      scheduleRefresh(true, activeRoot);
+    if (
+      payload.workspace &&
+      workspaceScopeKey(payload.workspace) !== currentWorkspaceScopeKey()
+    )
       return;
+    if (payload.rescan) {
+      const activeRoot = effectiveRef.current.repo?.repoRoot ?? "";
+      scheduleRefresh(true, activeRoot);
+      for (const repo of reposRef.current)
+        if (repo.repoRoot !== activeRoot) scheduleRefresh(false, repo.repoRoot);
+      return;
+    }
+    const norm = pathIdentity;
+    const changed = payload.paths.map(norm);
+    const inside = (path: string, root: string) =>
+      path === root || path.startsWith(`${root.replace(/\/$/, "")}/`);
+    const activeRoot = effectiveRef.current.repo?.repoRoot ?? null;
+    if (activeRoot && changed.some((p) => inside(p, norm(activeRoot)))) {
+      scheduleRefresh(true, activeRoot);
     }
     const activeNorm = activeRoot ? norm(activeRoot) : null;
     for (const repo of reposRef.current) {
       const root = norm(repo.repoRoot);
       if (root === activeNorm) continue;
-      if (changed.some((p) => p.startsWith(root))) {
+      if (changed.some((p) => inside(p, root))) {
         scheduleRefresh(false, repo.repoRoot);
       }
     }

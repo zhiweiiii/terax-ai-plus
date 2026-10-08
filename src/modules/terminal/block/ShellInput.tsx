@@ -10,6 +10,7 @@ import {
   setLeafDraft,
   setLeafInputActivity,
   setLeafInputFocus,
+  setLeafInputPaste,
 } from "../lib/useTerminalSession";
 import { useTerminalFont } from "../lib/useTerminalFont";
 import {
@@ -26,7 +27,7 @@ type Props = {
   leafId: number;
   mode: BlockMode;
   focused: boolean;
-  onSubmit: (text: string) => void;
+  onSubmit: (text: string) => boolean;
   onInterrupt: () => void;
   getCwd: () => string | null;
 };
@@ -84,17 +85,20 @@ export default function ShellInput({
       placeholderText: `Run a command  -  ↑ history  ${fmtShortcut(MOD_KEY, "U")} switch to AI`,
       commandNames: () => commandsRef.current,
       getCwd: () => cbRef.current.getCwd(),
-      onChange: (text) =>
-        setLeafInputActivity(leafIdRef.current, text.length > 0),
+      onChange: (text) => {
+        setLeafDraft(leafIdRef.current, text);
+        setLeafInputActivity(leafIdRef.current, text.length > 0);
+      },
       suggest: historySuggest,
       historyList,
       onSubmit: (text) => {
+        if (cbRef.current.onSubmit(text) === false) return false;
         historyRecord(text);
         const first = text.trim().split(/\s+/)[0];
         if (first && !commandsRef.current.includes(first)) {
           commandsRef.current = [first, ...commandsRef.current];
         }
-        cbRef.current.onSubmit(text);
+        return true;
       },
       onInterrupt: () => cbRef.current.onInterrupt(),
       onEscape: () => clearLeafBlockSelection(leafIdRef.current),
@@ -111,6 +115,14 @@ export default function ShellInput({
   // tabs land with the cursor already in the input.
   useEffect(() => {
     setLeafInputFocus(leafId, focusInput);
+    setLeafInputPaste(leafId, (text) => {
+      const handle = handleRef.current;
+      if (!handle || leafIdRef.current !== leafId) return false;
+      const view = handle.view;
+      view.dispatch(view.state.replaceSelection(text));
+      focusInput();
+      return true;
+    });
     handleRef.current?.setValue(getLeafDraft(leafId));
     requestAnimationFrame(() => {
       if (focusableRef.current && leafIdRef.current === leafId) {
@@ -118,10 +130,11 @@ export default function ShellInput({
       }
     });
     return () => {
-      const value = handleRef.current?.getValue() ?? "";
+      const value = handleRef.current?.getValue() ?? getLeafDraft(leafId);
       setLeafDraft(leafId, value);
       setLeafInputActivity(leafId, value.length > 0);
       setLeafInputFocus(leafId, null);
+      setLeafInputPaste(leafId, null);
     };
   }, [leafId, focusInput]);
 

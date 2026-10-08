@@ -147,7 +147,7 @@ export const LANGUAGES: LanguageDefinition[] = [
     loader: () =>
       Promise.all([
         import("@codemirror/lang-markdown"),
-        import("./markdownExtras"),
+        import("@/modules/editor/lib/markdownExtras"),
       ]).then(([m, extras]) => [
         m.markdown({
           base: m.markdownLanguage,
@@ -225,7 +225,7 @@ export const LANGUAGES: LanguageDefinition[] = [
   {
     name: "Java",
     extensions: ["java"],
-    // Lezer grammar, not the clike stream mode its C/C++/C# neighbours use —
+    // Lezer grammar, not the clike stream mode its C/C++/C# neighbours use;
     // a real tree buys folding and structural indent on top of the highlight.
     loader: () => import("@codemirror/lang-java").then((m) => m.java()),
     userSelectable: true,
@@ -468,7 +468,7 @@ export const LANGUAGES: LanguageDefinition[] = [
     loader: async () => {
       const [{ json }, { colorSwatches }] = await Promise.all([
         import("@codemirror/lang-json"),
-        import("./colorSwatches"),
+        import("@/modules/editor/lib/colorSwatches"),
       ]);
       return [json(), colorSwatches()];
     },

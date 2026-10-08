@@ -8,13 +8,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import {
   Tooltip,
@@ -22,15 +15,13 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { native } from "@/lib/native";
 import { ArrowUp01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useState } from "react";
-import { errorToast } from "@/lib/errorToast";
+import { useEffect, useId, useRef, useState } from "react";
+import { useRepositoryOperation } from "@/modules/source-control/useRepositoryOperation";
 import { DialogSyncProgress } from "./DialogSyncProgress";
 import { parseUpstreamRemote } from "./remoteHelpers";
 import type {
-  GitRemoteEntry,
   PushAdvancedOptions,
   PushAllResult,
   PushPlan,
@@ -78,17 +69,28 @@ export function PushDialog({
   syncProgress,
 }: Props) {
   const [options, setOptions] = useState({ force: false });
-  const [remotes, setRemotes] = useState<Record<string, GitRemoteEntry[]>>({});
-  const [remoteChoice, setRemoteChoice] = useState<Record<string, string>>({});
   // Commit patches currently unfolded, keyed by repo:sha.
   const [expandedDiffs, setExpandedDiffs] = useState<Set<string>>(new Set());
-  const [running, setRunning] = useState(false);
+  const planRef = useRef({ plan, generation: 0 });
+  if (planRef.current.plan !== plan)
+    planRef.current = { plan, generation: planRef.current.generation + 1 };
+  const {
+    busy: running,
+    run,
+    scopeKey,
+  } = useRepositoryOperation(
+    open && !!plan,
+    String(planRef.current.generation),
+  );
+  const forceId = useId();
+  const [failed, setFailed] = useState<PushAllResult["failed"]>([]);
   const [rejected, setRejected] = useState<PushAllResult["rejected"]>([]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Reset confirmation state when its workspace changes.
   useEffect(() => {
     if (!open || !plan) return;
     setOptions({ force: false });
-    setRunning(false);
+    setFailed([]);
     setRejected([]);
     setExpandedDiffs(
       new Set(
@@ -97,100 +99,64 @@ export function PushDialog({
         ),
       ),
     );
-    const defaults: Record<string, string> = {};
-    for (const entry of plan.entries) {
-      defaults[entry.repoRoot] =
-        entry.remote ??
-        parseUpstreamRemote(entry.upstream) ??
-        "origin";
-    }
-    setRemoteChoice(defaults);
-    setRemotes({});
-    for (const root of plan.entries.map((e) => e.repoRoot)) {
-      native
-        .gitRemoteList(root)
-        .then((list) => {
-          setRemotes((current) => ({ ...current, [root]: list }));
-          setRemoteChoice((current) => {
-            const chosen = current[root];
-            if (chosen && list.some((r) => r.name === chosen)) {
-              return current;
-            }
-            const upstream = defaults[root];
-            const fallback = list.some((r) => r.name === upstream)
-              ? upstream
-              : (list[0]?.name ?? chosen ?? "");
-            return { ...current, [root]: fallback };
-          });
-        })
-        .catch(() => {
-          setRemotes((current) => ({ ...current, [root]: [] }));
-        });
-    }
-  }, [open, plan]);
+  }, [open, plan, scopeKey]);
 
   const count = plan?.entries.length ?? 0;
   const anyForceNeeded =
     plan?.entries.some((e) => (e.behind ?? 0) > 0) ?? false;
-  const canPush = count > 0 && !running;
+  const canPush = count > 0 && !running && failed.length === 0;
 
   const confirmPush = async () => {
-    if (!plan || running) return;
-    setRunning(true);
-    setRejected([]);
-    try {
-      const confirmed: PushPlan = {
-        ...plan,
-        entries: plan.entries.map((entry) => ({
-          ...entry,
-          remote: remoteChoice[entry.repoRoot] || undefined,
-        })),
-      };
-      const result = await onPush(confirmed, {
-        ...options,
-        noVerify: false,
-        tags: "none",
-      });
-      setRejected(result.rejected);
-      if (result.rejected.length === 0) {
-        onOpenChange(false);
-      }
-    } catch (error) {
-      errorToast("Push 失败", error);
-    } finally {
-      setRunning(false);
-    }
+    if (!plan || !canPush) return;
+    await run(
+      () => onPush(plan, { ...options, noVerify: false, tags: "none" }),
+      (result) => {
+        setRejected(result.rejected);
+        setFailed(result.failed);
+        if (result.failed.length === 0) onOpenChange(false);
+      },
+      "Could not push repositories",
+    );
   };
 
   const retryWithForce = async (repoRoot: string) => {
-    if (!plan || running) return;
-    setRunning(true);
-    try {
-      const entry = plan.entries.find((e) => e.repoRoot === repoRoot);
-      if (!entry) return;
-      const result = await onPush(
-        {
-          ...plan,
-          entries: [
-            { ...entry, remote: remoteChoice[repoRoot] || undefined },
-          ],
-        },
-        { ...options, force: true, noVerify: false, tags: "none" },
-      );
-      setRejected(result.rejected);
-      if (result.rejected.length === 0) {
-        onOpenChange(false);
-      }
-    } catch (error) {
-      errorToast("Push 失败", error);
-    } finally {
-      setRunning(false);
-    }
+    if (!plan || !rejected.some((item) => item.repoRoot === repoRoot)) return;
+    const entry = plan.entries.find((item) => item.repoRoot === repoRoot);
+    if (!entry) return;
+    await run(
+      () =>
+        onPush(
+          { ...plan, entries: [entry] },
+          { ...options, force: true, noVerify: false, tags: "none" },
+        ),
+      (result) => {
+        const remaining = [
+          ...failed.filter((item) => item.repoRoot !== repoRoot),
+          ...result.failed,
+        ];
+        setFailed(remaining);
+        setRejected([
+          ...rejected.filter((item) => item.repoRoot !== repoRoot),
+          ...result.rejected,
+        ]);
+        if (remaining.length === 0) onOpenChange(false);
+      },
+      "Could not force push repository",
+    );
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl" showCloseButton={!running}>
+      <DialogContent
+        className="max-w-2xl"
+        showCloseButton={!running}
+        onEscapeKeyDown={(event) => {
+          if (running) event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (running) event.preventDefault();
+        }}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-1.75">
             <HugeiconsIcon icon={ArrowUp01Icon} size={15} strokeWidth={1.9} />
@@ -210,7 +176,7 @@ export function PushDialog({
             <Tooltip>
               <TooltipTrigger asChild>
                 <label
-                  htmlFor="push-force"
+                  htmlFor={forceId}
                   className={cn(
                     "flex cursor-pointer items-center gap-1.5 text-[10.5px]",
                     anyForceNeeded
@@ -219,7 +185,7 @@ export function PushDialog({
                   )}
                 >
                   <Checkbox
-                    id="push-force"
+                    id={forceId}
                     aria-label="Force push with --force-with-lease"
                     checked={options.force}
                     disabled={running || !anyForceNeeded}
@@ -240,8 +206,8 @@ export function PushDialog({
                   className="max-w-56 border border-border/70 bg-zinc-950 text-[10.5px] text-zinc-100"
                 >
                   Repositories are strictly ahead of their remotes; force push
-                  has nothing to force. If a push is rejected, the progress
-                  list offers Force push.
+                  has nothing to force. If a push is rejected, the progress list
+                  offers Force push.
                 </TooltipContent>
               ) : null}
             </Tooltip>
@@ -250,13 +216,8 @@ export function PushDialog({
 
         <div className="max-h-[45vh] overflow-y-auto">
           {plan?.entries.map((entry) => {
-            const upstreamRemote = parseUpstreamRemote(entry.upstream);
-            const repoRemotes = remotes[entry.repoRoot];
-            const choice = remoteChoice[entry.repoRoot] ?? "";
-            const mismatch =
-              !!choice &&
-              !!upstreamRemote &&
-              choice !== upstreamRemote;
+            const upstreamRemote =
+              entry.remote ?? parseUpstreamRemote(entry.upstream);
             return (
               <div
                 key={entry.repoRoot}
@@ -277,42 +238,9 @@ export function PushDialog({
                   <span className="text-[10px] text-muted-foreground/70">
                     Push to
                   </span>
-                  {repoRemotes && repoRemotes.length > 0 ? (
-                    <Select
-                      value={choice}
-                      onValueChange={(name) =>
-                        setRemoteChoice((current) => ({
-                          ...current,
-                          [entry.repoRoot]: name,
-                        }))
-                      }
-                    >
-                      <SelectTrigger size="sm" className="h-6 px-1.5 text-[10.5px]">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {repoRemotes.map((remote) => (
-                          <SelectItem
-                            key={remote.name}
-                            value={remote.name}
-                            className="text-[11px]"
-                          >
-                            {remote.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  ) : (
-                    <span className="text-[10.5px] text-muted-foreground/60">
-                      {choice || "…"}
-                    </span>
-                  )}
-                  {mismatch ? (
-                    <span className="ml-1 text-[10px] text-amber-500/90">
-                      Only the tracking remote ({upstreamRemote}) can receive
-                      this push; "{choice}" will fail.
-                    </span>
-                  ) : null}
+                  <span className="text-[10.5px] text-muted-foreground/60">
+                    {upstreamRemote ?? "No tracking remote"}
+                  </span>
                 </div>
                 <ul className="mt-1 flex flex-col gap-0.5">
                   {entry.commits.map((c) => {
@@ -357,7 +285,9 @@ export function PushDialog({
                             {c.subject}
                           </span>
                         </div>
-                        {expanded && diff ? <PushCommitDiff diff={diff} /> : null}
+                        {expanded && diff ? (
+                          <PushCommitDiff diff={diff} />
+                        ) : null}
                       </li>
                     );
                   })}
@@ -393,21 +323,37 @@ export function PushDialog({
         </div>
 
         {syncProgress && syncProgress.items.length > 0 ? (
-          <DialogSyncProgress
-            progress={syncProgress}
-            renderFailed={(item) =>
-              !running &&
-              rejected.some((r) => r.repoRoot === item.repoRoot) ? (
-                <button
-                  type="button"
-                  onClick={() => void retryWithForce(item.repoRoot)}
-                  className="ml-1 shrink-0 cursor-pointer rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-500 transition-colors hover:bg-amber-500/20"
-                >
-                  Force push?
-                </button>
-              ) : null
-            }
-          />
+          <DialogSyncProgress progress={syncProgress} />
+        ) : null}
+        {failed.length > 0 ? (
+          <div
+            className="max-h-40 overflow-y-auto rounded-lg border border-destructive/30 p-2 text-[11px]"
+            role="status"
+          >
+            <p className="mb-1 text-muted-foreground">
+              Some repositories were not pushed. Close and review a new plan
+              before retrying.
+            </p>
+            {failed.map((item) => (
+              <div key={item.repoRoot} className="mb-1">
+                <p className="break-all text-destructive">
+                  {item.repoRoot}: {item.error}
+                </p>
+                {rejected.some(
+                  (rejection) => rejection.repoRoot === item.repoRoot,
+                ) ? (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={running}
+                    onClick={() => void retryWithForce(item.repoRoot)}
+                  >
+                    Force push (--force-with-lease)
+                  </Button>
+                ) : null}
+              </div>
+            ))}
+          </div>
         ) : null}
 
         <DialogFooter>

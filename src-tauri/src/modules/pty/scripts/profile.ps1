@@ -75,9 +75,10 @@ function global:__terax_install_readline {
 }
 
 function global:prompt {
+    $succeeded = $?
     __terax_install_readline
     $lec = $LASTEXITCODE
-    if ($null -eq $lec) { $lec = if ($?) { 0 } else { 1 } }
+    if ($null -eq $lec) { $lec = if ($succeeded) { 0 } else { 1 } }
     $esc = [char]27
 
     $oscD = "$esc]133;D;$lec$esc\"

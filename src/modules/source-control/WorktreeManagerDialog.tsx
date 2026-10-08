@@ -19,12 +19,17 @@ import {
   TerminalIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { BranchConfirmDialog } from "./BranchConfirmDialog";
 import { WorktreeDialog } from "./WorktreeDialog";
 import { gitWorktreeRemove } from "./worktreeOps";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 
 type WorktreeEntry = {
   path: string;
@@ -76,6 +81,26 @@ export function WorktreeManagerDialog({
   /** Opens a terminal at the worktree path; wired by the App layer. */
   onOpenPath?: (path: string) => void;
 }) {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const scope = workspaceScopeKey(workspace);
+  const identity = JSON.stringify([open, repoRoot, scope]);
+  const identityRef = useRef(identity);
+  const epochRef = useRef(0);
+  if (identityRef.current !== identity) epochRef.current++;
+  identityRef.current = identity;
+  const epoch = epochRef.current;
+  const aliveRef = useRef(false);
+  const requestRef = useRef(0);
+  const loadedEpochRef = useRef(-1);
+  const removingEpochRef = useRef(-1);
+  const busyRef = useRef(false);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      requestRef.current++;
+    };
+  }, []);
   const [branches, setBranches] = useState<GitBranchEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -83,47 +108,97 @@ export function WorktreeManagerDialog({
   const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
+    if (
+      !open ||
+      !aliveRef.current ||
+      identityRef.current !== identity ||
+      epochRef.current !== epoch ||
+      currentWorkspaceScopeKey() !== scope
+    )
+      return;
+    const request = ++requestRef.current;
+    const current = () =>
+      aliveRef.current &&
+      identityRef.current === identity &&
+      epochRef.current === epoch &&
+      requestRef.current === request &&
+      currentWorkspaceScopeKey() === scope;
     if (!repoRoot) {
+      loadedEpochRef.current = epoch;
       setBranches([]);
       return;
     }
     setError(null);
     try {
-      const result = await native.gitListBranches(repoRoot);
+      const result = await native.gitListBranches(repoRoot, workspace);
+      if (!current()) return;
+      loadedEpochRef.current = epoch;
       setBranches(result.branches);
     } catch (e) {
+      if (!current()) return;
+      loadedEpochRef.current = epoch;
       setError(typeof e === "string" ? e : String(e));
       setBranches([]);
     }
-  }, [repoRoot]);
+  }, [repoRoot, workspace, scope, open, identity, epoch]);
 
   useEffect(() => {
     if (!open) return;
     setBranches(null);
     setError(null);
-    setBusy(null);
+    setBusy(busyRef.current ? "working" : null);
     setRemoving(null);
     setCreating(false);
     void load();
+    return () => {
+      requestRef.current++;
+    };
   }, [open, load]);
 
   const entries = useMemo(
-    () => (branches ? collectWorktrees(branches, repoRoot) : null),
-    [branches, repoRoot],
+    () =>
+      loadedEpochRef.current === epoch && branches
+        ? collectWorktrees(branches, repoRoot)
+        : null,
+    [branches, repoRoot, epoch],
   );
 
   const handleRemove = async () => {
-    if (!removing || busy) return;
+    if (
+      !removing ||
+      busyRef.current ||
+      !open ||
+      !aliveRef.current ||
+      removing.isMain ||
+      removingEpochRef.current !== epoch ||
+      identityRef.current !== identity ||
+      currentWorkspaceScopeKey() !== scope
+    )
+      return;
+    busyRef.current = true;
     setBusy(`remove:${removing.path}`);
     try {
-      await gitWorktreeRemove(repoRoot, removing.path, true);
+      await gitWorktreeRemove(repoRoot, removing.path, true, workspace);
+      if (
+        !aliveRef.current ||
+        identityRef.current !== identity ||
+        epochRef.current !== epoch ||
+        currentWorkspaceScopeKey() !== scope
+      )
+        return;
       toast.success(`Removed worktree at ${removing.path}`);
       setRemoving(null);
       await load();
     } catch (e) {
-      errorToast(`Could not remove worktree ${removing.branch}`, e);
+      if (
+        aliveRef.current &&
+        identityRef.current === identity &&
+        epochRef.current === epoch
+      )
+        errorToast(`Could not remove worktree ${removing.branch}`, e);
     } finally {
-      setBusy(null);
+      busyRef.current = false;
+      if (aliveRef.current) setBusy(null);
     }
   };
 
@@ -210,7 +285,10 @@ export function WorktreeManagerDialog({
                               type="button"
                               title="Remove worktree"
                               disabled={busy !== null}
-                              onClick={() => setRemoving(wt)}
+                              onClick={() => {
+                                removingEpochRef.current = epoch;
+                                setRemoving(wt);
+                              }}
                               className="cursor-pointer rounded p-1 text-muted-foreground transition-colors hover:bg-destructive/15 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
                             >
                               <HugeiconsIcon
@@ -261,7 +339,7 @@ export function WorktreeManagerDialog({
       </Dialog>
 
       <BranchConfirmDialog
-        open={removing !== null}
+        open={open && removing !== null && removingEpochRef.current === epoch}
         onOpenChange={(next) => {
           if (!next) setRemoving(null);
         }}
@@ -285,7 +363,7 @@ export function WorktreeManagerDialog({
       />
 
       <WorktreeDialog
-        open={creating}
+        open={open && creating}
         onOpenChange={setCreating}
         repoRoot={repoRoot}
         repoName={repoName}

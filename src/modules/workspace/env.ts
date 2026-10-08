@@ -1,10 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import { toast } from "sonner";
 import { setLastWslDistro } from "@/modules/settings/store";
 
-export type WorkspaceEnv =
-  | { kind: "local" }
-  | { kind: "wsl"; distro: string };
+export type WorkspaceEnv = { kind: "local" } | { kind: "wsl"; distro: string };
 
 export type WslDistro = {
   name: string;
@@ -22,6 +21,7 @@ type State = {
 };
 
 export const LOCAL_WORKSPACE: WorkspaceEnv = { kind: "local" };
+let distroRefresh: Promise<WslDistro[]> | null = null;
 
 export const useWorkspaceEnvStore = create<State>((set) => ({
   env: LOCAL_WORKSPACE,
@@ -30,17 +30,29 @@ export const useWorkspaceEnvStore = create<State>((set) => ({
   error: null,
   setEnv: (env) => {
     set({ env });
-    if (env.kind === "wsl") void setLastWslDistro(env.distro);
+    if (env.kind === "wsl")
+      void setLastWslDistro(env.distro).catch((error) =>
+        toast.error(`Could not save WSL preference: ${String(error)}`),
+      );
   },
   refreshDistros: async () => {
+    if (distroRefresh) return distroRefresh;
     set({ loading: true, error: null });
+    const operation = (async () => {
+      try {
+        const distros = await invoke<WslDistro[]>("wsl_list_distros");
+        set({ distros, loading: false });
+        return distros;
+      } catch (e) {
+        set({ distros: [], loading: false, error: String(e) });
+        return [];
+      }
+    })();
+    distroRefresh = operation;
     try {
-      const distros = await invoke<WslDistro[]>("wsl_list_distros");
-      set({ distros, loading: false });
-      return distros;
-    } catch (e) {
-      set({ distros: [], loading: false, error: String(e) });
-      return [];
+      return await operation;
+    } finally {
+      if (distroRefresh === operation) distroRefresh = null;
     }
   },
 }));

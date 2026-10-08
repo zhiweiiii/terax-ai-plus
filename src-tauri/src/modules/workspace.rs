@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -225,11 +224,7 @@ fn is_executable_dir(path: &Path) -> bool {
     }
 }
 
-pub fn appimage_env_overrides() -> Vec<(&'static str, Option<OsString>)> {
-    Vec::new()
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum WorkspaceEnv {
     #[default]
@@ -379,8 +374,7 @@ fn looks_utf16le(bytes: &[u8]) -> bool {
 fn run_wsl(args: &[&str]) -> Result<String, String> {
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.args(args);
-    crate::modules::proc::hide_console(&mut cmd);
-    let out = cmd.output().map_err(|e| e.to_string())?;
+    let out = crate::modules::proc::capture::capture(&mut cmd, Duration::from_secs(30), 64 * 1024)?;
     if !out.status.success() {
         let stderr = decode_command_output(&out.stderr);
         return Err(stderr.trim().to_string());
@@ -401,8 +395,7 @@ pub(crate) fn wsl_exec_capture(
         .arg("--exec")
         .arg(program)
         .args(args);
-    crate::modules::proc::hide_console(&mut cmd);
-    let out = cmd.output().map_err(|e| e.to_string())?;
+    let out = crate::modules::proc::capture::capture(&mut cmd, Duration::from_secs(30), 64 * 1024)?;
     if !out.status.success() {
         let stderr = decode_command_output(&out.stderr);
         return Err(stderr.trim().to_string());
@@ -435,6 +428,12 @@ pub(crate) fn normalize_wsl_value(output: String, fallback: &str) -> String {
 #[cfg(windows)]
 fn list_distros_blocking() -> Result<Vec<WslDistro>, String> {
     let out = run_wsl(&["--list", "--verbose"])?;
+    let running: HashSet<String> = run_wsl(&["--list", "--running", "--quiet"])?
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect();
     let mut distros = Vec::new();
     for raw in out.lines().skip(1) {
         let line = raw.trim();
@@ -449,11 +448,10 @@ fn list_distros_blocking() -> Result<Vec<WslDistro>, String> {
         }
         let state_idx = parts.len() - 2;
         let name = parts[..state_idx].join(" ");
-        let state = parts[state_idx];
         distros.push(WslDistro {
+            running: running.contains(&name),
             name,
             default,
-            running: state.eq_ignore_ascii_case("Running"),
         });
     }
     Ok(distros)
@@ -495,7 +493,7 @@ pub async fn wsl_default_distro() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn wsl_home(distro: String) -> Result<String, String> {
+pub async fn wsl_home(distro: String) -> Result<String, String> {
     #[cfg(not(windows))]
     {
         let _ = distro;
@@ -503,13 +501,123 @@ pub fn wsl_home(distro: String) -> Result<String, String> {
     }
     #[cfg(windows)]
     {
-        let out = run_wsl_sh(&distro, "printf %s \"$HOME\"")?;
-        let home = normalize_wsl_value(out, "");
-        if home.is_empty() {
-            Err(format!("could not resolve WSL home for {distro}"))
-        } else {
-            Ok(home)
+        crate::modules::fs::blocking(move || wsl_home_blocking(&distro)).await
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn wsl_home_blocking(distro: &str) -> Result<String, String> {
+    validate_wsl_distro_name(distro)?;
+    let out = run_wsl_sh(distro, "printf %s \"$HOME\"")?;
+    let home = normalize_wsl_value(out, "");
+    if home.is_empty() {
+        Err(format!("could not resolve WSL home for {distro}"))
+    } else {
+        Ok(home)
+    }
+}
+
+#[tauri::command]
+pub async fn wsl_native_paths(
+    paths: Vec<String>,
+    workspace: WorkspaceEnv,
+) -> Result<Vec<String>, String> {
+    if paths.len() > 128
+        || paths
+            .iter()
+            .any(|path| path.is_empty() || path.chars().any(|c| c.is_control()))
+        || paths
+            .iter()
+            .map(|path| path.encode_utf16().count())
+            .sum::<usize>()
+            > 24000
+    {
+        return Err(
+            "native path request exceeds supported size or contains control characters".into(),
+        );
+    }
+    crate::modules::fs::blocking(move || translate_native_paths(paths, workspace)).await
+}
+
+fn translate_native_paths(
+    paths: Vec<String>,
+    workspace: WorkspaceEnv,
+) -> Result<Vec<String>, String> {
+    let WorkspaceEnv::Wsl { distro } = workspace else {
+        return Ok(paths);
+    };
+    #[cfg(not(windows))]
+    {
+        let _ = (paths, distro);
+        Err("WSL is only available on Windows".into())
+    }
+    #[cfg(windows)]
+    {
+        validate_wsl_distro_name(&distro)?;
+        let mut converted = Vec::with_capacity(paths.len());
+        let mut pending = Vec::new();
+        let mut pending_indices = Vec::new();
+        for raw in paths {
+            let normalized = raw.replace('\\', "/");
+            let normalized = if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+                format!("//{rest}")
+            } else {
+                normalized
+                    .strip_prefix("//?/")
+                    .unwrap_or(&normalized)
+                    .to_string()
+            };
+            if normalized.starts_with("//") {
+                let mut parts = normalized.trim_start_matches('/').splitn(3, '/');
+                let host = parts.next().unwrap_or_default();
+                let share = parts.next().unwrap_or_default();
+                if host.eq_ignore_ascii_case("wsl.localhost") || host.eq_ignore_ascii_case("wsl$") {
+                    if !share.eq_ignore_ascii_case(&distro) {
+                        return Err("cannot paste a path from a different WSL distribution".into());
+                    }
+                    converted.push(format!("/{}", parts.next().unwrap_or_default()));
+                    continue;
+                }
+            } else if normalized.starts_with('/') {
+                converted.push(raw);
+                continue;
+            }
+            let bytes = normalized.as_bytes();
+            if !(normalized.starts_with("//")
+                || bytes.len() >= 3
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes[1] == b':'
+                    && bytes[2] == b'/')
+            {
+                return Err("expected an absolute native path".into());
+            }
+            pending_indices.push(converted.len());
+            pending.push(normalized);
+            converted.push(String::new());
         }
+        if pending.is_empty() {
+            return Ok(converted);
+        }
+        // Paths are positional arguments, never interpolated into shell source.
+        let mut args = vec![
+            "-c",
+            "for path do wslpath -a -u \"$path\" || exit 1; done",
+            "terax-paths",
+        ];
+        args.extend(pending.iter().map(String::as_str));
+        let output = wsl_exec_capture(&distro, "sh", &args)?;
+        let result: Vec<&str> = output.lines().collect();
+        if result.len() != pending_indices.len()
+            || result
+                .iter()
+                .any(|path| !path.starts_with('/') || path.chars().any(|c| c.is_control()))
+        {
+            return Err("WSL returned an invalid path conversion".into());
+        }
+        for (index, path) in pending_indices.into_iter().zip(result) {
+            converted[index] = path.to_string();
+        }
+        Ok(converted)
     }
 }
 
@@ -538,5 +646,3 @@ printf %s "$shell""#;
     let out = run_wsl_sh(&distro, SCRIPT)?;
     Ok(normalize_wsl_value(out, "/bin/sh"))
 }
-
-

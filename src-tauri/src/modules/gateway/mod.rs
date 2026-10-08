@@ -20,7 +20,7 @@ mod upstream;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -38,8 +38,21 @@ const PORT: u16 = if cfg!(debug_assertions) { 34267 } else { 34266 };
 /// unbounded read is a way to make the app allocate until it dies.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HEAD_BYTES: usize = 64 * 1024;
+const MAX_CONNECTIONS: usize = 16;
+static LISTENER: Mutex<Option<ListenerHandle>> = Mutex::new(None);
 
-static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+struct ListenerHandle {
+    shutdown: Arc<AtomicBool>,
+    thread: thread::JoinHandle<()>,
+}
+
+struct ConnectionGuard;
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static BOUND_PORT: AtomicU16 = AtomicU16::new(0);
@@ -47,46 +60,82 @@ static BOUND_PORT: AtomicU16 = AtomicU16::new(0);
 /// Start the gateway. Errors only if the port cannot be bound; the accept loop
 /// runs on its own thread.
 pub fn start() -> Result<(), String> {
-    if RUNNING.load(Ordering::Acquire) {
-        return Ok(());
+    let mut owner = LISTENER.lock().map_err(|_| "gateway startup unavailable")?;
+    if let Some(handle) = owner.as_ref() {
+        if !handle.thread.is_finished() {
+            return Ok(());
+        }
     }
-    SHUTDOWN.store(false, Ordering::Release);
+    if let Some(handle) = owner.take() {
+        let _ = handle.thread.join();
+    }
+    config::token()?;
     let listener = TcpListener::bind((BIND_ADDR, PORT))
         .map_err(|e| format!("gateway: failed to bind {BIND_ADDR}:{PORT}: {e}"))?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     BOUND_PORT.store(PORT, Ordering::Release);
     RUNNING.store(true, Ordering::Release);
     log::info!("claude gateway listening on http://{BIND_ADDR}:{PORT}");
-    thread::Builder::new()
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread_shutdown = Arc::clone(&shutdown);
+    let thread = thread::Builder::new()
         .name("terax-gateway-accept".into())
         .spawn(move || {
-            for stream in listener.incoming() {
-                if SHUTDOWN.load(Ordering::Acquire) {
-                    break;
-                }
-                match stream {
-                    Ok(stream) => {
+            while !thread_shutdown.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if ACTIVE
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                                (active < MAX_CONNECTIONS).then_some(active + 1)
+                            })
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        let guard = ConnectionGuard;
                         let _ = stream.set_nodelay(true);
-                        thread::Builder::new()
+                        if let Err(error) = thread::Builder::new()
                             .name("terax-gateway-conn".into())
                             .spawn(move || {
-                                ACTIVE.fetch_add(1, Ordering::AcqRel);
+                                let _guard = guard;
                                 handle_connection(stream);
-                                ACTIVE.fetch_sub(1, Ordering::AcqRel);
                             })
-                            .expect("spawn gateway connection thread");
+                        {
+                            log::warn!("gateway connection spawn failed: {error}");
+                        }
                     }
-                    Err(e) => log::warn!("gateway: accept error: {e}"),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20))
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        log::warn!("gateway: accept error: {e}");
+                        break;
+                    }
                 }
             }
+            drop(listener);
             RUNNING.store(false, Ordering::Release);
         })
-        .expect("spawn gateway accept thread");
+        .map_err(|e| {
+            RUNNING.store(false, Ordering::Release);
+            BOUND_PORT.store(0, Ordering::Release);
+            e.to_string()
+        })?;
+    *owner = Some(ListenerHandle { shutdown, thread });
     Ok(())
 }
 
 pub fn stop() {
-    SHUTDOWN.store(true, Ordering::Release);
+    let Ok(mut owner) = LISTENER.lock() else {
+        return;
+    };
+    if let Some(handle) = owner.take() {
+        handle.shutdown.store(true, Ordering::Release);
+        let _ = handle.thread.join();
+    }
     RUNNING.store(false, Ordering::Release);
+    BOUND_PORT.store(0, Ordering::Release);
 }
 
 #[derive(serde::Serialize)]
@@ -106,16 +155,16 @@ pub struct Status {
 }
 
 #[tauri::command]
-pub fn gateway_status() -> Status {
+pub fn gateway_status() -> Result<Status, String> {
     let origin = format!("http://{BIND_ADDR}:{}", BOUND_PORT.load(Ordering::Acquire));
-    Status {
+    Ok(Status {
         running: RUNNING.load(Ordering::Acquire),
         provider_url_prefix: format!("{origin}{PIN_PREFIX}"),
         origin,
-        token: config::token(),
+        token: config::token()?,
         active_requests: ACTIVE.load(Ordering::Acquire),
         current: config::current_provider().map(|p| p.id),
-    }
+    })
 }
 
 /// The variables a shell needs to reach a given provider through the gateway,
@@ -134,7 +183,7 @@ pub fn shell_env(provider_id: &str) -> Option<(String, String)> {
     let port = BOUND_PORT.load(Ordering::Acquire);
     Some((
         format!("http://{BIND_ADDR}:{port}{PIN_PREFIX}{}", provider.id),
-        config::token(),
+        config::token().ok()?,
     ))
 }
 
@@ -328,9 +377,8 @@ struct Request {
 }
 
 fn handle_connection(mut stream: TcpStream) {
-    // Only the head has a deadline. The body of a large request keeps arriving
-    // and the upstream call sets its own timeouts.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
     let request = match read_request(&mut stream) {
         Ok(Some(request)) => request,
         Ok(None) => return,
@@ -352,7 +400,7 @@ fn handle_connection(mut stream: TcpStream) {
         );
         return;
     };
-    if request.credential.as_deref() != Some(config::token().as_str()) {
+    if !config::token().is_ok_and(|token| request.credential.as_deref() == Some(token.as_str())) {
         respond_error(&mut stream, 401, "authentication_error", "网关令牌无效");
         return;
     }
@@ -378,6 +426,15 @@ fn handle_connection(mut stream: TcpStream) {
             return;
         }
     };
+    if !body.is_object() {
+        respond_error(
+            &mut stream,
+            400,
+            "invalid_request_error",
+            "请求体必须是 JSON 对象",
+        );
+        return;
+    }
 
     forward(&mut stream, &provider, body);
 }
@@ -409,10 +466,18 @@ fn route_of(path: &str) -> Option<Option<&str>> {
 const PIN_PREFIX: &str = "/p/";
 
 fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut head = Vec::with_capacity(4096);
     let mut buf = [0u8; 4096];
     let mut head_end = None;
     while head_end.is_none() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("读取请求超时".into());
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|e| e.to_string())?;
         match stream.read(&mut buf) {
             Ok(0) => return Ok(None),
             Ok(n) => {
@@ -427,14 +492,20 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
         }
     }
     let head_end = head_end.expect("loop exits only once set");
-    let text = String::from_utf8_lossy(&head[..head_end]).into_owned();
+    if head_end > MAX_HEAD_BYTES {
+        return Err("请求头过大".into());
+    }
+    let text = std::str::from_utf8(&head[..head_end]).map_err(|_| "无效请求头编码")?;
     let mut lines = text.lines();
     let request_line = lines.next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_ascii_uppercase();
     let path = parts.next().unwrap_or("/").to_string();
+    if !matches!(parts.next(), Some("HTTP/1.0" | "HTTP/1.1")) || parts.next().is_some() {
+        return Err("无效 HTTP 请求行".into());
+    }
 
-    let mut content_length = 0usize;
+    let mut content_length = None;
     let mut credential = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -442,7 +513,13 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
         };
         let value = value.trim();
         match name.trim().to_ascii_lowercase().as_str() {
-            "content-length" => content_length = value.parse().unwrap_or(0),
+            "content-length" => {
+                if content_length.is_some() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("无效 Content-Length".into());
+                }
+                content_length = Some(value.parse::<usize>().map_err(|_| "无效 Content-Length")?);
+            }
+            "transfer-encoding" => return Err("不支持 Transfer-Encoding".into()),
             // Claude Code sends x-api-key; a user who set ANTHROPIC_AUTH_TOKEN
             // instead gets a Bearer header. Accept either.
             "x-api-key" => credential = Some(value.to_string()),
@@ -456,15 +533,32 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
             _ => {}
         }
     }
+    let content_length = content_length.unwrap_or(0);
     if content_length > MAX_BODY_BYTES {
         return Err("请求体过大".to_string());
     }
 
-    let mut body = head[head_end..].to_vec();
+    if !config::token().is_ok_and(|token| credential.as_deref() == Some(token.as_str())) {
+        return Ok(Some(Request {
+            method,
+            path,
+            credential,
+            body: Vec::new(),
+        }));
+    }
+    let mut body = head[head_end..head.len().min(head_end + content_length)].to_vec();
     body.reserve(content_length.saturating_sub(body.len()));
     while body.len() < content_length {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("读取请求超时".into());
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|e| e.to_string())?;
+        let count = buf.len().min(content_length - body.len());
+        match stream.read(&mut buf[..count]) {
+            Ok(0) => return Err("请求体不完整".into()),
             Ok(n) => body.extend_from_slice(&buf[..n]),
             Err(e) => return Err(format!("读取请求体失败：{e}")),
         }
@@ -509,7 +603,12 @@ fn forward(stream: &mut TcpStream, provider: &Provider, mut body: Value) {
     let response = match upstream::send(provider, &outbound, Some(&session)) {
         Ok(response) => response,
         Err(message) => {
-            respond_error(stream, 502, "api_error", &format!("上游请求失败：{message}"));
+            respond_error(
+                stream,
+                502,
+                "api_error",
+                &format!("上游请求失败：{message}"),
+            );
             return;
         }
     };
@@ -549,7 +648,7 @@ fn stream_response(stream: &mut TcpStream, response: upstream::Response, convert
 
     let mut converter = stream::Converter::new();
     let result = upstream::for_each_chunk(response.body, |chunk| {
-        let out = converter.push(chunk);
+        let out = converter.push(chunk)?;
         if out.is_empty() {
             return Ok(());
         }
@@ -579,7 +678,12 @@ fn buffered_response(
     let payload = match upstream::read_all(response.body) {
         Ok(payload) => payload,
         Err(message) => {
-            respond_error(stream, 502, "api_error", &format!("读取上游响应失败：{message}"));
+            respond_error(
+                stream,
+                502,
+                "api_error",
+                &format!("读取上游响应失败：{message}"),
+            );
             return;
         }
     };
@@ -660,7 +764,11 @@ fn collect_openai_sse(payload: &[u8]) -> Value {
         }
         if let Some(calls) = delta["tool_calls"].as_array() {
             for call in calls {
-                let index = call["index"].as_u64().unwrap_or(0) as usize;
+                let index = call["index"].as_u64().unwrap_or(0);
+                if index >= 128 {
+                    return Value::Null;
+                }
+                let index = index as usize;
                 while tools.len() <= index {
                     tools.push((String::new(), String::new(), String::new()));
                 }
@@ -746,7 +854,12 @@ fn respond_error(stream: &mut TcpStream, status: u16, kind: &str, message: &str)
         "type": "error",
         "error": { "type": kind, "message": message }
     });
-    respond(stream, status, "application/json", body.to_string().as_bytes());
+    respond(
+        stream,
+        status,
+        "application/json",
+        body.to_string().as_bytes(),
+    );
 }
 
 fn reason_phrase(status: u16) -> &'static str {

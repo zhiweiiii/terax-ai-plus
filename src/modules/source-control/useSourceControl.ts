@@ -1,10 +1,10 @@
-import {
-  type GitRepoInfo,
-  type GitStatusSnapshot,
-  native,
-} from "@/lib/native";
+import { type GitRepoInfo, type GitStatusSnapshot, native } from "@/lib/native";
 import { invalidateRepoDiffs } from "@/modules/editor/lib/diffCache";
-import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -54,14 +54,6 @@ export type SourceControlSummary = {
   runRemoteAction: (
     mode?: SourceControlRemoteActionMode,
   ) => Promise<SourceControlRemoteActionResult>;
-};
-
-export type SourceControlRemoteIndicator = {
-  visible: boolean;
-  label: string;
-  title: string;
-  disabled: boolean;
-  action: SourceControlRemoteAction | null;
 };
 
 type SourceControlSummaryState = {
@@ -172,62 +164,6 @@ function getContextualAction(
   return "fetch";
 }
 
-export function getSourceControlRemoteIndicator(
-  summary: Pick<
-    SourceControlSummary,
-    "hasRepo" | "upstream" | "ahead" | "behind" | "busyAction"
-  >,
-): SourceControlRemoteIndicator {
-  if (!summary.hasRepo || !summary.upstream) {
-    return {
-      visible: false,
-      label: "",
-      title: "",
-      disabled: true,
-      action: null,
-    };
-  }
-  if (summary.ahead > 0 && summary.behind > 0) {
-    return {
-      visible: true,
-      label: `↑${summary.ahead} ↓${summary.behind}`,
-      title:
-        "Branch has diverged from upstream. Use Source Control or the terminal to resolve it.",
-      disabled: true,
-      action: null,
-    };
-  }
-  if (summary.behind > 0) {
-    return {
-      visible: true,
-      label: `↓${summary.behind}`,
-      title: `Pull ${summary.behind} remote ${
-        summary.behind === 1 ? "commit" : "commits"
-      } with fast-forward only.`,
-      disabled: summary.busyAction !== null,
-      action: "pull",
-    };
-  }
-  if (summary.ahead > 0) {
-    return {
-      visible: true,
-      label: `↑${summary.ahead}`,
-      title: `Push ${summary.ahead} local ${
-        summary.ahead === 1 ? "commit" : "commits"
-      }.`,
-      disabled: summary.busyAction !== null,
-      action: "push",
-    };
-  }
-  return {
-    visible: true,
-    label: "Sync",
-    title: "Fetch remote updates.",
-    disabled: summary.busyAction !== null,
-    action: "fetch",
-  };
-}
-
 function touchAutoFetch(map: Map<string, number>, key: string): void {
   map.delete(key);
   map.set(key, Date.now());
@@ -256,6 +192,17 @@ export function useSourceControl(
     busyAction: null,
     lastRemoteError: null,
   });
+  const mountedRef = useRef(true);
+  const remoteBusyRef = useRef(false);
+  const loadedWorkspaceRef = useRef<string | null>(null);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current++;
+      inflightRef.current = null;
+    };
+  }, []);
   const stateRef = useRef(state);
   const requestIdRef = useRef(0);
   const inflightRef = useRef<InflightRefresh | null>(null);
@@ -272,17 +219,11 @@ export function useSourceControl(
   const contextKeyRef = useRef(contextKey);
   contextKeyRef.current = contextKey;
 
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
+  stateRef.current = state;
 
-  useEffect(() => {
-    enabledRef.current = _enabled;
-  }, [_enabled]);
+  enabledRef.current = _enabled;
 
-  useEffect(() => {
-    repoRootRef.current = repoRoot ?? null;
-  }, [repoRoot]);
+  repoRootRef.current = repoRoot ?? null;
 
   useEffect(() => {
     if (resetWorkspaceKeyRef.current === workspaceKey) return;
@@ -305,23 +246,36 @@ export function useSourceControl(
   const applyStatus = useCallback(
     (updater: (status: GitStatusSnapshot) => GitStatusSnapshot) => {
       setState((current) => {
-        if (!current.status) return current;
+        if (
+          contextKey !== contextKeyRef.current ||
+          loadedWorkspaceRef.current !== workspaceKey ||
+          !current.status
+        )
+          return current;
         const next = updater(current.status);
         if (next === current.status) return current;
         return { ...current, status: next };
       });
     },
-    [],
+    [contextKey, workspaceKey],
   );
 
   const doRefresh = useCallback(
     async (remoteMode: SourceControlRefreshMode): Promise<void> => {
       const refreshContextKey = contextKey;
-      if (!enabledRef.current || refreshContextKey !== contextKeyRef.current) {
+      if (
+        !mountedRef.current ||
+        !enabledRef.current ||
+        currentWorkspaceScopeKey() !== workspaceKey ||
+        refreshContextKey !== contextKeyRef.current
+      ) {
         return;
       }
       const requestId = ++requestIdRef.current;
       const isCurrentRequest = () =>
+        mountedRef.current &&
+        enabledRef.current &&
+        currentWorkspaceScopeKey() === workspaceKey &&
         requestId === requestIdRef.current &&
         refreshContextKey === contextKeyRef.current;
 
@@ -396,18 +350,16 @@ export function useSourceControl(
           }
         } else if (reusableRoot) {
           try {
-            repo = stateRef.current.repo ?? null;
             status = await native.gitStatus(reusableRoot);
             if (!isCurrentRequest()) return;
-            if (!repo || repo.repoRoot !== reusableRoot) {
-              repo = {
-                repoRoot: reusableRoot,
-                branch: status.branch,
-                upstream: status.upstream,
-                isDetached: status.isDetached,
-              };
-            }
+            repo = {
+              repoRoot: reusableRoot,
+              branch: status.branch,
+              upstream: status.upstream,
+              isDetached: status.isDetached,
+            };
           } catch {
+            if (!isCurrentRequest()) return;
             const snapshot = await native.gitPanelSnapshot(contextPath);
             if (!isCurrentRequest()) return;
             if (!snapshot.repo) {
@@ -454,9 +406,13 @@ export function useSourceControl(
           return;
         }
 
-        let nextRemoteError = stateRef.current.lastRemoteError;
+        let nextRemoteError =
+          loadedWorkspaceRef.current === workspaceKey
+            ? stateRef.current.lastRemoteError
+            : null;
         const shouldAutoFetch =
           repo.upstream &&
+          !remoteBusyRef.current &&
           remoteMode !== "never" &&
           (remoteMode === "always" ||
             Date.now() - (autoFetchByRepoRef.current.get(repo.repoRoot) ?? 0) >=
@@ -479,6 +435,7 @@ export function useSourceControl(
         // The working tree was just re-read, so any cached working-tree diff is
         // now potentially stale — a file edited twice shows the first diff
         // otherwise, because the cache key has no content or revision in it.
+        loadedWorkspaceRef.current = workspaceKey;
         invalidateRepoDiffs(repo.repoRoot);
         setState((current) => ({
           ...current,
@@ -505,7 +462,7 @@ export function useSourceControl(
         }
       }
     },
-    [contextKey, contextPath],
+    [contextKey, contextPath, workspaceKey],
   );
 
   const refresh = useCallback(
@@ -534,8 +491,29 @@ export function useSourceControl(
     async (
       mode: SourceControlRemoteActionMode = "contextual",
     ): Promise<SourceControlRemoteActionResult> => {
+      if (
+        !mountedRef.current ||
+        !enabledRef.current ||
+        currentWorkspaceScopeKey() !== workspaceKey ||
+        contextKey !== contextKeyRef.current ||
+        remoteBusyRef.current
+      )
+        return {
+          ok: false,
+          action: null,
+          error:
+            "A Git action is already running or this context is no longer available",
+        };
       const { repo, status } = stateRef.current;
-      if (!repo || !status) {
+      if (
+        !repo ||
+        !status ||
+        loadedWorkspaceRef.current !== workspaceKey ||
+        (repoRootRef.current
+          ? normalizedContextPath(repo.repoRoot) !==
+            normalizedContextPath(repoRootRef.current)
+          : !repositoryContainsContext(repo.repoRoot, contextPath))
+      ) {
         return { ok: false, action: null, blocked: "no-repo" };
       }
       if (!status.upstream) {
@@ -547,32 +525,49 @@ export function useSourceControl(
         return { ok: false, action: null, blocked: "diverged" };
       }
 
+      remoteBusyRef.current = true;
       // Sync drives the fetch button, so report it as one for the spinner.
       setState((current) => ({
         ...current,
         busyAction: action === "sync" ? "fetch" : action,
       }));
-      const actionContextKey = contextKeyRef.current;
-      const isCurrentContext = () => actionContextKey === contextKeyRef.current;
+      const actionContextKey = contextKey;
+      const isCurrentContext = () =>
+        mountedRef.current &&
+        enabledRef.current &&
+        currentWorkspaceScopeKey() === workspaceKey &&
+        actionContextKey === contextKeyRef.current;
+      const ensureCurrent = () => {
+        if (!isCurrentContext())
+          throw new Error(
+            "Workspace changed; remaining Git actions were cancelled",
+          );
+      };
 
       let performed: SourceControlRemoteAction =
         action === "sync" ? "fetch" : action;
       try {
         if (action === "fetch") {
           await native.gitFetch(repo.repoRoot);
+          ensureCurrent();
           touchAutoFetch(autoFetchByRepoRef.current, repo.repoRoot);
         } else if (action === "pull") {
           await native.gitFetch(repo.repoRoot);
+          ensureCurrent();
           touchAutoFetch(autoFetchByRepoRef.current, repo.repoRoot);
           await native.gitPullFfOnly(repo.repoRoot);
+          ensureCurrent();
         } else if (action === "sync") {
           await native.gitFetch(repo.repoRoot);
+          ensureCurrent();
           touchAutoFetch(autoFetchByRepoRef.current, repo.repoRoot);
           // Re-read after fetching: the pre-fetch snapshot cannot know whether
           // upstream moved, which is the whole reason pull was gated before.
           const fresh = await native.gitStatus(repo.repoRoot);
+          ensureCurrent();
           if (canFastForward(fresh)) {
             await native.gitPullFfOnly(repo.repoRoot);
+            ensureCurrent();
             performed = "pull";
           } else if (fresh.ahead > 0 && fresh.behind > 0) {
             // Leave the merge decision to the user, same as the pull button.
@@ -581,6 +576,7 @@ export function useSourceControl(
           }
         } else {
           await native.gitPush(repo.repoRoot);
+          ensureCurrent();
         }
         if (isCurrentContext()) {
           setState((current) => ({ ...current, lastRemoteError: null }));
@@ -595,10 +591,12 @@ export function useSourceControl(
         }
         return { ok: false, action: performed, error: message };
       } finally {
-        setState((current) => ({ ...current, busyAction: null }));
+        remoteBusyRef.current = false;
+        if (mountedRef.current)
+          setState((current) => ({ ...current, busyAction: null }));
       }
     },
-    [refresh],
+    [refresh, contextKey, contextPath, workspaceKey],
   );
 
   useEffect(() => {
@@ -663,7 +661,7 @@ export function useSourceControl(
         window.clearTimeout(idle as number);
       }
     };
-  }, [refresh, contextPath, _enabled, repoRoot]);
+  }, [refresh, contextPath, _enabled]);
 
   useEffect(() => {
     if (!_enabled) return;
@@ -685,6 +683,7 @@ export function useSourceControl(
       }, delay);
     };
     const onFocus = () => {
+      if (!alive) return;
       if (timer) window.clearTimeout(timer);
       schedule(400);
     };
@@ -711,38 +710,46 @@ export function useSourceControl(
       window.removeEventListener("focus", onFocus);
       if (timer) window.clearTimeout(timer);
     };
-  }, [refresh, enabled]);
+  }, [refresh, _enabled]);
 
-  // Watchdog: if a refresh leaves `isLoading` set without ever resolving — a
-  // stale request superseded at the wrong moment, or a hung git process — the
-  // panel would sit on "loading" (looking empty) until the user hit refresh or
-  // switched away and back. Force another refresh instead of waiting forever.
-  useEffect(() => {
-    if (!_enabled || !state.isLoading) return;
-    const t = window.setTimeout(() => {
-      if (stateRef.current.isLoading) void refresh({ remote: "never" });
-    }, 5000);
-    return () => window.clearTimeout(t);
-  }, [_enabled, state.isLoading, refresh]);
-
-  return useMemo<SourceControlSummary>(
-    () => ({
-      contextPath: state.contextPath,
-      repo: state.repo,
-      status: state.status,
-      changedCount: state.status?.changedFiles.length ?? 0,
-      upstream: state.status?.upstream ?? state.repo?.upstream ?? null,
-      ahead: state.status?.ahead ?? 0,
-      behind: state.status?.behind ?? 0,
-      hasRepo: state.hasRepo,
-      isLoading: state.isLoading,
-      localError: state.localError,
-      busyAction: state.busyAction,
-      lastRemoteError: state.lastRemoteError,
+  return useMemo<SourceControlSummary>(() => {
+    const matches =
+      _enabled &&
+      loadedWorkspaceRef.current === workspaceKey &&
+      state.repo !== null &&
+      (repoRoot
+        ? normalizedContextPath(state.repo.repoRoot) ===
+          normalizedContextPath(repoRoot)
+        : repositoryContainsContext(state.repo.repoRoot, contextPath));
+    const visible =
+      matches || state.repo === null
+        ? state
+        : { ...state, repo: null, status: null, hasRepo: false };
+    return {
+      contextPath: visible.contextPath,
+      repo: visible.repo,
+      status: visible.status,
+      changedCount: visible.status?.changedFiles.length ?? 0,
+      upstream: visible.status?.upstream ?? visible.repo?.upstream ?? null,
+      ahead: visible.status?.ahead ?? 0,
+      behind: visible.status?.behind ?? 0,
+      hasRepo: visible.hasRepo,
+      isLoading: visible.isLoading,
+      localError: visible.localError,
+      busyAction: visible.busyAction,
+      lastRemoteError: visible.lastRemoteError,
       applyStatus,
       refresh,
       runRemoteAction,
-    }),
-    [state, applyStatus, refresh, runRemoteAction],
-  );
+    };
+  }, [
+    state,
+    applyStatus,
+    refresh,
+    runRemoteAction,
+    _enabled,
+    workspaceKey,
+    repoRoot,
+    contextPath,
+  ]);
 }

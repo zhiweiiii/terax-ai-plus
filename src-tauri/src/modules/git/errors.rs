@@ -107,5 +107,3 @@ impl From<GitError> for String {
 }
 
 pub type Result<T> = std::result::Result<T, GitError>;
-
-

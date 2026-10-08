@@ -14,11 +14,12 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useState } from "react";
-import { redetectBinary } from "../lib/detect";
-import type { LspPreset } from "../lib/presets";
-import { restartPresetSessions } from "../lib/sessionManager";
-import { useLspHint } from "../lib/useLspHint";
+import { useEffect, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
+import { redetectBinary } from "@/modules/lsp/lib/detect";
+import type { LspPreset } from "@/modules/lsp/lib/presets";
+import { restartPresetSessions } from "@/modules/lsp/lib/sessionManager";
+import { useLspHint } from "@/modules/lsp/lib/useLspHint";
 
 type Props = {
   filePath: string | null;
@@ -27,8 +28,35 @@ type Props = {
 const PILL_CLASS =
   "terax-pill-in ml-1.5 flex h-6 shrink-0 cursor-pointer [&_button]:cursor-pointer items-center gap-1 rounded-full border border-border/50 bg-accent/50 px-2 text-[10.5px] font-medium text-muted-foreground transition-colors duration-200 hover:bg-accent hover:text-foreground";
 
+function useLspAction() {
+  const mounted = useRef(true);
+  const pending = useRef(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const run = async (work: () => Promise<unknown>) => {
+    if (pending.current || !mounted.current) return;
+    pending.current = true;
+    setBusy(true);
+    try {
+      await work();
+    } catch (error) {
+      errorToast("Could not update language server", error);
+    } finally {
+      pending.current = false;
+      if (mounted.current) setBusy(false);
+    }
+  };
+  return { busy, run, mounted };
+}
+
 export function LspStatusPill({ filePath }: Props) {
   const hint = useLspHint(filePath);
+  const { busy, run } = useLspAction();
   if (!hint) return null;
 
   if (hint.kind === "enable") {
@@ -37,7 +65,10 @@ export function LspStatusPill({ filePath }: Props) {
         <button
           type="button"
           className="flex items-center gap-1"
-          onClick={() => void setLspActivation(hint.preset.id, "enabled")}
+          disabled={busy}
+          onClick={() =>
+            void run(() => setLspActivation(hint.preset.id, "enabled"))
+          }
           title={`Start ${hint.preset.command} for this workspace`}
         >
           <HugeiconsIcon icon={SourceCodeIcon} size={11} strokeWidth={2} />
@@ -74,6 +105,7 @@ export function LspStatusPill({ filePath }: Props) {
 }
 
 function ErrorPill({ preset, reason }: { preset: LspPreset; reason: string }) {
+  const { busy, run } = useLspAction();
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -89,7 +121,7 @@ function ErrorPill({ preset, reason }: { preset: LspPreset; reason: string }) {
       <PopoverContent
         side="top"
         align="start"
-        className="w-72 p-3 text-xs [&_button]:cursor-pointer"
+        className="w-72 max-w-[calc(100vw-24px)] p-3 text-xs [&_button]:cursor-pointer"
       >
         <div className="mb-1 font-medium text-foreground">
           {preset.name} language server stopped
@@ -99,7 +131,8 @@ function ErrorPill({ preset, reason }: { preset: LspPreset; reason: string }) {
           <button
             type="button"
             className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={() => void restartPresetSessions(preset.id)}
+            disabled={busy}
+            onClick={() => void run(() => restartPresetSessions(preset.id))}
           >
             <HugeiconsIcon icon={RefreshIcon} size={11} strokeWidth={1.9} />
             Restart
@@ -107,7 +140,10 @@ function ErrorPill({ preset, reason }: { preset: LspPreset; reason: string }) {
           <button
             type="button"
             className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={() => void setLspActivation(preset.id, "dismissed")}
+            disabled={busy}
+            onClick={() =>
+              void run(() => setLspActivation(preset.id, "dismissed"))
+            }
           >
             Disable
           </button>
@@ -118,11 +154,13 @@ function ErrorPill({ preset, reason }: { preset: LspPreset; reason: string }) {
 }
 
 function DismissButton({ preset }: { preset: LspPreset }) {
+  const { busy, run } = useLspAction();
   return (
     <button
       type="button"
       className="rounded-full p-0.5 hover:bg-foreground/10"
-      onClick={() => void setLspActivation(preset.id, "dismissed")}
+      disabled={busy}
+      onClick={() => void run(() => setLspActivation(preset.id, "dismissed"))}
       title="Dismiss (you can re-enable from Settings)"
     >
       <HugeiconsIcon icon={Cancel01Icon} size={9} strokeWidth={2.2} />
@@ -132,20 +170,26 @@ function DismissButton({ preset }: { preset: LspPreset }) {
 
 function InstallPill({ preset }: { preset: LspPreset }) {
   const [copied, setCopied] = useState(false);
-  const [checking, setChecking] = useState(false);
+  const { busy: checking, run, mounted } = useLspAction();
   const install = preset.install;
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   const copy = () => {
-    if (!install) return;
-    void navigator.clipboard.writeText(install.command).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
+    if (!install?.command) return;
+    void navigator.clipboard
+      .writeText(install.command)
+      .then(() => {
+        if (mounted.current) setCopied(true);
+      })
+      .catch((error) => errorToast("Could not copy install command", error));
   };
 
   const checkAgain = () => {
-    setChecking(true);
-    void redetectBinary(preset.command).finally(() => setChecking(false));
+    void run(() => redetectBinary(preset.command));
   };
 
   return (
@@ -162,7 +206,7 @@ function InstallPill({ preset }: { preset: LspPreset }) {
       <PopoverContent
         side="top"
         align="start"
-        className="w-80 p-3 text-xs [&_button]:cursor-pointer"
+        className="w-80 max-w-[calc(100vw-24px)] p-3 text-xs [&_button]:cursor-pointer"
       >
         <div className="mb-2 font-medium text-foreground">
           {preset.name} language server
@@ -172,7 +216,7 @@ function InstallPill({ preset }: { preset: LspPreset }) {
           <code className="text-foreground">{preset.command}</code> on your
           PATH. Install it, then check again:
         </p>
-        {install ? (
+        {install?.command ? (
           <div className="mb-2 flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-1.5 font-mono text-[11px]">
             <span className="min-w-0 flex-1 truncate select-text">
               {install.command}
@@ -190,13 +234,21 @@ function InstallPill({ preset }: { preset: LspPreset }) {
               />
             </button>
           </div>
-        ) : null}
+        ) : (
+          <p className="mb-2 text-muted-foreground">
+            Install a Windows-compatible server and add its command to PATH.
+          </p>
+        )}
         <div className="flex items-center justify-between">
           {install ? (
             <button
               type="button"
               className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-              onClick={() => void openUrl(install.docsUrl).catch(console.error)}
+              onClick={() =>
+                void openUrl(install.docsUrl).catch((error) =>
+                  errorToast("Could not open install documentation", error),
+                )
+              }
             >
               Documentation
             </button>
@@ -224,6 +276,7 @@ function ActivePill({
   preset: LspPreset;
   starting: boolean;
 }) {
+  const { busy, run } = useLspAction();
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -250,7 +303,7 @@ function ActivePill({
       <PopoverContent
         side="top"
         align="start"
-        className="w-64 p-3 text-xs [&_button]:cursor-pointer"
+        className="w-64 max-w-[calc(100vw-24px)] p-3 text-xs [&_button]:cursor-pointer"
       >
         <div className="mb-1 font-medium text-foreground">
           {preset.name} language server
@@ -263,7 +316,8 @@ function ActivePill({
           <button
             type="button"
             className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={() => void restartPresetSessions(preset.id)}
+            disabled={busy}
+            onClick={() => void run(() => restartPresetSessions(preset.id))}
           >
             <HugeiconsIcon icon={RefreshIcon} size={11} strokeWidth={1.9} />
             Restart
@@ -271,7 +325,10 @@ function ActivePill({
           <button
             type="button"
             className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
-            onClick={() => void setLspActivation(preset.id, "dismissed")}
+            disabled={busy}
+            onClick={() =>
+              void run(() => setLspActivation(preset.id, "dismissed"))
+            }
           >
             Disable
           </button>

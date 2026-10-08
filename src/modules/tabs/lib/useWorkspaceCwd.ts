@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { emitEvent } from "@/modules/events";
+import { useSpaces } from "@/modules/spaces/lib/useSpaces";
+import { workspaceScopeKey } from "@/modules/workspace";
+import { findLeafCwd } from "@/modules/terminal/lib/panes";
 import type { Tab } from "./useTabs";
 
 type Result = {
@@ -15,15 +18,37 @@ export function useWorkspaceCwd(
   tabs: Tab[],
   home: string | null,
 ): Result {
-  const lastTerminalCwd = useRef<string | null>(null);
+  const activeSpaceId = useSpaces((state) => state.activeId);
+  const spaces = useSpaces((state) => state.spaces);
+  const spaceId = activeTab?.spaceId ?? activeSpaceId ?? "";
+  const space = spaces.find((item) => item.id === spaceId);
+  const scope = JSON.stringify([
+    spaceId,
+    workspaceScopeKey(space?.env ?? { kind: "local" }),
+  ]);
+  const lastTerminalCwd = useRef(new Map<string, string>());
   const lastTerminalBySpaceRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
-    if (activeTab?.kind === "terminal" && activeTab.cwd) {
-      lastTerminalCwd.current = activeTab.cwd;
-      lastTerminalBySpaceRef.current.set(activeTab.spaceId, activeTab.id);
+    if (activeTab?.kind === "terminal") {
+      const cwd =
+        findLeafCwd(activeTab.paneTree, activeTab.activeLeafId) ??
+        activeTab.cwd;
+      if (cwd) lastTerminalCwd.current.set(scope, cwd);
+      lastTerminalBySpaceRef.current.set(scope, activeTab.id);
     }
-  }, [activeTab]);
+    const live = new Set(
+      spaces.map((item) =>
+        JSON.stringify([item.id, workspaceScopeKey(item.env)]),
+      ),
+    );
+    for (const key of lastTerminalCwd.current.keys()) {
+      if (!live.has(key)) lastTerminalCwd.current.delete(key);
+    }
+    for (const key of lastTerminalBySpaceRef.current.keys()) {
+      if (!live.has(key)) lastTerminalBySpaceRef.current.delete(key);
+    }
+  }, [activeTab, scope, spaces]);
 
   // The command line the side panels follow: the active terminal itself, the
   // owner of the active file tab, or the last-focused terminal of the space.
@@ -32,54 +57,54 @@ export function useWorkspaceCwd(
     if (t?.kind === "terminal") return t;
     if (
       t &&
-      (t.kind === "editor" ||
-        t.kind === "markdown" ||
-        t.kind === "git-diff") &&
+      (t.kind === "editor" || t.kind === "markdown" || t.kind === "git-diff") &&
       t.ownerTabId !== undefined
     ) {
       const owner = tabs.find((x) => x.id === t.ownerTabId);
-      if (owner?.kind === "terminal") return owner;
+      if (owner?.kind === "terminal" && owner.spaceId === t.spaceId)
+        return owner;
     }
-    const remembered = lastTerminalBySpaceRef.current.get(t?.spaceId ?? "");
+    const remembered = lastTerminalBySpaceRef.current.get(scope);
     const candidates = tabs.filter(
-      (x) =>
-        x.kind === "terminal" &&
-        x.spaceId === (t?.spaceId ?? ""),
+      (x) => x.kind === "terminal" && x.spaceId === spaceId,
     );
     const hit =
       candidates.find((x) => x.id === remembered) ??
       candidates[candidates.length - 1] ??
       null;
     return (hit as Extract<Tab, { kind: "terminal" }> | undefined) ?? null;
-  }, [tabs, activeTab]);
+  }, [tabs, activeTab, scope, spaceId]);
 
+  const terminalCwd = currentTerminalTab
+    ? (findLeafCwd(
+        currentTerminalTab.paneTree,
+        currentTerminalTab.activeLeafId,
+      ) ?? currentTerminalTab.cwd)
+    : undefined;
+  const fallback = space?.root ?? (space?.env.kind === "wsl" ? null : home);
   const explorerRoot = useMemo<string | null>(() => {
-    if (currentTerminalTab?.cwd) return currentTerminalTab.cwd;
-    if (lastTerminalCwd.current) return lastTerminalCwd.current;
-    return home;
-  }, [currentTerminalTab, home]);
+    return terminalCwd ?? lastTerminalCwd.current.get(scope) ?? fallback;
+  }, [terminalCwd, scope, fallback]);
 
-  // Announce a command-line (project) switch through the event bus so panels
-  // that cache file-derived data can invalidate without re-rendering on it.
-  // Skip the first value — mounting is not a switch, and subscribers already
-  // initialise from their own context. The owner tab is a new object whenever
-  // its cwd changes, so identity alone covers cwd moves.
+  // Mounting initializes subscribers; only semantic context changes invalidate them.
   const firstRef = useRef(true);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Environment changes invalidate consumers even when cwd and terminal ID stay equal.
   useEffect(() => {
     if (firstRef.current) {
       firstRef.current = false;
       return;
     }
     emitEvent("context:changed", {
-      cwd: currentTerminalTab?.cwd ?? null,
+      cwd: explorerRoot,
       terminalId: currentTerminalTab?.id ?? null,
     });
-  }, [currentTerminalTab]);
+  }, [currentTerminalTab?.id, explorerRoot, scope]);
 
   const inheritedCwdForNewTab = useCallback((): string | undefined => {
-    if (currentTerminalTab?.cwd) return currentTerminalTab.cwd;
-    return lastTerminalCwd.current ?? home ?? undefined;
-  }, [currentTerminalTab, home]);
+    return (
+      terminalCwd ?? lastTerminalCwd.current.get(scope) ?? fallback ?? undefined
+    );
+  }, [terminalCwd, scope, fallback]);
 
   return { currentTerminalTab, explorerRoot, inheritedCwdForNewTab };
 }

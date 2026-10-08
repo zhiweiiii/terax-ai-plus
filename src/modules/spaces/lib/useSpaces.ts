@@ -1,9 +1,7 @@
 import { create } from "zustand";
+import { errorToast } from "@/lib/errorToast";
 import { usePreferencesStore } from "@/modules/settings/preferences";
-import {
-  parseWorkspaceScopeKey,
-  type WorkspaceEnv,
-} from "@/modules/workspace";
+import { parseWorkspaceScopeKey, type WorkspaceEnv } from "@/modules/workspace";
 import {
   deleteSpaceData,
   newSpaceId,
@@ -40,6 +38,10 @@ type State = {
   setActive: (id: string) => void;
 };
 
+function persist(operation: Promise<unknown>): void {
+  void operation.catch((error) => errorToast("保存工作区失败", error));
+}
+
 export const useSpaces = create<State>((set, get) => ({
   spaces: [],
   activeId: null,
@@ -66,7 +68,7 @@ export const useSpaces = create<State>((set, get) => ({
     };
     const spaces = [...get().spaces, meta];
     set({ spaces });
-    void saveSpacesList(spaces);
+    persist(saveSpacesList(spaces));
     return meta;
   },
 
@@ -75,7 +77,7 @@ export const useSpaces = create<State>((set, get) => ({
       s.id === id ? { ...s, name, updatedAt: Date.now() } : s,
     );
     set({ spaces });
-    void saveSpacesList(spaces);
+    persist(saveSpacesList(spaces));
   },
 
   setEnv: (id, env) => {
@@ -83,7 +85,7 @@ export const useSpaces = create<State>((set, get) => ({
       s.id === id ? { ...s, env, updatedAt: Date.now() } : s,
     );
     set({ spaces });
-    void saveSpacesList(spaces);
+    persist(saveSpacesList(spaces));
   },
 
   setColor: (id, color) => {
@@ -91,7 +93,7 @@ export const useSpaces = create<State>((set, get) => ({
       s.id === id ? { ...s, color, updatedAt: Date.now() } : s,
     );
     set({ spaces });
-    void saveSpacesList(spaces);
+    persist(saveSpacesList(spaces));
   },
 
   reorder: (orderedIds) => {
@@ -106,24 +108,30 @@ export const useSpaces = create<State>((set, get) => ({
     }
     if (next.length !== get().spaces.length) return;
     set({ spaces: next });
-    void saveSpacesList(next);
+    persist(saveSpacesList(next));
   },
 
   remove: (id) => {
     const prev = get();
+    if (
+      prev.spaces.length <= 1 ||
+      !prev.spaces.some((space) => space.id === id)
+    )
+      return prev.activeId;
     const spaces = prev.spaces.filter((s) => s.id !== id);
     let activeId = prev.activeId;
     if (activeId === id) activeId = spaces[0]?.id ?? null;
     set({ spaces, activeId });
-    void saveSpacesList(spaces);
-    void deleteSpaceData(id);
-    if (activeId !== prev.activeId) void saveActiveId(activeId);
+    persist(saveSpacesList(spaces));
+    persist(deleteSpaceData(id));
+    if (activeId !== prev.activeId) persist(saveActiveId(activeId));
     return activeId;
   },
 
   setActive: (id) => {
-    if (get().activeId === id) return;
+    if (get().activeId === id || !get().spaces.some((space) => space.id === id))
+      return;
     set({ activeId: id });
-    void saveActiveId(id);
+    persist(saveActiveId(id));
   },
 }));

@@ -28,8 +28,9 @@ function isServerRequest(msg: unknown): msg is ServerRequest {
     typeof msg === "object" &&
     msg !== null &&
     "id" in msg &&
-    (msg as ServerRequest).id != null &&
-    "method" in msg
+    (typeof msg.id === "string" || typeof msg.id === "number") &&
+    "method" in msg &&
+    typeof msg.method === "string"
   );
 }
 
@@ -40,12 +41,14 @@ export class TauriLspTransport implements Transport {
   private onCloseCb: (() => void) | null = null;
   private onErrorCb: ((error: Error) => void) | null = null;
   private backlog: string[] = [];
+  private pendingSends: string[] = [];
   exitInfo: LspExitInfo | null = null;
 
   async start(config: LspSpawnConfig): Promise<void> {
     const decoder = new TextDecoder();
     const onMessage = new Channel<ArrayBuffer>();
     onMessage.onmessage = (buf) => {
+      if (this.closed) return;
       const text = decoder.decode(buf);
       this.answerServerRequest(text);
       if (this.onMsg) this.onMsg(text);
@@ -55,9 +58,12 @@ export class TauriLspTransport implements Transport {
     onExit.onmessage = (info) => {
       this.exitInfo = info;
       this.closed = true;
+      this.sessionId = null;
+      this.pendingSends = [];
+      this.backlog = [];
       this.onCloseCb?.();
     };
-    this.sessionId = await invoke<number>("lsp_spawn", {
+    const sessionId = await invoke<number>("lsp_spawn", {
       command: config.command,
       args: config.args,
       env: config.env ?? null,
@@ -67,6 +73,14 @@ export class TauriLspTransport implements Transport {
       onMessage,
       onExit,
     });
+    if (this.closed) {
+      await invoke("lsp_kill", { id: sessionId }).catch(() => {});
+      return;
+    }
+    this.sessionId = sessionId;
+    const pending = this.pendingSends;
+    this.pendingSends = [];
+    for (const message of pending) this.send(message);
   }
 
   // The client library ignores server-to-client requests entirely.
@@ -87,6 +101,12 @@ export class TauriLspTransport implements Transport {
       case "workspace/configuration": {
         const items =
           (msg.params as { items?: unknown[] } | undefined)?.items ?? [];
+        if (!Array.isArray(items)) {
+          reply({
+            error: { code: -32602, message: "Invalid configuration items" },
+          });
+          return;
+        }
         reply({ result: items.map(() => null) });
         return;
       }
@@ -105,7 +125,11 @@ export class TauriLspTransport implements Transport {
   }
 
   send(message: string): void {
-    if (this.sessionId == null || this.closed) return;
+    if (this.closed) return;
+    if (this.sessionId == null) {
+      this.pendingSends.push(message);
+      return;
+    }
     void invoke("lsp_send", { id: this.sessionId, message }).catch((e) => {
       this.onErrorCb?.(new Error(String(e)));
     });
@@ -130,6 +154,8 @@ export class TauriLspTransport implements Transport {
   }
 
   close(): void {
+    this.pendingSends = [];
+    this.backlog = [];
     if (this.closed) {
       this.sessionId = null;
       return;

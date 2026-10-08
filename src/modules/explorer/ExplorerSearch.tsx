@@ -1,7 +1,12 @@
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { useContentSearch } from "@/modules/command-palette/hooks/useContentSearch";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -63,8 +68,8 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
   function ExplorerSearch({ rootPath, onOpenFile, onActiveChange }, ref) {
     const [q, setQ] = useState("");
     const [activeIndex, setActiveIndex] = useState(0);
-    const [fileHits, setFileHits] = useState<FileHit[]>([]);
-    const [fileSearching, setFileSearching] = useState(false);
+    const workspace = useWorkspaceEnvStore((state) => state.env);
+    const workspaceKey = workspaceScopeKey(workspace);
     const inputRef = useRef<HTMLInputElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
     const lastKeyboardNavAt = useRef(0);
@@ -78,38 +83,32 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
       onActiveChange?.(active);
     }, [active, onActiveChange]);
 
-    // File-name search (fuzzy, debounced).
-    useEffect(() => {
-      if (query.length < MIN_QUERY_LEN) {
-        setFileHits([]);
-        setFileSearching(false);
-        return;
-      }
-      setFileSearching(true);
-      let alive = true;
-      const handle = setTimeout(async () => {
-        try {
-          const res = await invoke<FileSearchResult>("fs_search", {
-            root: rootPath,
-            query,
-            limit: FILE_SEARCH_LIMIT,
-            showHidden: false,
-            workspace: currentWorkspaceEnv(),
-          });
-          if (alive) {
-            setFileHits(res.hits);
-          }
-        } catch {
-          if (alive) setFileHits([]);
-        } finally {
-          if (alive) setFileSearching(false);
-        }
-      }, FILE_SEARCH_DEBOUNCE_MS);
-      return () => {
-        alive = false;
-        clearTimeout(handle);
-      };
-    }, [query, rootPath]);
+    const runFileSearch = useCallback(
+      async (query: string) => {
+        if (currentWorkspaceScopeKey() !== workspaceKey)
+          throw new Error("Workspace changed");
+        const result = await invoke<FileSearchResult>("fs_search", {
+          root: rootPath,
+          query,
+          limit: FILE_SEARCH_LIMIT,
+          showHidden: false,
+          workspace,
+        });
+        if (currentWorkspaceScopeKey() !== workspaceKey)
+          throw new Error("Workspace changed");
+        return result.hits;
+      },
+      [rootPath, workspace, workspaceKey],
+    );
+    const files = useAsyncQuery({
+      enabled: active,
+      term: query,
+      minLength: MIN_QUERY_LEN,
+      debounceMs: FILE_SEARCH_DEBOUNCE_MS,
+      run: runFileSearch,
+      scopeKey: `${workspaceKey}\0${rootPath}`,
+    });
+    const fileHits = files.results;
 
     // File-content search (same backend as Ctrl+Shift+P).
     const content = useContentSearch(rootPath, query, active, {
@@ -130,7 +129,17 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
       [fileHits, contentHits],
     );
 
-    const loading = fileSearching || content.loading;
+    const loading = files.loading || content.loading;
+    const searchError = files.error ?? content.error;
+    const retry = () => {
+      if (files.error) files.retry();
+      if (content.error) content.retry();
+    };
+    useEffect(() => {
+      setActiveIndex((current) =>
+        Math.min(current, Math.max(0, results.length - 1)),
+      );
+    }, [results.length]);
 
     useEffect(() => {
       if (active && results.length > 0) {
@@ -163,7 +172,9 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
     );
 
     return (
-      <div className="flex shrink-0 flex-col">
+      <div
+        className={cn("flex min-h-0 flex-col", active ? "flex-1" : "shrink-0")}
+      >
         <div className="relative shrink-0 px-2 py-1.5">
           <HugeiconsIcon
             icon={Search01Icon}
@@ -180,6 +191,7 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
               setActiveIndex(0);
             }}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (results.length > 0) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -223,10 +235,10 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
                   <div className="px-3 py-2 text-[11px] text-muted-foreground">
                     Searching…
                   </div>
-                ) : content.error ? (
+                ) : searchError && results.length === 0 ? (
                   <button
                     type="button"
-                    onClick={content.retry}
+                    onClick={retry}
                     className="w-full px-3 py-2 text-left text-[11px] text-destructive hover:bg-accent/50"
                   >
                     Search failed — retry
@@ -316,6 +328,15 @@ export const ExplorerSearch = forwardRef<ExplorerSearchHandle, Props>(
                   <div className="px-3 py-1.5 text-[10px] text-muted-foreground">
                     Updating results…
                   </div>
+                ) : null}
+                {searchError && results.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={retry}
+                    className="w-full px-3 py-1.5 text-left text-[11px] text-destructive hover:bg-accent/50"
+                  >
+                    Some results could not be loaded. Retry
+                  </button>
                 ) : null}
               </div>
             </ScrollArea>

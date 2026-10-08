@@ -1,12 +1,13 @@
-import { MarkdownCode } from "@/components/ai-elements/markdown-code";
 import {
   FindBox,
   type FindBoxHandle,
   type FindMatch,
-} from "@/components/ui/find-box";
+} from "@/components/FindBox";
 import { cn } from "@/lib/utils";
-import { currentWorkspaceEnv } from "@/modules/workspace";
-import { invoke } from "@tauri-apps/api/core";
+import { useDocument } from "@/modules/editor/lib/useDocument";
+import { parentDir } from "@/modules/explorer/lib/watch";
+import { ProjectMarkdownCode } from "@/modules/markdown/ProjectMarkdownCode";
+import type { WorkspaceEnv } from "@/modules/workspace";
 import type { ComponentProps } from "react";
 import {
   forwardRef,
@@ -25,23 +26,14 @@ import {
   highlightMatches,
   setActiveMatch,
 } from "./lib/findInDom";
+import { previewRehypePlugins } from "./lib/previewPlugins";
 import { MarkdownLink } from "./MarkdownLink";
 import { MarkdownViewToggle } from "./MarkdownViewToggle";
-
-type ReadResult =
-  | { kind: "text"; content: string; size: number }
-  | { kind: "binary"; size: number }
-  | { kind: "toolarge"; size: number; limit: number };
-
-type Status =
-  | { kind: "loading" }
-  | { kind: "ready"; content: string }
-  | { kind: "binary" }
-  | { kind: "toolarge"; size: number; limit: number }
-  | { kind: "error"; message: string };
+import "@/modules/markdown/markdown-find.css";
 
 type Props = {
   path: string;
+  workspace: WorkspaceEnv;
   visible: boolean;
   onSetView: (mode: "rendered" | "raw") => void;
   /** Opens a project file from a relative markdown link. */
@@ -50,31 +42,38 @@ type Props = {
 
 export type MarkdownPreviewPaneHandle = {
   openSearch: () => void;
+  reload: () => boolean;
+  revalidate: () => void;
 };
 
-function dirname(path: string): string {
-  const sep = path.lastIndexOf("\\");
-  const slash = path.lastIndexOf("/");
-  const cut = Math.max(sep, slash);
-  return cut <= 0 ? "" : path.slice(0, cut);
-}
-
 export const MarkdownPreviewPane = forwardRef<MarkdownPreviewPaneHandle, Props>(
-  function MarkdownPreviewPane({ path, visible, onSetView, onOpenPath }, ref) {
-    const [status, setStatus] = useState<Status>({ kind: "loading" });
+  function MarkdownPreviewPane(
+    { path, workspace, visible, onSetView, onOpenPath },
+    ref,
+  ) {
+    const {
+      doc: status,
+      reload,
+      revalidate,
+    } = useDocument({ path, workspace });
     const contentRef = useRef<HTMLDivElement>(null);
     const [findOpen, setFindOpen] = useState(false);
     const [findMatches, setFindMatches] = useState<DomMatch[]>([]);
     const findBoxRef = useRef<FindBoxHandle>(null);
-    const marksRef = useRef<HTMLSpanElement[]>([]);
-    const baseDir = useMemo(() => dirname(path), [path]);
+    const marksRef = useRef<Range[]>([]);
+    const queryRef = useRef("");
+    const baseDir = useMemo(() => parentDir(path), [path]);
 
     const openSearch = useCallback(() => {
       setFindOpen(true);
       requestAnimationFrame(() => findBoxRef.current?.focus());
     }, []);
 
-    useImperativeHandle(ref, () => ({ openSearch }), [openSearch]);
+    useImperativeHandle(
+      ref,
+      () => ({ openSearch, reload, revalidate: () => void revalidate() }),
+      [openSearch, reload, revalidate],
+    );
 
     // Components close over baseDir/onOpenPath so relative markdown links can
     // resolve to project files; Streamdown passes only intrinsic element props.
@@ -83,53 +82,58 @@ export const MarkdownPreviewPane = forwardRef<MarkdownPreviewPaneHandle, Props>(
         a: (props: ComponentProps<typeof MarkdownLink>) => (
           <MarkdownLink {...props} baseDir={baseDir} onOpenPath={onOpenPath} />
         ),
-        code: MarkdownCode,
+        code: ProjectMarkdownCode,
       }),
       [baseDir, onOpenPath],
     );
 
-    useEffect(() => {
-      let cancelled = false;
-      setStatus({ kind: "loading" });
-      invoke<ReadResult>("fs_read_file", {
-        path,
-        workspace: currentWorkspaceEnv(),
-      })
-        .then((res) => {
-          if (cancelled) return;
-          if (res.kind === "text") {
-            setStatus({ kind: "ready", content: res.content });
-          } else if (res.kind === "binary") {
-            setStatus({ kind: "binary" });
-          } else {
-            setStatus({ kind: "toolarge", size: res.size, limit: res.limit });
-          }
-        })
-        .catch((e) => {
-          if (!cancelled) setStatus({ kind: "error", message: String(e) });
-        });
-      return () => {
-        cancelled = true;
-      };
-    }, [path]);
-
-    // Drop any find highlights when content re-renders.
-    useEffect(() => {
-      if (contentRef.current) clearMatches(contentRef.current);
-      setFindMatches([]);
-    }, [status]);
-
     const runFind = useCallback((q: string) => {
+      queryRef.current = q;
       const root = contentRef.current;
       if (!root) return;
-      const matches = q.trim() ? findInDom(root, q.trim()) : [];
       clearMatches(root);
+      const matches = q.trim() ? findInDom(root, q.trim()) : [];
       marksRef.current =
         matches.length > 0 ? highlightMatches(root, matches) : [];
       setFindMatches(matches);
       if (matches.length > 0) setActiveMatch(root, marksRef.current[0] ?? null);
       else setActiveMatch(root, null);
     }, []);
+
+    useEffect(() => {
+      const root = contentRef.current;
+      if (root) clearMatches(root);
+      marksRef.current = [];
+      if (status.status === "ready") runFind(queryRef.current);
+      else setFindMatches([]);
+      return () => {
+        if (root) clearMatches(root);
+      };
+    }, [status, runFind]);
+
+    useEffect(() => {
+      const root = contentRef.current;
+      if (!findOpen || !root) return;
+      let frame: number | null = null;
+      let disposed = false;
+      const observer = new MutationObserver(() => {
+        if (!queryRef.current.trim() || frame !== null) return;
+        frame = requestAnimationFrame(() => {
+          frame = null;
+          if (!disposed) runFind(queryRef.current);
+        });
+      });
+      observer.observe(root, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      return () => {
+        disposed = true;
+        observer.disconnect();
+        if (frame !== null) cancelAnimationFrame(frame);
+      };
+    }, [findOpen, runFind]);
 
     const jumpFind = useCallback((i: number) => {
       const root = contentRef.current;
@@ -139,6 +143,7 @@ export const MarkdownPreviewPane = forwardRef<MarkdownPreviewPaneHandle, Props>(
 
     const closeFind = useCallback(() => {
       setFindOpen(false);
+      queryRef.current = "";
       setFindMatches([]);
       if (contentRef.current) {
         clearMatches(contentRef.current);
@@ -164,28 +169,29 @@ export const MarkdownPreviewPane = forwardRef<MarkdownPreviewPaneHandle, Props>(
         <MarkdownViewToggle mode="rendered" onChange={onSetView} />
         <div className="markdown-preview relative min-h-0 flex-1 overflow-auto">
           <div className="px-8 py-6" ref={contentRef}>
-            {status.kind === "loading" && (
+            {status.status === "loading" && (
               <p className="text-[12px] text-muted-foreground">Loading…</p>
             )}
-            {status.kind === "error" && (
+            {status.status === "error" && (
               <p className="text-[12px] text-destructive">
                 Failed to read file: {status.message}
               </p>
             )}
-            {status.kind === "binary" && (
+            {status.status === "binary" && (
               <p className="text-[12px] text-muted-foreground">
-                Binary file — cannot render as markdown.
+                Binary file cannot render as markdown.
               </p>
             )}
-            {status.kind === "toolarge" && (
+            {status.status === "toolarge" && (
               <p className="text-[12px] text-muted-foreground">
                 File is {status.size} bytes; limit {status.limit}.
               </p>
             )}
-            {status.kind === "ready" && (
+            {status.status === "ready" && (
               <Streamdown
                 className="select-text [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
                 components={componentsWithPaths}
+                rehypePlugins={previewRehypePlugins}
                 mode="static"
                 parseIncompleteMarkdown={false}
               >

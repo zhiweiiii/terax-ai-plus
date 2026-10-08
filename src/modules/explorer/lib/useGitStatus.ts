@@ -1,6 +1,11 @@
 import { native, type GitStatusSnapshot } from "@/lib/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
+import {
   bubbleUpDirectoryStatuses,
   buildGitStatusMap,
   containingRepoRoot,
@@ -22,24 +27,47 @@ export function useGitStatus(
   statuses: GitStatusSnapshot[] | null | undefined,
   enabled: boolean,
 ) {
-  const [canonicalRoot, setCanonicalRoot] = useState<string | null>(null);
+  const scopeKey = useWorkspaceEnvStore((s) => workspaceScopeKey(s.env));
+  const [canonical, setCanonical] = useState<{
+    root: string;
+    scope: string;
+    value: string;
+  } | null>(null);
+  const canonicalRoot =
+    canonical?.root === workspaceRoot && canonical.scope === scopeKey
+      ? canonical.value
+      : null;
   const reqRef = useRef(0);
 
   useEffect(() => {
+    const req = ++reqRef.current;
+    let alive = true;
     if (!enabled || !workspaceRoot) {
-      setCanonicalRoot(null);
+      setCanonical(null);
       return;
     }
-    const req = ++reqRef.current;
     void native
       .canonicalize(workspaceRoot)
       .then((c) => {
-        if (req === reqRef.current) setCanonicalRoot(c);
+        if (
+          alive &&
+          req === reqRef.current &&
+          currentWorkspaceScopeKey() === scopeKey
+        )
+          setCanonical({ root: workspaceRoot, scope: scopeKey, value: c });
       })
       .catch(() => {
-        if (req === reqRef.current) setCanonicalRoot(null);
+        if (
+          alive &&
+          req === reqRef.current &&
+          currentWorkspaceScopeKey() === scopeKey
+        )
+          setCanonical(null);
       });
-  }, [enabled, workspaceRoot]);
+    return () => {
+      alive = false;
+    };
+  }, [enabled, workspaceRoot, scopeKey]);
 
   const aliases = useMemo(() => {
     const out: string[] = [];
@@ -75,16 +103,23 @@ export function useGitStatus(
     (path: string): GitStatusCode | null => {
       if (repos.length === 0) return null;
       const abs = normalizePath(path);
+      const logicalRoot = workspaceRoot ? normalizePath(workspaceRoot) : null;
+      const actualPath =
+        logicalRoot &&
+        canonicalRoot &&
+        (abs === logicalRoot || abs.startsWith(`${logicalRoot}/`))
+          ? `${normalizePath(canonicalRoot)}${abs.slice(logicalRoot.length)}`
+          : abs;
       // Deepest containing repo wins: its snapshot is the one the path belongs
       // to when several repos sit under one workspace.
       const root = containingRepoRoot(
         repos.map((r) => r.root),
-        abs,
+        actualPath,
       );
       const repo = root ? repos.find((r) => r.root === root) : null;
-      return repo ? lookupGitStatus(repo.map, repo.root, path, aliases) : null;
+      return repo ? lookupGitStatus(repo.map, repo.root, actualPath) : null;
     },
-    [repos, aliases],
+    [repos, workspaceRoot, canonicalRoot],
   );
 
   return { lookup };

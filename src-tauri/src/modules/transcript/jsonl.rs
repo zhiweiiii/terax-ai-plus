@@ -6,13 +6,15 @@ use std::sync::{
     atomic::{AtomicI64, Ordering},
     Arc, Mutex,
 };
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use super::Transcript;
 
 static REVISION: AtomicI64 = AtomicI64::new(1);
 const CACHE_LIMIT: usize = 8;
 const MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+const READ_SLICE_BYTES: u64 = 32 * 1024 * 1024;
+const READ_SLICE_TIME: Duration = Duration::from_millis(200);
 
 pub(super) trait JsonlState: Default + Send {
     fn ingest(&mut self, text: &str);
@@ -34,6 +36,8 @@ struct Entry<S> {
     snapshot: Option<Arc<Transcript>>,
     used: std::time::Instant,
     revision: i64,
+    caught_up: bool,
+    rejected_record: bool,
 }
 
 impl<S: Default> Default for Entry<S> {
@@ -46,6 +50,8 @@ impl<S: Default> Default for Entry<S> {
             snapshot: None,
             used: std::time::Instant::now(),
             revision: 0,
+            caught_up: false,
+            rejected_record: false,
         }
     }
 }
@@ -95,7 +101,7 @@ impl<S: JsonlState> ReaderCache<S> {
             modified: metadata.modified().ok(),
             created: metadata.created().ok(),
         };
-        if entry.mark.as_ref() == Some(&mark) {
+        if entry.mark.as_ref() == Some(&mark) && entry.caught_up {
             return entry.snapshot.clone();
         }
         if entry.mark.as_ref().is_some_and(|old| {
@@ -107,13 +113,28 @@ impl<S: JsonlState> ReaderCache<S> {
             entry.session_id = None;
             entry.offset = 0;
             entry.snapshot = None;
+            entry.caught_up = false;
+            entry.rejected_record = false;
+        }
+        if entry.rejected_record {
+            entry.mark = Some(mark);
+            entry.caught_up = true;
+            return None;
         }
         let mut file = File::open(path).ok()?;
         file.seek(SeekFrom::Start(entry.offset)).ok()?;
         let mut reader = BufReader::new(file.take(mark.length.saturating_sub(entry.offset)));
         let mut bytes = Vec::new();
         let mut consumed = 0u64;
+        let started = Instant::now();
+        let mut caught_up = true;
         loop {
+            if consumed > 0
+                && (consumed >= READ_SLICE_BYTES || started.elapsed() >= READ_SLICE_TIME)
+            {
+                caught_up = false;
+                break;
+            }
             bytes.clear();
             let size = Read::by_ref(&mut reader)
                 .take(MAX_RECORD_BYTES + 1)
@@ -122,39 +143,28 @@ impl<S: JsonlState> ReaderCache<S> {
             if size == 0 {
                 break;
             }
+            if size as u64 > MAX_RECORD_BYTES {
+                entry.rejected_record = true;
+                entry.caught_up = true;
+                entry.snapshot = None;
+                entry.mark = Some(mark);
+                log::warn!("transcript: record exceeds size limit; using screen fallback");
+                return None;
+            }
             if bytes.last() != Some(&b'\n') {
-                if size as u64 <= MAX_RECORD_BYTES {
-                    break;
-                }
-                let mut skipped = 0u64;
-                let mut complete = false;
-                loop {
-                    let chunk = reader.fill_buf().ok()?;
-                    if chunk.is_empty() {
-                        break;
-                    }
-                    let end = chunk.iter().position(|byte| *byte == b'\n');
-                    let count = end.map_or(chunk.len(), |index| index + 1);
-                    skipped += count as u64;
-                    reader.consume(count);
-                    if end.is_some() {
-                        complete = true;
-                        break;
-                    }
-                }
-                if !complete {
-                    break;
-                }
-                consumed += size as u64 + skipped;
-                entry.offset += size as u64 + skipped;
-                log::warn!("transcript: skipped record exceeding size limit");
-                continue;
+                break;
             }
             consumed += size as u64;
             entry.offset += size as u64;
             if let Ok(text) = std::str::from_utf8(&bytes) {
                 entry.state.ingest(text);
             }
+        }
+        entry.caught_up = caught_up;
+        if !caught_up {
+            entry.mark = Some(mark);
+            entry.snapshot = None;
+            return None;
         }
         if consumed == 0 && entry.snapshot.is_some() {
             entry.mark = Some(mark);
@@ -174,10 +184,50 @@ pub(super) fn compact_steps(
     pending: &mut HashMap<String, (usize, usize)>,
 ) {
     const MAX_STEPS: usize = 600;
-    if steps.len() <= MAX_STEPS {
-        return;
+    const MAX_STORED_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_STORED_PARTS: usize = 20_000;
+    let mut weights: Vec<usize> = steps
+        .iter()
+        .map(|message| {
+            message.id.len()
+                + message.text.len()
+                + message.reasoning.as_ref().map_or(0, String::len)
+                + message
+                    .parts
+                    .iter()
+                    .map(|part| match part {
+                        super::Part::Text { text } => text.len(),
+                        super::Part::Tool {
+                            name,
+                            subject,
+                            output,
+                            ..
+                        } => {
+                            name.len()
+                                + subject.as_ref().map_or(0, String::len)
+                                + output.as_ref().map_or(0, String::len)
+                        }
+                    })
+                    .sum::<usize>()
+        })
+        .collect();
+    for (id, (index, _)) in pending.iter() {
+        if let Some(weight) = weights.get_mut(*index) {
+            *weight = weight.saturating_add(id.len());
+        }
     }
-    let removed = steps.len() - MAX_STEPS;
+    let mut bytes = 0usize;
+    let mut parts = 0usize;
+    let mut kept = 0usize;
+    for (message, weight) in steps.iter().zip(weights).rev().take(MAX_STEPS) {
+        bytes = bytes.saturating_add(weight);
+        parts = parts.saturating_add(message.parts.len());
+        if bytes > MAX_STORED_BYTES || parts > MAX_STORED_PARTS {
+            break;
+        }
+        kept += 1;
+    }
+    let removed = steps.len() - kept;
     steps.drain(..removed);
     pending.retain(|_, (index, _)| {
         if *index < removed {

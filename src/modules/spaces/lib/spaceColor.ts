@@ -1,5 +1,3 @@
-import type { SpaceMeta } from "./store";
-
 // Decorative per-space accent hues, distinct from the theme primary. Tuned to
 // read on both light and dark surfaces. Indexed by SpaceMeta.color (opt-in).
 export const SPACE_COLORS = [
@@ -12,14 +10,3 @@ export const SPACE_COLORS = [
   "oklch(0.68 0.18 44)", // orange
   "oklch(0.66 0.19 350)", // pink
 ] as const;
-
-export function accentFor(space: Pick<SpaceMeta, "color">): string {
-  const c = space.color;
-  if (c != null && c >= 0 && c < SPACE_COLORS.length) return SPACE_COLORS[c];
-  return "var(--primary)";
-}
-
-export function spaceInitial(name: string): string {
-  const ch = name.trim()[0];
-  return ch ? ch.toUpperCase() : "?";
-}

@@ -1,4 +1,5 @@
 import type { IDecoration, IMarker, Terminal } from "@xterm/xterm";
+import { searchBufferLine } from "@/modules/terminal/lib/searchBufferLine";
 
 export type TermMatch = {
   /** 0-based buffer line. */
@@ -17,20 +18,16 @@ export function findInTerminal(
   query: string,
   limit = FIND_LIMIT,
 ): TermMatch[] {
-  const q = query.toLowerCase();
+  if (!query || limit <= 0) return [];
   const buf = term.buffer.active;
   const total = buf.length;
   const out: TermMatch[] = [];
   for (let i = 0; i < total && out.length < limit; i++) {
-    const text = buf.getLine(i)?.translateToString(true) ?? "";
-    const lower = text.toLowerCase();
-    let from = 0;
-    while (out.length < limit) {
-      const idx = lower.indexOf(q, from);
-      if (idx < 0) break;
-      out.push({ line: i, col: idx, len: query.length, text: text.trim() });
-      from = idx + Math.max(1, query.length);
-    }
+    const line = buf.getLine(i);
+    if (!line) continue;
+    const text = line.translateToString(true).trim();
+    for (const match of searchBufferLine(line, query, limit - out.length))
+      out.push({ line: i, ...match, text });
   }
   return out;
 }
@@ -48,12 +45,17 @@ export function revealTermMatch(term: Terminal, m: TermMatch): void {
     term.scrollToLine(Math.max(0, m.line - Math.floor(term.rows / 2)));
     const marker = term.registerMarker(m.line - (buf.baseY + buf.cursorY));
     if (!marker) return;
+    const annotation: { marker: IMarker; deco: IDecoration | null } = {
+      marker,
+      deco: null,
+    };
+    FIND_ANNOTATIONS.set(term, annotation);
     const deco =
       term.registerDecoration({ marker, x: m.col, width: m.len }) ?? null;
+    annotation.deco = deco;
     deco?.onRender((el) => el.classList.add("bt-match"));
-    FIND_ANNOTATIONS.set(term, { marker, deco });
   } catch {
-    // ignore
+    clearTermFind(term);
   }
 }
 

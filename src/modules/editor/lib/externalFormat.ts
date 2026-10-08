@@ -1,6 +1,6 @@
 import { quoteShellArg } from "@/lib/shellQuote";
 import type { EditorFormatter } from "@/modules/settings/store";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import type { EditorView } from "@codemirror/view";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -103,8 +103,9 @@ function buildCommand(
   formatter: ExternalFormatter,
   path: string,
   customTemplate: string,
+  workspace: WorkspaceEnv,
 ): string | null {
-  const quoted = quoteShellArg(path);
+  const quoted = quoteShellArg(path, workspace.kind === "local");
   if (formatter === "custom") {
     const template = customTemplate.trim();
     if (!template) return null;
@@ -120,8 +121,9 @@ export async function runExternalFormatter(
   formatter: ExternalFormatter,
   path: string,
   customTemplate = "",
+  workspace: WorkspaceEnv = currentWorkspaceEnv(),
 ): Promise<string | null> {
-  const command = buildCommand(formatter, path, customTemplate);
+  const command = buildCommand(formatter, path, customTemplate, workspace);
   if (!command) {
     return "No custom format command configured in Settings.";
   }
@@ -130,7 +132,7 @@ export async function runExternalFormatter(
       command,
       cwd: dirname(path),
       timeoutSecs: 20,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     });
     if (out.timed_out) return `${formatter} timed out`;
     if (out.exit_code !== 0) {
@@ -144,10 +146,11 @@ export async function runExternalFormatter(
 
 export async function readFileText(
   path: string,
+  workspace: WorkspaceEnv = currentWorkspaceEnv(),
 ): Promise<{ text: string; mtime: number } | null> {
   const res = await invoke<ReadResult>("fs_read_file", {
     path,
-    workspace: currentWorkspaceEnv(),
+    workspace,
   }).catch(() => null);
   if (res?.kind !== "text" || res.content == null) return null;
   return { text: res.content, mtime: res.mtime ?? 0 };

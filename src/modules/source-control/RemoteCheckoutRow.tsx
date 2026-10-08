@@ -64,9 +64,18 @@ export function RemoteCheckoutRow({
             value={value}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter") onConfirm();
-              else if (event.key === "Escape") onCancel();
+              if (event.nativeEvent.isComposing || event.keyCode === 229)
+                return;
+              if (event.key === "Enter") {
+                event.preventDefault();
+                if (!busy && value.trim()) onConfirm();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                if (!busy) onCancel();
+              }
             }}
+            disabled={busy}
+            aria-label="本地分支名"
             className="h-7 text-xs"
             placeholder="本地分支名"
           />
@@ -83,6 +92,7 @@ export function RemoteCheckoutRow({
             variant="ghost"
             className="h-7 shrink-0 cursor-pointer"
             onClick={onCancel}
+            disabled={busy}
           >
             取消
           </Button>

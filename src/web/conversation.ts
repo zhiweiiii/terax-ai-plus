@@ -1,3 +1,4 @@
+import { validGrid } from "@/web/protocol";
 import { Terminal } from "@xterm/xterm";
 
 // Turns the shared PTY's byte stream into a conversation.
@@ -56,6 +57,9 @@ const RECYCLE_AT = 4000;
  *  (and the phone's memory) without bound. */
 const MAX_LINES = 4000;
 const MAX_TURNS = 1000;
+const MAX_RETAINED_CHARS = 4 * 1024 * 1024;
+const MAX_PENDING_CHARS = 2 * 1024 * 1024;
+const MAX_PARSER_PENDING_BYTES = 8 * 1024 * 1024;
 /** Coalesce window. Output arrives in many small chunks while a command runs;
  *  flushing per chunk would emit half-written lines and thrash the DOM. */
 const FLUSH_MS = 60;
@@ -65,14 +69,10 @@ const TURN_IDLE_MS = 700;
 /** How many recent sends are remembered for de-duplication (a TUI paints your
  *  prompt on screen, and it must not come back as output). */
 const RECENT_SENDS = 12;
-/** Bytes per slice when replaying the attach backlog, ~two grid rows.
- *  detectScroll needs consecutive reads to share most rows: the old fixed
- *  2048 bytes was ~15 lines of a 138-col grid, so a scrolling session lost its
- *  whole history on attach (docs/issues.md #57). */
-const BACKLOG_SLICE = (cols: number) => Math.max(64, Math.min(2048, cols * 2));
 
 export class Conversation {
   private term: Terminal;
+  private queuedBytes = 0;
   private readonly onChange: () => void;
   /** Absolute buffer index of the first line not yet emitted. */
   private readUpTo = 0;
@@ -167,7 +167,7 @@ export class Conversation {
    *  this is the only width at which wrapping and cursor moves come out right.
    *  It is a parsing detail and never reaches the screen. */
   setGrid(cols: number, rows: number) {
-    if (cols < 2 || rows < 2) return;
+    if (!validGrid(cols, rows)) return;
     if (this.term.cols === cols && this.term.rows === rows) return;
     this.term.resize(cols, rows);
     // Frames of different widths are not comparable.
@@ -191,12 +191,41 @@ export class Conversation {
    *  buffer. The mode is then kept in sync by the flushes themselves. */
   setAltScreen(inAlt: boolean) {
     if (this.inAlt === inAlt) return;
-    this.term.write(inAlt ? "\x1b[?1049h" : "\x1b[?1049l");
+    this.writeParsed(inAlt ? "\x1b[?1049h" : "\x1b[?1049l");
   }
 
   write(bytes: Uint8Array) {
-    this.term.write(bytes);
-    this.scheduleFlush();
+    this.writeParsed(bytes);
+  }
+
+  private writeParsed(data: string | Uint8Array) {
+    const term = this.term;
+    this.queueWrite(data, () => {
+      if (term === this.term) this.scheduleFlush();
+    });
+  }
+
+  private queueWrite(data: string | Uint8Array, parsed: () => void) {
+    const term = this.term;
+    const bytes =
+      typeof data === "string"
+        ? new TextEncoder().encode(data).length
+        : data.length;
+    if (this.queuedBytes + bytes > MAX_PARSER_PENDING_BYTES) {
+      throw new Error("Terminal parser queue exceeded 8 MiB");
+    }
+    this.queuedBytes += bytes;
+    let pending = true;
+    try {
+      term.write(data, () => {
+        pending = false;
+        if (term === this.term) this.queuedBytes -= bytes;
+        parsed();
+      });
+    } catch (error) {
+      if (pending && term === this.term) this.queuedBytes -= bytes;
+      throw error;
+    }
   }
 
   /** Take in the seed the server sends when a phone attaches: the desktop
@@ -214,47 +243,42 @@ export class Conversation {
    *  scrollback unread and the phone would open on the TUI's screen alone.
    *  Write up to the switch, read the scrollback out as history, then write
    *  the rest. */
-  async writeSeed(bytes: Uint8Array) {
+  writeSeed(bytes: Uint8Array): Promise<void> {
     const term = this.term;
     const at = indexOfAltEnter(bytes);
     const head = at < 0 ? bytes : bytes.subarray(0, at);
-    if (head.length > 0) {
-      await new Promise<void>((done) => term.write(head, () => done()));
-      if (term !== this.term) return;
-      this.flush(at >= 0);
-      this.emitSeededCursorRow(at >= 0);
-    }
-    if (at < 0) return;
-    // Attaching mid-session: whatever the program has on screen now is an
-    // interaction the reader needs, never the splash it opened with.
-    this.firstFrame = false;
-    const tail = bytes.subarray(at);
-    await new Promise<void>((done) => term.write(tail, () => done()));
-    if (term !== this.term) return;
-    this.flush();
-  }
-
-  /** Replay a raw PTY byte stream through the parser, reading between slices.
-   *
-   *  Production does not use this - a phone is seeded from the desktop's
-   *  buffer (`writeSeed`). It is how the replay harness (`scripts/`) drives
-   *  captured sessions: writing a capture in one go would apply every frame a
-   *  full-screen program painted and read only the last, so the whole
-   *  conversation would collapse into the final screen. Feeding it in slices
-   *  and reading between them replays the frames instead, and the same scroll
-   *  detection that follows a live session reconstructs the history.
-   *
-   *  Slicing is safe at any byte: xterm carries a partial escape sequence over
-   *  to the next write. */
-  async writeBacklog(bytes: Uint8Array) {
-    const term = this.term;
-    const sliceSize = BACKLOG_SLICE(this.term.cols);
-    for (let at = 0; at < bytes.length; at += sliceSize) {
-      const slice = bytes.subarray(at, at + sliceSize);
-      await new Promise<void>((done) => term.write(slice, () => done()));
-      if (term !== this.term) return;
-      this.flush();
-    }
+    return new Promise<void>((done, reject) => {
+      if (this.queuedBytes + bytes.length > MAX_PARSER_PENDING_BYTES) {
+        throw new Error("Terminal seed exceeded parser queue budget");
+      }
+      if (head.length > 0) {
+        this.queueWrite(head, () => {
+          try {
+            if (term === this.term) {
+              this.flush(at >= 0);
+              this.emitSeededCursorRow(at >= 0);
+            }
+            if (at < 0) done();
+          } catch (error) {
+            reject(error);
+          }
+        });
+      } else if (at < 0) done();
+      // Queue both seed pieces before live frames can enter xterm's write queue.
+      if (at >= 0) {
+        this.queueWrite(bytes.subarray(at), () => {
+          try {
+            if (term === this.term) {
+              this.firstFrame = false;
+              this.flush();
+            }
+            done();
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    });
   }
 
   /** Emit the row the cursor is sitting on.
@@ -292,7 +316,23 @@ export class Conversation {
     if (this.recentSends.length > RECENT_SENDS) this.recentSends.shift();
 
     if (this.inAlt || this.agent !== null) {
-      this.pending.push(trimmed);
+      this.pending.push(text);
+      let pendingChars = this.pending.reduce(
+        (sum, item) => sum + item.length,
+        0,
+      );
+      while (this.pending.length > 64 || pendingChars > MAX_PENDING_CHARS) {
+        const oldest = this.pending.shift();
+        if (oldest === undefined) break;
+        pendingChars -= oldest.length;
+        this.turns.push({
+          kind: "sent",
+          id: this.nextId++,
+          at: Date.now(),
+          text: oldest,
+        });
+      }
+      this.trim();
       this.onChange();
       return;
     }
@@ -318,6 +358,7 @@ export class Conversation {
     const { cols, rows } = this.term;
     this.term.dispose();
     this.term = this.makeTerm(cols || 80, rows || 24);
+    this.queuedBytes = 0;
     this.readUpTo = 0;
     this.inAlt = false;
     this.agent = null;
@@ -757,21 +798,42 @@ export class Conversation {
   /** Keep the retained transcript bounded. */
   private trim() {
     let total = 0;
+    let chars = 0;
     for (const t of this.turns) {
       if (t.kind === "output") total += t.lines.length;
+      chars +=
+        t.kind === "output"
+          ? t.lines.reduce((sum, line) => sum + line.length, 0)
+          : t.text.length;
     }
+    const dropFirst = () => {
+      const dropped = this.turns.shift();
+      if (!dropped) return;
+      if (dropped.kind === "output") {
+        total -= dropped.lines.length;
+        chars -= dropped.lines.reduce((sum, line) => sum + line.length, 0);
+      } else chars -= dropped.text.length;
+    };
     while (this.turns.length > MAX_TURNS) {
-      const dropped = this.turns.shift();
-      if (dropped?.kind === "output") total -= dropped.lines.length;
+      dropFirst();
     }
-    while (total > MAX_LINES) {
+    while (total > MAX_LINES || chars > MAX_RETAINED_CHARS) {
       const first = this.turns[0];
-      if (first?.kind === "output" && first.lines.length > total - MAX_LINES) {
-        first.lines.splice(0, total - MAX_LINES);
-        break;
+      if (!first) break;
+      if (first.kind === "output") {
+        let remove = 0;
+        while (
+          remove < first.lines.length &&
+          (total > MAX_LINES || chars > MAX_RETAINED_CHARS)
+        ) {
+          chars -= first.lines[remove].length;
+          total--;
+          remove++;
+        }
+        first.lines.splice(0, remove);
+        if (first.lines.length > 0) continue;
       }
-      const dropped = this.turns.shift();
-      if (dropped?.kind === "output") total -= dropped.lines.length;
+      dropFirst();
     }
   }
 }
@@ -1109,7 +1171,8 @@ function condenseStatus(footer: string[], typed: string[]): string | null {
   const seen = new Set<string>();
   const parts: string[] = [];
   for (const line of footer) {
-    const text = collapse(stripChrome(line));
+    const raw = stripChrome(line);
+    const text = collapse(raw);
     if (text === "" || HINT.test(text)) continue;
     // Model / usage readouts (a WIDGET) are not status either; they would
     // otherwise pad the label with "Opus 5 claude-fresh 强度:high …".
@@ -1121,8 +1184,8 @@ function condenseStatus(footer: string[], typed: string[]): string | null {
     // A status bar is redrawn in pieces, so the same fragment shows up on
     // several rows; keep the first of each. Columns are separated by a run of
     // spaces as often as by a bullet, so split on both.
-    for (const piece of text.split(/\s+·\s+|\s{2,}/)) {
-      const key = piece.trim();
+    for (const piece of raw.split(/\s+·\s+|\s{2,}/)) {
+      const key = collapse(piece);
       if (key === "") continue;
       // A status fragment is short ("Opus 5", "5h已用 8%", "main"); a long
       // run is a sentence that leaked in from a scrambled mid-repaint frame,
@@ -1469,20 +1532,6 @@ function markEchoes(blocks: Block[], sent: string[]): Block[] {
         runs.push(run);
       }
       run.lines.push(line);
-    }
-    // These tools print a generated one-line title directly above the message
-    // it summarises ("Minimal message '1'"). It is a label for something the
-    // reader can already see, so drop it. Keyed on position rather than on
-    // wording, which every tool phrases differently and changes over time.
-    for (let i = runs.length - 1; i > 0; i--) {
-      const before = runs[i - 1];
-      if (
-        runs[i].role === "user" &&
-        before.role === "out" &&
-        before.lines.length === 1
-      ) {
-        runs.splice(i - 1, 1);
-      }
     }
     out.push(...runs);
   }

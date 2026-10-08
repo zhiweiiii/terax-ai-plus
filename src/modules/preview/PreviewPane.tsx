@@ -1,5 +1,6 @@
 import { Alert02Icon, Globe02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { normalizePreviewUrl } from "@/modules/preview/previewUrl";
 import {
   forwardRef,
   useEffect,
@@ -32,6 +33,7 @@ const SUSPEND_AFTER_MS = 30_000;
 
 export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
   function PreviewPane({ url, visible, onUrlChange }, ref) {
+    const frameUrl = normalizePreviewUrl(url);
     // `nonce` is part of the iframe `key`. Bumping it remounts the iframe,
     // which is the only reliable cross-origin reload (calling
     // contentWindow.location.reload() throws on cross-origin frames).
@@ -65,7 +67,7 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
       [url],
     );
 
-    const showXfoHint = url ? !isLocalUrl(url) : false;
+    const showXfoHint = frameUrl ? !isLocalUrl(frameUrl) : false;
 
     return (
       <div
@@ -97,17 +99,17 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
         ) : null}
         <div
           className={
-            url
+            frameUrl
               ? "relative min-h-0 flex-1 bg-white"
               : "relative min-h-0 flex-1 bg-background"
           }
         >
-          {url ? (
+          {frameUrl ? (
             loaded ? (
               <iframe
                 key={`${url}#${nonce}`}
                 ref={frameRef}
-                src={url}
+                src={frameUrl}
                 title="Preview"
                 className="h-full w-full border-0"
                 // sandbox grants the bare minimum for a dev preview: scripts,
@@ -128,6 +130,14 @@ export const PreviewPane = forwardRef<PreviewPaneHandle, Props>(
                 }}
               />
             )
+          ) : url ? (
+            <div
+              role="alert"
+              className="flex h-full items-center justify-center px-6 text-center text-sm text-muted-foreground"
+            >
+              Preview requires an external HTTP or HTTPS URL. Application pages
+              and other protocols are blocked.
+            </div>
           ) : (
             <EmptyState />
           )}

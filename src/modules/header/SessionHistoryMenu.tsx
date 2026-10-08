@@ -8,6 +8,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { errorToast } from "@/lib/errorToast";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { Add01Icon, Clock01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
@@ -61,44 +66,62 @@ type Props = {
  * nothing.
  */
 export function SessionHistoryMenu({ cwd, onRun }: Props) {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const scopeKey = workspaceScopeKey(workspace);
   const [open, setOpen] = useState(false);
   const [requestId, setRequestId] = useState(0);
   const [result, setResult] = useState<{
     cwd: string | null;
+    scopeKey: string;
     requestId: number;
     sessions: Session[];
+    error?: string;
   } | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    if (!cwd) {
-      setResult({ cwd, requestId, sessions: [] });
+    if (!cwd || workspace.kind === "wsl") {
+      setResult({ cwd, scopeKey, requestId, sessions: [] });
       return;
     }
     let cancelled = false;
-    void invoke<Session[]>("agent_sessions", { cwd }).then(
+    void invoke<Session[]>("agent_sessions", { cwd, workspace }).then(
       (sessions) => {
-        if (!cancelled) setResult({ cwd, requestId, sessions });
+        if (!cancelled && currentWorkspaceScopeKey() === scopeKey)
+          setResult({ cwd, scopeKey, requestId, sessions });
       },
       (error) => {
-        if (cancelled) return;
-        setResult({ cwd, requestId, sessions: [] });
+        if (cancelled || currentWorkspaceScopeKey() !== scopeKey) return;
+        setResult({
+          cwd,
+          scopeKey,
+          requestId,
+          sessions: [],
+          error: String(error),
+        });
         errorToast("读取会话历史失败", error);
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [cwd, open, requestId]);
+  }, [cwd, open, requestId, scopeKey, workspace]);
 
   const sessions =
-    result?.cwd === cwd && result.requestId === requestId
+    result?.cwd === cwd &&
+    result.scopeKey === scopeKey &&
+    result.requestId === requestId
       ? result.sessions
       : null;
   const loading = open && sessions === null;
 
   const resume = (session: Session) => {
-    if (!onRun) return;
+    if (
+      !onRun ||
+      currentWorkspaceScopeKey() !== scopeKey ||
+      !sessions?.includes(session)
+    )
+      return;
     onRun(resumeCommand(session));
   };
 
@@ -120,7 +143,10 @@ export function SessionHistoryMenu({ cwd, onRun }: Props) {
           <HugeiconsIcon icon={Clock01Icon} size={14} strokeWidth={1.75} />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="max-h-[70vh] w-80 overflow-y-auto">
+      <DropdownMenuContent
+        align="end"
+        className="max-h-[70vh] w-80 overflow-y-auto"
+      >
         <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground">
           新对话
         </DropdownMenuLabel>
@@ -143,9 +169,20 @@ export function SessionHistoryMenu({ cwd, onRun }: Props) {
           </div>
         ) : null}
 
-        {sessions !== null && sessions.length === 0 && !loading ? (
+        {result?.error && sessions !== null ? (
+          <button
+            type="button"
+            onClick={() => setRequestId((id) => id + 1)}
+            className="w-full px-2 py-3 text-center text-[11px] text-destructive hover:bg-accent"
+            title={result.error}
+          >
+            读取历史失败，点击重试
+          </button>
+        ) : sessions !== null && sessions.length === 0 && !loading ? (
           <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
-            这个目录还没有历史会话
+            {workspace.kind === "wsl"
+              ? "WSL 历史尚未接入，请在对应命令行使用 resume。"
+              : "这个目录还没有历史会话"}
           </div>
         ) : null}
 

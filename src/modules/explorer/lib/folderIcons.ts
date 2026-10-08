@@ -563,19 +563,12 @@ const folderIcons: FolderIcons = {
   },
 };
 
-const { folderNames } = Object.entries(folderIcons).reduce(
-  ({ folderNames }, [name, icon]) => ({
-    folderNames: {
-      ...folderNames,
-      ...icon.folderNames?.reduce(
-        (a, c) => ({ ...a, [c]: `folder_${name}` }),
-        {},
-      ),
-    },
-  }),
-  {
-    folderNames: {},
-  },
-);
+const folderNames: Record<string, string> = Object.create(null);
+
+for (const [name, icon] of Object.entries(folderIcons)) {
+  for (const folder of icon.folderNames ?? []) {
+    folderNames[folder.toLowerCase()] = `folder_${name}`;
+  }
+}
 
 export { folderIcons, folderNames };

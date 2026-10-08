@@ -1,12 +1,25 @@
+import { copyButton } from "@/web/clipboard";
 import {
   type Block,
   Conversation,
   sameMessage,
   type Turn,
 } from "@/web/conversation";
-import { copyButton } from "@/web/clipboard";
 import { patchChildren } from "@/web/dom";
 import { renderMarkdown } from "@/web/markdown";
+import {
+  isSchedulesMsg,
+  isSessionsMsg,
+  isTranscriptMsg,
+  type ScheduledJob,
+  type ServerMsg,
+  type SessionInfo,
+  type SessionsMsg,
+  type TranscriptMessage,
+  type TranscriptMsg,
+  type TranscriptPart,
+} from "@/web/protocol";
+import { groupSessions } from "@/web/sessionGroups";
 import "@/web/style.css";
 
 // ── WebSocket wire protocol (see src-tauri/src/modules/web/mod.rs) ──────
@@ -43,107 +56,6 @@ import "@/web/style.css";
 // command line shows, and a second copy of the output kept server-side drifted
 // from it. `seed` says whether that frame is coming; `alt` is the fallback
 // buffer mode for when it is not.
-
-type SessionInfo = {
-  id: number;
-  cwd: string | null;
-  title: string | null;
-  active: boolean;
-  live: boolean;
-  space: string | null;
-  cols?: number;
-  rows?: number;
-};
-
-type SpaceInfo = { id: string; name: string };
-
-/** One turn of an agent conversation, read from the agent's OWN transcript
- *  (`~/.claude/projects/**.jsonl`, `~/.codex/sessions/**.jsonl`, opencode's SQLite) rather than parsed off
- *  its screen. See the Rust `transcript` module. */
-/** One piece of a turn, in the order the agent produced it. */
-type TranscriptPart =
-  | { kind: "text"; text: string }
-  | {
-      kind: "tool";
-      name: string;
-      /** What it was called on: the command, the path, the pattern. */
-      subject?: string;
-      /** What it printed, already clipped server-side. */
-      output?: string;
-      /** Lines the clip dropped. */
-      elided?: number;
-      failed?: boolean;
-    };
-
-type TranscriptMessage = {
-  id: string;
-  role: "user" | "assistant";
-  at: number;
-  /** The message for a user turn; the prose flattened out of `parts` for an
-   *  agent one. Compared against, not rendered — `parts` is what is drawn. */
-  text: string;
-  reasoning?: string;
-  parts: TranscriptPart[];
-};
-
-type TranscriptMsg = {
-  type: "transcript";
-  source: string;
-  session_id: string;
-  title?: string;
-  mode?: string;
-  model?: string;
-  messages: TranscriptMessage[];
-  working?: { since: number };
-  revision: number;
-};
-
-/** A command queued to run later. The clock is server-side (see
- *  src-tauri/src/modules/schedule.rs): a phone that locked its screen, or a
- *  tab that was closed, cannot be the thing counting down. */
-type ScheduledJob = {
-  id: number;
-  target?: "terminal" | "codex" | "claude";
-  daily_time?: string | null;
-  running?: boolean;
-  finished?: boolean;
-  paused?: boolean;
-  leaf_id: number;
-  command: string;
-  /** Epoch milliseconds. */
-  fire_at: number;
-  created_at: number;
-};
-
-type SchedulesMsg = {
-  type: "schedules";
-  jobs: ScheduledJob[];
-};
-
-type SessionsMsg = {
-  type: "sessions";
-  sessions: SessionInfo[];
-  spaces: SpaceInfo[];
-};
-
-/** Any text message the server can push. Fields are optional because which
- *  ones are present depends on the `type` (the switch narrows by behaviour,
- *  not by a declared union). */
-type ServerMsg = {
-  type?: string;
-  id?: number;
-  code?: number;
-  cols?: number;
-  rows?: number;
-  alt?: boolean;
-  seed?: boolean;
-  message?: string;
-  requestId?: string;
-  accepted?: boolean;
-  agent?: string | null;
-  sessions?: SessionInfo[];
-  spaces?: SpaceInfo[];
-};
 
 /** The agent conversation for the attached session, when one is running.
  *
@@ -794,6 +706,12 @@ function forgetHeld(key: string) {
  *  true until it is not, and pushing each repaint of it into the conversation
  *  would bury the conversation in its own progress bar. */
 function paintThinking() {
+  if (attachedId === null || pendingAttachId !== null) {
+    forgetHeld("thinking");
+    thinkingEl.hidden = true;
+    thinkingEl.dataset.sig = "";
+    return;
+  }
   // Two sources, and the order matters. The transcript knows when the turn
   // STARTED, so the page can count up on its own instead of being told an
   // elapsed time on every poll - but it only learns of a turn when the agent
@@ -1147,7 +1065,11 @@ let workingTimer = 0;
 function startWorkingTicker() {
   if (workingTimer) return;
   workingTimer = window.setInterval(() => {
-    if (!transcript?.working) {
+    if (
+      !transcript?.working ||
+      attachedId === null ||
+      pendingAttachId !== null
+    ) {
       window.clearInterval(workingTimer);
       workingTimer = 0;
       return;
@@ -1278,14 +1200,24 @@ function send(obj: unknown) {
 
 function connect() {
   const mySeq = ++wsSeq;
-  ws = new WebSocket(wsUrl);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => {
+  const previous = ws;
+  const socket = new WebSocket(wsUrl);
+  ws = socket;
+  attachedId = null;
+  pendingAttachId = null;
+  seedPending = false;
+  paintThinking();
+  clearOpeningRetry();
+  previous?.close();
+  socket.binaryType = "arraybuffer";
+  socket.onopen = () => {
+    if (mySeq !== wsSeq || ws !== socket) return;
     setStatus("已连接");
     reconnectDelay = 1000;
     send({ list: true });
   };
-  ws.onmessage = (ev) => {
+  socket.onmessage = (ev) => {
+    if (mySeq !== wsSeq || ws !== socket) return;
     if (typeof ev.data === "string") {
       let msg: unknown;
       try {
@@ -1305,27 +1237,39 @@ function connect() {
     // terminal's own buffer, serialized. See Conversation.writeSeed.
     if (seedPending) {
       seedPending = false;
-      void conv.writeSeed(payload);
+      void conv.writeSeed(payload).catch(() => {
+        if (mySeq !== wsSeq || ws !== socket) return;
+        toast("终端画面同步失败，请重新连接");
+        socket.close();
+      });
       return;
     }
-    conv.write(payload);
+    try {
+      conv.write(payload);
+    } catch {
+      toast("终端输出过快，正在重新同步画面");
+      socket.close();
+    }
   };
-  ws.onclose = () => {
+  socket.onclose = () => {
     if (mySeq !== wsSeq) return;
     setStatus("已断开", "err");
     finishSubmission(false, "连接中断，发送结果未确认，内容已保留");
     finishSchedule(false, "连接中断，定时任务结果未确认，内容已保留");
     attachedId = null;
     pendingAttachId = null;
+    clearOpeningRetry();
+    paintThinking();
     scheduleReconnect();
   };
-  ws.onerror = () => {
+  socket.onerror = () => {
     if (mySeq !== wsSeq) return;
-    ws?.close();
+    socket.close();
   };
 }
 
 function handleText(raw: unknown) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
   const msg = raw as ServerMsg;
   switch (msg.type) {
     case "scheduleAck":
@@ -1347,22 +1291,26 @@ function handleText(raw: unknown) {
         finishSubmission(msg.accepted === true, msg.message);
       break;
     case "transcriptClear":
+      if (attachedId === null || pendingAttachId !== null) break;
       transcript = null;
       awaitingTranscript = [];
       render();
       break;
     case "sessions": {
-      renderSessions(msg as SessionsMsg);
-      const sessions = (msg as SessionsMsg).sessions;
+      if (!isSessionsMsg(raw)) break;
+      renderSessions(raw);
+      const sessions = raw.sessions;
       emptyHint.hidden = sessions.length !== 0;
       const live = sessions.filter((s) => s.live);
       const target =
-        pendingAttachId !== null && live.some((s) => s.id === pendingAttachId)
-          ? pendingAttachId
+        pendingAttachId !== null
+          ? live.some((s) => s.id === pendingAttachId)
+            ? pendingAttachId
+            : null
           : lastAttachedId !== null && live.some((s) => s.id === lastAttachedId)
             ? lastAttachedId
             : live.length > 0
-              ? live[0].id
+              ? (live.find((s) => s.active) ?? live[0]).id
               : null;
       if (attachedId === null && target !== null) attachTo(target);
       break;
@@ -1371,6 +1319,13 @@ function handleText(raw: unknown) {
       if (typeof msg.id === "number") scheduleOpeningRetry(msg.id);
       break;
     case "attached":
+      if (
+        typeof msg.id !== "number" ||
+        (pendingAttachId !== null && msg.id !== pendingAttachId) ||
+        (pendingAttachId === null && msg.id !== attachedId)
+      )
+        break;
+      clearOpeningRetry();
       openingRetries = 0;
       pendingAttachId = null;
       if (typeof msg.id !== "number") break;
@@ -1396,8 +1351,8 @@ function handleText(raw: unknown) {
       break;
     case "transcript": {
       if (attachedId === null || pendingAttachId !== null) break;
-      const next = raw as TranscriptMsg;
-      if (!Array.isArray(next.messages)) break;
+      if (!isTranscriptMsg(raw)) break;
+      const next = raw;
       transcript = next;
       conv.setAgent(next.source);
       awaitingTranscript = awaitingTranscript.filter(
@@ -1409,13 +1364,14 @@ function handleText(raw: unknown) {
       break;
     }
     case "schedules": {
-      const next = (raw as SchedulesMsg).jobs;
-      if (!Array.isArray(next)) break;
+      if (!isSchedulesMsg(raw)) break;
+      const next = raw.jobs;
       schedules = next;
       if (schedEl.hidden === false) paintSchedules();
       break;
     }
     case "resized":
+      if (attachedId === null || pendingAttachId !== null) break;
       // The grid changed because one end claimed the session. Every viewer
       // parses at the same grid (the byte stream is laid out against it), so
       // follow the owner. The phone never fights for a grid of its own.
@@ -1424,6 +1380,7 @@ function handleText(raw: unknown) {
       }
       break;
     case "exit":
+      if (attachedId !== msg.id && pendingAttachId !== msg.id) break;
       finishSubmission(false, "终端已退出，内容已保留");
       finishSchedule(false, "终端已退出，定时任务结果未确认，内容已保留");
       // The agent went with the shell; its transcript is no longer what this
@@ -1440,8 +1397,12 @@ function handleText(raw: unknown) {
     case "error":
       toast(msg.message || "错误");
       if (msg.message === "output too fast, resubscribe") {
+        finishSubmission(false, "连接过载，发送结果未确认，内容已保留");
+        finishSchedule(false, "连接过载，定时任务结果未确认，内容已保留");
+        clearOpeningRetry();
         attachedId = null;
         pendingAttachId = null;
+        paintThinking();
         scheduleReconnect();
       }
       break;
@@ -1458,15 +1419,25 @@ function scheduleReconnect() {
 }
 
 let openingRetries = 0;
+let openingTimer: number | null = null;
+function clearOpeningRetry() {
+  if (openingTimer !== null) window.clearTimeout(openingTimer);
+  openingTimer = null;
+}
 function scheduleOpeningRetry(id: number) {
+  if (pendingAttachId !== id || openingTimer !== null) return;
   if (openingRetries >= 3) {
     openingRetries = 0;
+    pendingAttachId = null;
     setStatus("无法连接该终端", "err");
     return;
   }
   openingRetries++;
   setStatus(`正在打开会话 #${id}…`, "warn");
-  window.setTimeout(() => send({ list: true }), 1500);
+  openingTimer = window.setTimeout(() => {
+    openingTimer = null;
+    if (pendingAttachId === id) send({ attach: id });
+  }, 1500);
 }
 
 // ── Session sheet ────────────────────────────────────────────────────────
@@ -1483,24 +1454,8 @@ function renderSessions(msg: SessionsMsg) {
     sessionListEl.appendChild(li);
     return;
   }
-  const bySpace = new Map<string, SessionInfo[]>();
-  for (const s of sessions) {
-    const key = s.space ?? "";
-    const bucket = bySpace.get(key);
-    if (bucket) bucket.push(s);
-    else bySpace.set(key, [s]);
-  }
-  const shown = new Set<string>();
-  for (const sp of spaces) {
-    shown.add(sp.id);
-    shown.add(sp.name);
-    const list = bySpace.get(sp.id) ?? bySpace.get(sp.name) ?? [];
-    appendGroupRow(sp.name || "其他", list);
-  }
-  for (const [key, list] of bySpace) {
-    if (shown.has(key)) continue;
-    appendGroupRow(key || "其他", list);
-  }
+  for (const group of groupSessions(sessions, spaces))
+    appendGroupRow(group.name, group.sessions);
 }
 
 function appendGroupRow(name: string, list: SessionInfo[]) {
@@ -1552,6 +1507,10 @@ function attachTo(id: number) {
   }
   finishSubmission(false, "已切换终端，原消息结果未确认，内容已保留");
   finishSchedule(false, "已切换终端，定时任务结果未确认，内容已保留");
+  if (pendingAttachId !== id) {
+    clearOpeningRetry();
+    openingRetries = 0;
+  }
   pendingAttachId = id;
   seedPending = false;
   transcript = null;
@@ -1600,8 +1559,13 @@ function writePty(data: string) {
   const frame = new Uint8Array(1 + bytes.length);
   frame[0] = 0x30;
   frame.set(bytes, 1);
-  ws.send(frame);
-  return true;
+  try {
+    ws.send(frame);
+    return true;
+  } catch {
+    toast("发送失败，请检查连接后重试");
+    return false;
+  }
 }
 
 function submit() {
@@ -1621,6 +1585,17 @@ function submit() {
   }
   if (new TextEncoder().encode(text).length > 64 * 1024) {
     toast("消息超过 64 KB，请缩短后发送");
+    return;
+  }
+  const waiting = transcript
+    ? awaitingTranscript.map((item) => item.text)
+    : conv.pending;
+  if (
+    waiting.length >= 64 ||
+    waiting.reduce((sum, message) => sum + message.length, text.length) >
+      2 * 1024 * 1024
+  ) {
+    toast("未确认的对话记录过多，请等待记录刷新，当前输入已保留");
     return;
   }
   const previous = uncertainSubmission;

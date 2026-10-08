@@ -10,8 +10,8 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::Value;
 
 use super::{
-    clip_output, flatten_text, merge_assistant_steps, push_part, same_dir, Message, Part,
-    Transcript, Working,
+    clip_output, flatten_text, merge_assistant_steps, push_part, same_dir, timestamp, Message,
+    Part, Transcript, Working,
 };
 
 /// Only look at directories touched this recently when the escaped-name guess
@@ -67,13 +67,24 @@ pub(super) fn project_dir(cwd: &str) -> Option<PathBuf> {
 
 fn search_project_dir(root: &Path, cwd: &str) -> Option<PathBuf> {
     let now = std::time::SystemTime::now();
+    let started = std::time::Instant::now();
+    let mut remaining = 8192usize;
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(root).ok()?.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
+    for entry in fs::read_dir(root).ok()? {
+        if remaining == 0 || started.elapsed() > std::time::Duration::from_secs(2) {
+            return None;
+        }
+        remaining -= 1;
+        let entry = entry.ok()?;
+        let kind = entry.file_type().ok()?;
+        if !kind.is_dir() || kind.is_symlink() {
             continue;
         }
-        let Some(file) = newest_transcript(&dir) else {
+        let dir = entry.path();
+        let Some(file) = newest_transcript(&dir, &mut remaining, started) else {
+            if remaining == 0 || started.elapsed() > std::time::Duration::from_secs(2) {
+                return None;
+            }
             continue;
         };
         let Ok(modified) = file.metadata().and_then(|m| m.modified()) else {
@@ -111,9 +122,23 @@ fn transcript_cwd(file: &Path) -> Option<String> {
     None
 }
 
-fn newest_transcript(dir: &Path) -> Option<PathBuf> {
+fn newest_transcript(
+    dir: &Path,
+    remaining: &mut usize,
+    started: std::time::Instant,
+) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(dir).ok()?.flatten() {
+    for entry in fs::read_dir(dir).ok()? {
+        if *remaining == 0 || started.elapsed() > std::time::Duration::from_secs(2) {
+            *remaining = 0;
+            return None;
+        }
+        *remaining -= 1;
+        let entry = entry.ok()?;
+        let kind = entry.file_type().ok()?;
+        if !kind.is_file() || kind.is_symlink() {
+            continue;
+        }
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
@@ -136,7 +161,6 @@ struct ParseState {
     steps: Vec<Message>,
     turn_started: Option<i64>,
     turn_open: bool,
-    pending_tools: i32,
     awaiting_result: HashMap<String, (usize, usize)>,
 }
 
@@ -166,7 +190,6 @@ impl super::jsonl::JsonlState for ParseState {
         // counting calls out and results in tracks the turn exactly.
         let mut turn_started = self.turn_started;
         let mut turn_open = self.turn_open;
-        let mut pending_tools = self.pending_tools;
         // tool_use id -> where its Part sits, so the result can be written back.
         let mut awaiting_result = std::mem::take(&mut self.awaiting_result);
 
@@ -191,11 +214,10 @@ impl super::jsonl::JsonlState for ParseState {
                 Some("user") => {
                     let results = count_blocks(&value, "tool_result");
                     if results > 0 {
-                        pending_tools = (pending_tools - results).max(0);
                         // Not conversation, but it carries what the calls printed.
                         // This is the whole reason the phone can show a command and
                         // its output where it ran without reading the screen.
-                        fill_tool_results(&value, &mut steps, &awaiting_result);
+                        fill_tool_results(&value, &mut steps, &mut awaiting_result);
                         continue;
                     }
                     let origin = value
@@ -211,6 +233,7 @@ impl super::jsonl::JsonlState for ParseState {
                     let at = timestamp(&value);
                     turn_started = Some(at);
                     turn_open = true;
+                    awaiting_result.clear();
                     steps.push(Message {
                         id: entry_id(&value, self.sequence),
                         role: "user",
@@ -228,14 +251,13 @@ impl super::jsonl::JsonlState for ParseState {
                     let mut call_ids = tool_use_ids(&value).into_iter();
                     for (index, part) in parts.iter().enumerate() {
                         if let Part::Tool { .. } = part {
-                            if let Some(id) = call_ids.next() {
+                            if let Some(Some(id)) = call_ids.next() {
                                 awaiting_result.insert(id, (steps.len(), index));
                             }
                         }
                     }
-                    pending_tools += count_blocks(&value, "tool_use");
                     // Still going while a call it just made has not come back.
-                    turn_open = pending_tools > 0;
+                    turn_open = !awaiting_result.is_empty();
                     steps.push(Message {
                         id: entry_id(&value, self.sequence),
                         role: "assistant",
@@ -255,7 +277,6 @@ impl super::jsonl::JsonlState for ParseState {
         self.steps = steps;
         self.turn_started = turn_started;
         self.turn_open = turn_open;
-        self.pending_tools = pending_tools;
         self.awaiting_result = awaiting_result;
     }
 
@@ -308,7 +329,7 @@ fn entry_id(value: &Value, index: usize) -> String {
 
 /// The ids of this entry's tool calls, in the order the blocks appear — the
 /// same order `assistant_blocks` pushes their parts, so the two zip.
-fn tool_use_ids(value: &Value) -> Vec<String> {
+fn tool_use_ids(value: &Value) -> Vec<Option<String>> {
     value
         .get("message")
         .and_then(|m| m.get("content"))
@@ -317,8 +338,8 @@ fn tool_use_ids(value: &Value) -> Vec<String> {
             blocks
                 .iter()
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
-                .filter_map(|b| b.get("id").and_then(Value::as_str))
-                .map(str::to_string)
+                .filter(|b| b.get("name").and_then(Value::as_str).is_some())
+                .map(|b| b.get("id").and_then(Value::as_str).map(str::to_string))
                 .collect()
         })
         .unwrap_or_default()
@@ -366,7 +387,7 @@ fn call_subject(input: Option<&Value>) -> Option<String> {
 fn fill_tool_results(
     value: &Value,
     steps: &mut [Message],
-    awaiting: &HashMap<String, (usize, usize)>,
+    awaiting: &mut HashMap<String, (usize, usize)>,
 ) {
     let Some(blocks) = value
         .get("message")
@@ -382,7 +403,7 @@ fn fill_tool_results(
         let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
             continue;
         };
-        let Some(&(step, index)) = awaiting.get(id) else {
+        let Some((step, index)) = awaiting.remove(id) else {
             continue;
         };
         let Some(Part::Tool {
@@ -420,54 +441,12 @@ fn tool_result_text(block: &Value) -> String {
     }
 }
 
-/// Timestamps are ISO-8601 with milliseconds. Parsed by hand rather than
-/// pulling in a date crate for one field: only the epoch value is wanted, and
-/// the format is fixed by the writer.
-fn timestamp(value: &Value) -> i64 {
-    value
-        .get("timestamp")
-        .and_then(Value::as_str)
-        .and_then(parse_iso8601_ms)
-        .unwrap_or(0)
-}
-
-fn parse_iso8601_ms(text: &str) -> Option<i64> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 19 {
-        return None;
-    }
-    let num = |from: usize, to: usize| text.get(from..to)?.parse::<i64>().ok();
-    let year = num(0, 4)?;
-    let month = num(5, 7)?;
-    let day = num(8, 10)?;
-    let hour = num(11, 13)?;
-    let minute = num(14, 16)?;
-    let second = num(17, 19)?;
-    let millis = text
-        .get(20..23)
-        .and_then(|m| m.parse::<i64>().ok())
-        .unwrap_or(0);
-    let days = days_from_civil(year, month, day);
-    Some(((days * 24 + hour) * 60 + minute) * 60_000 + second * 1000 + millis)
-}
-
-/// Days since the Unix epoch (Howard Hinnant's civil-from-days, inverted).
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
 fn user_text(value: &Value) -> String {
     let Some(content) = value.get("message").and_then(|m| m.get("content")) else {
         return String::new();
     };
     if let Some(text) = content.as_str() {
-        return text.trim().to_string();
+        return text.to_string();
     }
     let Some(blocks) = content.as_array() else {
         return String::new();
@@ -478,8 +457,6 @@ fn user_text(value: &Value) -> String {
         .filter_map(|b| b.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("\n")
-        .trim()
-        .to_string()
 }
 
 /// One entry's content, in the order Claude wrote the blocks.

@@ -15,8 +15,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { native } from "@/lib/native";
 import { GitBranchPlusIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useRef, useState } from "react";
-import { errorToast } from "@/lib/errorToast";
+import { useEffect, useId, useRef, useState } from "react";
+import { useRepositoryOperation } from "@/modules/source-control/useRepositoryOperation";
 import { toast } from "sonner";
 
 /**
@@ -41,43 +41,57 @@ export function NewBranchDialog({
   const [name, setName] = useState("");
   const [base, setBase] = useState(defaultStartPoint);
   const [checkout, setCheckout] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { busy, run, scopeKey } = useRepositoryOperation(
+    open,
+    JSON.stringify([repoRoot, defaultStartPoint]),
+  );
+  const formId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Reset drafts when the repository or workspace changes.
   useEffect(() => {
     if (!open) return;
     setName("");
     setBase(defaultStartPoint);
     setCheckout(true);
-    setBusy(false);
-    setTimeout(() => inputRef.current?.focus(), 0);
-  }, [open, defaultStartPoint]);
+    const timer = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(timer);
+  }, [open, defaultStartPoint, scopeKey]);
 
   const submit = async () => {
     const trimmed = name.trim();
-    if (!trimmed || busy) return;
-    setBusy(true);
-    try {
-      await native.gitCreateBranch(repoRoot, trimmed, {
-        checkout,
-        startPoint: base.trim() || undefined,
-      });
-      toast.success(
-        checkout
-          ? `Created and switched to ${trimmed} in ${repoName}`
-          : `Created branch ${trimmed} in ${repoName}`,
-      );
-      onOpenChange(false);
-      onCreated(checkout);
-    } catch (e) {
-      errorToast(`Could not create branch in ${repoName}`, e);
-    } finally {
-      setBusy(false);
-    }
+    if (!trimmed) return;
+    await run(
+      (workspace) =>
+        native.gitCreateBranch(
+          repoRoot,
+          trimmed,
+          {
+            checkout,
+            startPoint: base.trim() || undefined,
+          },
+          workspace,
+        ),
+      () => {
+        toast.success(
+          checkout
+            ? `Created and switched to ${trimmed} in ${repoName}`
+            : `Created branch ${trimmed} in ${repoName}`,
+        );
+        onOpenChange(false);
+        onCreated(checkout);
+      },
+      `Could not create branch in ${repoName}`,
+    );
   };
 
   return (
-    <AlertDialog open={open} onOpenChange={onOpenChange}>
+    <AlertDialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!busy) onOpenChange(next);
+      }}
+    >
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle className="flex gap-1.75">
@@ -95,17 +109,19 @@ export function NewBranchDialog({
         <div className="grid gap-3">
           <div className="grid gap-1.5">
             <Label
-              htmlFor="new-branch-name"
+              htmlFor={`${formId}-name`}
               className="text-xs text-muted-foreground"
             >
               分支名
             </Label>
             <Input
-              id="new-branch-name"
+              id={`${formId}-name`}
               ref={inputRef}
               value={name}
+              disabled={busy}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   void submit();
@@ -116,32 +132,34 @@ export function NewBranchDialog({
           </div>
           <div className="grid gap-1.5">
             <Label
-              htmlFor="new-branch-base"
+              htmlFor={`${formId}-base`}
               className="text-xs text-muted-foreground"
             >
               基于
             </Label>
             <Input
-              id="new-branch-base"
+              id={`${formId}-base`}
               value={base}
+              disabled={busy}
               onChange={(e) => setBase(e.target.value)}
               placeholder="HEAD"
             />
           </div>
           <label
-            htmlFor="new-branch-checkout"
+            htmlFor={`${formId}-checkout`}
             className="flex cursor-pointer items-center gap-2 text-xs"
           >
             <Checkbox
-              id="new-branch-checkout"
+              id={`${formId}-checkout`}
               checked={checkout}
+              disabled={busy}
               onCheckedChange={(value) => setCheckout(value === true)}
             />
             创建后切换到该分支
           </label>
         </div>
         <AlertDialogFooter>
-          <AlertDialogCancel>取消</AlertDialogCancel>
+          <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
           <Button
             disabled={busy || name.trim().length === 0}
             onClick={() => void submit()}

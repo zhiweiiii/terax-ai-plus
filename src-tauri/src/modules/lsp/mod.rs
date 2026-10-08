@@ -32,8 +32,13 @@ impl LspState {
     }
 
     pub fn kill_all(&self) {
-        let drained: Vec<Arc<LspSession>> =
-            self.sessions.write().unwrap().drain().map(|(_, s)| s).collect();
+        let drained: Vec<Arc<LspSession>> = self
+            .sessions
+            .write()
+            .unwrap()
+            .drain()
+            .map(|(_, s)| s)
+            .collect();
         for session in drained {
             session.kill();
         }
@@ -163,4 +168,3 @@ pub fn lsp_kill(state: tauri::State<'_, LspState>, id: u32) {
         log::info!("lsp killed id={id}");
     }
 }
-

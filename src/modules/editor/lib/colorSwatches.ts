@@ -2,7 +2,7 @@ import { type Extension, RangeSetBuilder } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
-  type EditorView,
+  EditorView,
   ViewPlugin,
   type ViewUpdate,
   WidgetType,
@@ -38,7 +38,7 @@ class SwatchWidget extends WidgetType {
     readonly color: string,
     readonly from: number,
     readonly to: number,
-    readonly editable: boolean,
+    readonly canEdit: boolean,
   ) {
     super();
   }
@@ -48,7 +48,7 @@ class SwatchWidget extends WidgetType {
       other.color === this.color &&
       other.from === this.from &&
       other.to === this.to &&
-      other.editable === this.editable
+      other.canEdit === this.canEdit
     );
   }
 
@@ -56,16 +56,24 @@ class SwatchWidget extends WidgetType {
     const wrap = document.createElement("span");
     wrap.className = "cm-color-swatch";
     wrap.style.backgroundColor = this.color;
-    if (!this.editable) return wrap;
+    if (!this.canEdit) return wrap;
 
     const input = document.createElement("input");
     input.type = "color";
+    input.setAttribute("aria-label", "Choose color");
     input.className = "cm-color-swatch-input";
     input.value = toHex6(this.color);
     input.addEventListener("input", () => {
       wrap.style.backgroundColor = applyHex(this.color, input.value);
     });
     input.addEventListener("change", () => {
+      if (
+        view.state.readOnly ||
+        !view.state.facet(EditorView.editable) ||
+        this.to > view.state.doc.length ||
+        view.state.sliceDoc(this.from, this.to) !== this.color
+      )
+        return;
       view.dispatch({
         changes: {
           from: this.from,
@@ -79,7 +87,7 @@ class SwatchWidget extends WidgetType {
   }
 
   ignoreEvent(): boolean {
-    return false;
+    return true;
   }
 }
 
@@ -88,15 +96,21 @@ function build(view: EditorView): DecorationSet {
   for (const { from, to } of view.visibleRanges) {
     const text = view.state.sliceDoc(from, to);
     COLOR_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = COLOR_RE.exec(text)) !== null) {
+    for (let m = COLOR_RE.exec(text); m !== null; m = COLOR_RE.exec(text)) {
       const start = from + m.index;
       const end = start + m[0].length;
       builder.add(
         start,
         start,
         Decoration.widget({
-          widget: new SwatchWidget(m[0], start, end, isHex(m[0])),
+          widget: new SwatchWidget(
+            m[0],
+            start,
+            end,
+            isHex(m[0]) &&
+              !view.state.readOnly &&
+              view.state.facet(EditorView.editable),
+          ),
           side: -1,
         }),
       );

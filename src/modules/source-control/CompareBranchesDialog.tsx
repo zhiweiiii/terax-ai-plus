@@ -7,15 +7,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import {
-  type GitCompareResult,
-  type GitLogEntry,
-  native,
-} from "@/lib/native";
+import { type GitLogEntry, native } from "@/lib/native";
 import { GitCompareIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useCallback, useEffect, useState } from "react";
-import { errorToast } from "@/lib/errorToast";
+import { useCallback } from "react";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
+import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 /** Two-column commit comparison: commits only in each branch of the pair. */
 export function CompareBranchesDialog({
   open,
@@ -32,35 +29,32 @@ export function CompareBranchesDialog({
   left: string;
   right: string;
 }) {
-  const [result, setResult] = useState<GitCompareResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(true);
-
-  const load = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      setResult(await native.gitCompareBranches(repoRoot, left, right));
-    } catch (e) {
-      setError(String(e));
-      errorToast(`Could not compare ${left} with ${right}`, e);
-    } finally {
-      setBusy(false);
-    }
-  }, [repoRoot, left, right]);
-
-  useEffect(() => {
-    if (open) void load();
-  }, [open, load]);
-
-  // Drop stale results while closed so the next open starts clean.
-  useEffect(() => {
-    if (open) return;
-    setResult(null);
-    setError(null);
-    setBusy(true);
-  }, [open]);
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const run = useCallback(
+    async () => [
+      await native.gitCompareBranches(repoRoot, left, right, workspace),
+    ],
+    [repoRoot, left, right, workspace],
+  );
+  const {
+    results,
+    error,
+    loading: busy,
+    retry,
+  } = useAsyncQuery({
+    enabled: open,
+    term: "",
+    minLength: 0,
+    debounceMs: 0,
+    run,
+    scopeKey: JSON.stringify([
+      repoRoot,
+      left,
+      right,
+      workspaceScopeKey(workspace),
+    ]),
+  });
+  const result = results[0];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -83,7 +77,7 @@ export function CompareBranchesDialog({
           <div className="grid gap-2 py-6 text-center">
             <div className="px-4 text-xs text-destructive">{error}</div>
             <div className="flex justify-center">
-              <Button variant="ghost" size="sm" onClick={() => void load()}>
+              <Button variant="ghost" size="sm" onClick={retry}>
                 重试
               </Button>
             </div>

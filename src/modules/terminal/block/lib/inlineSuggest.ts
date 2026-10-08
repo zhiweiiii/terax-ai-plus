@@ -18,7 +18,9 @@ const suggestionField = StateField.define<string>({
     if (tr.docChanged) {
       if (!value) return value;
       const doc = tr.state.doc.toString();
-      return doc.length > 0 && value.startsWith(doc) && value.length > doc.length
+      return doc.length > 0 &&
+        value.startsWith(doc) &&
+        value.length > doc.length
         ? value
         : "";
     }
@@ -84,8 +86,11 @@ function fetcherPlugin(fetch: (line: string) => Promise<string | null>) {
   return ViewPlugin.fromClass(
     class {
       private timer: ReturnType<typeof setTimeout> | null = null;
+      private epoch = 0;
+      private destroyed = false;
       update(update: ViewUpdate) {
         if (!update.docChanged) return;
+        const epoch = ++this.epoch;
         if (this.timer) clearTimeout(this.timer);
         const view = update.view;
         const line = view.state.doc.toString();
@@ -94,7 +99,12 @@ function fetcherPlugin(fetch: (line: string) => Promise<string | null>) {
           if (view.state.doc.toString() !== line) return;
           fetch(line)
             .then((sugg) => {
-              if (sugg && view.state.doc.toString() === line) {
+              if (
+                !this.destroyed &&
+                epoch === this.epoch &&
+                sugg &&
+                view.state.doc.toString() === line
+              ) {
                 view.dispatch({ effects: setSuggestion.of(sugg) });
               }
             })
@@ -102,13 +112,17 @@ function fetcherPlugin(fetch: (line: string) => Promise<string | null>) {
         }, 70);
       }
       destroy() {
+        this.destroyed = true;
+        this.epoch += 1;
         if (this.timer) clearTimeout(this.timer);
       }
     },
   );
 }
 
-export function inlineSuggestion(fetch: (line: string) => Promise<string | null>) {
+export function inlineSuggestion(
+  fetch: (line: string) => Promise<string | null>,
+) {
   return [
     suggestionField,
     ghostDecorations,

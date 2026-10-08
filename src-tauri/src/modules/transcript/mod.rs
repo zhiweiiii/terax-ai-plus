@@ -32,6 +32,15 @@ pub(crate) fn read_file(file: &std::path::Path, agent: &str) -> Option<std::sync
 
 use serde::Serialize;
 
+pub(super) fn timestamp(value: &serde_json::Value) -> i64 {
+    value
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|at| at.timestamp_millis())
+        .unwrap_or(0)
+}
+
 /// One piece of a turn, in the order the agent produced it.
 ///
 /// A turn is not "some prose and some tool calls", it is prose, then the tools
@@ -174,13 +183,13 @@ pub struct Transcript {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working: Option<Working>,
-    /// Newest timestamp in the transcript. A poller compares this instead of
+    /// Snapshot generation. A poller compares this instead of
     /// diffing the whole conversation.
     pub revision: i64,
 }
 
 pub(crate) fn read_opencode(cwd: &str) -> Option<std::sync::Arc<Transcript>> {
-    opencode::read(cwd).map(std::sync::Arc::new)
+    opencode::read(cwd)
 }
 
 pub(crate) fn opencode_fingerprint() -> Option<i64> {

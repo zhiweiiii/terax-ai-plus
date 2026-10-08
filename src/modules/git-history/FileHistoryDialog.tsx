@@ -1,7 +1,9 @@
 import {
   AlertDialog,
+  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
+  AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
@@ -13,9 +15,19 @@ import {
   type GitDiffContentResult,
   type GitLogEntry,
 } from "@/lib/native";
-import { ChevronDownIcon, Copy01Icon, File02Icon } from "@hugeicons/core-free-icons";
+import {
+  ChevronDownIcon,
+  Copy01Icon,
+  File02Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorToast } from "@/lib/errorToast";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace/env";
 
 export type FileHistoryCommitFileInput = {
   repoRoot: string;
@@ -89,28 +101,53 @@ export function FileHistoryDialog({
   const [copiedSha, setCopiedSha] = useState<string | null>(null);
   const requestIdRef = useRef(0);
   const diffRequestRef = useRef(0);
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const environmentKey = workspaceScopeKey(workspace);
+  const scopeKey = JSON.stringify([open, repoRoot, path, environmentKey]);
+  const scopeRef = useRef({ key: scopeKey });
+  if (scopeRef.current.key !== scopeKey) {
+    scopeRef.current = { key: scopeKey };
+    requestIdRef.current++;
+    diffRequestRef.current++;
+  }
+  const scope = scopeRef.current;
+  const [loadedScope, setLoadedScope] = useState(scope);
+  const current = useCallback(
+    () =>
+      open &&
+      scopeRef.current === scope &&
+      currentWorkspaceScopeKey() === environmentKey,
+    [open, scope, environmentKey],
+  );
 
   const loadLog = useCallback(async () => {
+    if (!current()) return;
     const requestId = ++requestIdRef.current;
     setLoadState("loading");
     setError(null);
     setCommits([]);
+    setLoadedScope(scope);
     setExpandedSha(null);
     setDiffEntry(null);
     diffRequestRef.current += 1;
     try {
-      const entries = await native.gitLogFile(repoRoot, path, {
-        maxCount: 50,
-      });
-      if (requestId !== requestIdRef.current) return;
+      const entries = await native.gitLogFile(
+        repoRoot,
+        path,
+        {
+          maxCount: 50,
+        },
+        workspace,
+      );
+      if (requestId !== requestIdRef.current || !current()) return;
       setCommits(entries);
       setLoadState("idle");
     } catch (err) {
-      if (requestId !== requestIdRef.current) return;
+      if (requestId !== requestIdRef.current || !current()) return;
       setError(normalizeError(err));
       setLoadState("error");
     }
-  }, [repoRoot, path]);
+  }, [repoRoot, path, current, workspace, scope]);
 
   useEffect(() => {
     if (!open) return;
@@ -129,6 +166,7 @@ export function FileHistoryDialog({
 
   const loadDiff = useCallback(
     async (sha: string) => {
+      if (!current()) return;
       const requestId = ++diffRequestRef.current;
       setDiffEntry({ state: "loading" });
       try {
@@ -137,23 +175,25 @@ export function FileHistoryDialog({
           sha,
           path,
           null,
+          workspace,
         );
-        if (requestId !== diffRequestRef.current) return;
+        if (requestId !== diffRequestRef.current || !current()) return;
         setDiffEntry({
           state: "loaded",
-          text: result.fallbackPatch || result.modifiedContent,
+          text: result.fallbackPatch,
           truncated: result.truncated,
         });
       } catch (err) {
-        if (requestId !== diffRequestRef.current) return;
+        if (requestId !== diffRequestRef.current || !current()) return;
         setDiffEntry({ state: "error", error: normalizeError(err) });
       }
     },
-    [repoRoot, path],
+    [repoRoot, path, current, workspace],
   );
 
   const handleRowClick = useCallback(
     (commit: GitLogEntry) => {
+      if (!current()) return;
       if (onOpenCommitFile) {
         onOpenCommitFile({
           repoRoot,
@@ -166,6 +206,7 @@ export function FileHistoryDialog({
         return;
       }
       if (expandedSha === commit.sha) {
+        diffRequestRef.current++;
         setExpandedSha(null);
         setDiffEntry(null);
         return;
@@ -173,17 +214,21 @@ export function FileHistoryDialog({
       setExpandedSha(commit.sha);
       void loadDiff(commit.sha);
     },
-    [expandedSha, loadDiff, onOpenCommitFile, path, repoRoot],
+    [expandedSha, loadDiff, onOpenCommitFile, path, repoRoot, current],
   );
 
-  const copySha = useCallback(async (sha: string) => {
-    try {
-      await navigator.clipboard.writeText(sha);
-      setCopiedSha(sha);
-    } catch {
-      /* noop */
-    }
-  }, []);
+  const copySha = useCallback(
+    async (sha: string) => {
+      const requestId = requestIdRef.current;
+      try {
+        await navigator.clipboard.writeText(sha);
+        if (current() && requestIdRef.current === requestId) setCopiedSha(sha);
+      } catch (error) {
+        errorToast("Could not copy commit SHA", error);
+      }
+    },
+    [current],
+  );
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -207,7 +252,7 @@ export function FileHistoryDialog({
         </AlertDialogHeader>
 
         <div className="-mt-2 max-h-[55vh] min-h-[160px] overflow-y-auto">
-          {loadState === "loading" ? (
+          {loadedScope !== scope || loadState === "loading" ? (
             <div className="flex items-center justify-center gap-2 py-10 text-[11px] text-muted-foreground">
               <Spinner className="size-3" />
               加载中…
@@ -218,7 +263,11 @@ export function FileHistoryDialog({
                 {error ?? "加载失败"}
               </div>
               <div className="flex justify-center">
-                <Button variant="ghost" size="sm" onClick={() => void loadLog()}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void loadLog()}
+                >
                   重试
                 </Button>
               </div>
@@ -331,6 +380,9 @@ export function FileHistoryDialog({
             </ul>
           )}
         </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel>关闭</AlertDialogCancel>
+        </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
   );

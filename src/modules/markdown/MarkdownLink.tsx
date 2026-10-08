@@ -24,19 +24,43 @@ export function MarkdownLink({
     onClick?.(event);
     if (event.defaultPrevented || !href) return;
 
-    // External schemes (https/mailto/tel) open in the system browser.
-    // Everything else — relative paths, fragments, weird schemes — is
-    // intercepted so the webview never navigates away from the app.
+    // Never let project links navigate the application webview.
     event.preventDefault();
     if (isExternalUrl(href)) {
       void openExternalUrl(href, onSettled);
       return;
     }
 
-    // Fragment-only (#section): scrolls are fine, nothing to open.
-    const [target] = href.split("#");
-    if (!target || !onOpenPath) return;
-    const resolved = target.startsWith("/")
+    if (href.startsWith("#")) {
+      let id: string;
+      try {
+        id = decodeURIComponent(href.slice(1));
+      } catch {
+        return;
+      }
+      const root = event.currentTarget.closest(".markdown-preview");
+      const anchor =
+        root &&
+        Array.from(root.querySelectorAll<HTMLElement>("[id], a[name]")).find(
+          (element) => element.id === id || element.getAttribute("name") === id,
+        );
+      anchor?.scrollIntoView({ block: "start" });
+      return;
+    }
+
+    if (!onOpenPath) return;
+    let target: string;
+    try {
+      target = decodeURIComponent(href.split(/[?#]/, 1)[0]);
+    } catch {
+      return;
+    }
+    if (!target || /[\u0000-\u001f\u007f]/.test(target)) return;
+    target = target.replace(/\\/g, "/");
+    const absolute = target.startsWith("/") || /^[A-Za-z]:\//.test(target);
+    if (!absolute && /^[A-Za-z][A-Za-z0-9+.-]*:/.test(target)) return;
+    if (!absolute && !baseDir) return;
+    const resolved = absolute
       ? target
       : `${(baseDir ?? "").replace(/[\\/]+$/, "")}/${target.replace(/^[\\/]+/, "")}`;
     onOpenPath(resolved);

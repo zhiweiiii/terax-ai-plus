@@ -50,6 +50,16 @@ fn fish_init_script() -> &'static str {
     FISH_INIT_SCRIPT
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellQuoteKind {
+    Powershell,
+    Posix,
+    Fish,
+    Cmd,
+    Unknown,
+}
+
 pub fn build_command(
     cwd: Option<String>,
     workspace: WorkspaceEnv,
@@ -57,13 +67,8 @@ pub fn build_command(
     shell: Option<String>,
     control: Option<ShellControlEnv>,
     gateway_provider: Option<String>,
-) -> Result<CommandBuilder, String> {
+) -> Result<(CommandBuilder, ShellQuoteKind), String> {
     let shell = sanitize_shell_override(shell);
-    #[cfg(unix)]
-    {
-        let _ = workspace;
-        unix::build(cwd, blocks, shell, control, gateway_provider)
-    }
     #[cfg(windows)]
     {
         windows::build(cwd, workspace, blocks, shell, control, gateway_provider)
@@ -89,11 +94,6 @@ fn sanitize_shell_override(shell: Option<String>) -> Option<String> {
 }
 
 pub fn detect_shell_name() -> String {
-    #[cfg(unix)]
-    {
-        let (_, path) = unix::Shell::detect();
-        path.rsplit('/').next().unwrap_or("").to_string()
-    }
     #[cfg(windows)]
     {
         windows_shell_path()
@@ -114,10 +114,6 @@ pub struct ShellInfo {
 }
 
 pub fn list_shells() -> Vec<ShellInfo> {
-    #[cfg(unix)]
-    {
-        unix::list_shells()
-    }
     #[cfg(windows)]
     {
         windows::list_shells()
@@ -177,21 +173,7 @@ fn apply_common(
     if blocks {
         cmd.env("TERAX_BLOCKS", "1");
     }
-    let appimage_overrides = workspace::appimage_env_overrides();
-    let clean_path = match appimage_overrides.iter().find(|(key, _)| *key == "PATH") {
-        Some((_, value)) => value.clone(),
-        None => std::env::var_os("PATH"),
-    };
-    for (key, value) in appimage_overrides {
-        match value {
-            Some(v) => {
-                cmd.env(key, v);
-            }
-            None => {
-                cmd.env_remove(key);
-            }
-        }
-    }
+    let clean_path = std::env::var_os("PATH");
     if let Some(control) = control {
         cmd.env("TERAX_CONTROL_ADDR", &control.address);
         cmd.env("TERAX_CONTROL_TOKEN", &control.token);
@@ -228,235 +210,10 @@ fn apply_common(
     }
 }
 
-#[cfg(unix)]
-mod unix {
-    use std::ffi::OsString;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    use portable_pty::CommandBuilder;
-
-    const ZSHENV: &str = include_str!("scripts/zshenv.zsh");
-    const ZPROFILE: &str = include_str!("scripts/zprofile.zsh");
-    const ZLOGIN: &str = include_str!("scripts/zlogin.zsh");
-    const ZSHRC: &str = include_str!("scripts/zshrc.zsh");
-    const BASHRC: &str = include_str!("scripts/bashrc.bash");
-    const FISH_INIT: &str = include_str!("scripts/init.fish");
-
-    pub enum Shell {
-        Zsh,
-        Bash,
-        Fish,
-        Other,
-    }
-
-    impl Shell {
-        pub fn classify(path: &str) -> Shell {
-            match path.rsplit('/').next().unwrap_or("") {
-                "zsh" => Shell::Zsh,
-                "bash" => Shell::Bash,
-                "fish" => Shell::Fish,
-                _ => Shell::Other,
-            }
-        }
-
-        pub fn detect() -> (Shell, String) {
-            let path = login_shell()
-                .or_else(|| std::env::var("SHELL").ok())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "/bin/zsh".into());
-            (Self::classify(&path), path)
-        }
-
-        // A configured override wins only when it points at a real file;
-        // otherwise fall back to the user's login shell.
-        pub fn resolve(shell_override: Option<String>) -> (Shell, String) {
-            if let Some(path) = shell_override
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-            {
-                if Path::new(&path).is_file() {
-                    return (Self::classify(&path), path);
-                }
-                log::warn!("configured shell '{path}' not found, using auto-detect");
-            }
-            Self::detect()
-        }
-    }
-
-    fn login_shell() -> Option<String> {
-        use std::ffi::CStr;
-        unsafe {
-            let uid = libc::getuid();
-            let pw = libc::getpwuid(uid);
-            if pw.is_null() {
-                return None;
-            }
-            let shell_ptr = (*pw).pw_shell;
-            if shell_ptr.is_null() {
-                return None;
-            }
-            CStr::from_ptr(shell_ptr).to_str().ok().map(String::from)
-        }
-    }
-
-    pub fn list_shells() -> Vec<super::ShellInfo> {
-        use std::collections::HashSet;
-        let mut out = Vec::new();
-        let mut seen = HashSet::new();
-        let (_, login) = Shell::detect();
-        let mut candidates = vec![login];
-        if let Ok(content) = fs::read_to_string("/etc/shells") {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                candidates.push(line.to_string());
-            }
-        }
-        for path in candidates {
-            if !seen.insert(path.clone()) || !Path::new(&path).is_file() {
-                continue;
-            }
-            let integrated = !matches!(Shell::classify(&path), Shell::Other);
-            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            out.push(super::ShellInfo {
-                name,
-                path,
-                integrated,
-            });
-        }
-        out
-    }
-
-    pub fn build(
-        cwd: Option<String>,
-        blocks: bool,
-        shell_override: Option<String>,
-        control: Option<super::ShellControlEnv>,
-        gateway_provider: Option<String>,
-    ) -> Result<CommandBuilder, String> {
-        let (shell, shell_path) = Shell::resolve(shell_override);
-        let mut cmd = CommandBuilder::new(&shell_path);
-        super::apply_common(&mut cmd, cwd, blocks, control.as_ref(), gateway_provider.as_deref());
-        apply_shell_init(&mut cmd, &shell, &shell_path);
-        Ok(cmd)
-    }
-
-    fn apply_shell_init(cmd: &mut CommandBuilder, shell: &Shell, shell_path: &str) {
-        match shell {
-            Shell::Zsh => {
-                match prepare_zdotdir() {
-                    Ok(zdotdir) => {
-                        // Guard against Terax-in-Terax :)
-                        if let Ok(user_zd) = std::env::var("ZDOTDIR") {
-                            if Path::new(&user_zd) != zdotdir.as_path() {
-                                cmd.env("TERAX_USER_ZDOTDIR", user_zd);
-                            }
-                        }
-                        cmd.env("ZDOTDIR", &zdotdir);
-                    }
-                    Err(e) => {
-                        log::warn!("zsh shell integration disabled: {e}");
-                    }
-                }
-                // Login shell so /etc/zprofile runs path_helper on macOS — without
-                // this, GUI-launched apps get a minimal PATH missing Homebrew.
-                cmd.arg("-l");
-            }
-            Shell::Bash => {
-                match prepare_bash_rcfile() {
-                    Ok(rc) => {
-                        cmd.arg("--rcfile");
-                        cmd.arg(rc);
-                    }
-                    Err(e) => {
-                        log::warn!("bash shell integration disabled: {e}");
-                    }
-                }
-                // bash ignores --rcfile under -l, so we use -i and source
-                // /etc/profile from inside our rcfile to emulate login init.
-                cmd.arg("-i");
-            }
-            Shell::Fish => {
-                if let Err(e) = prepare_fish_conf_d() {
-                    log::warn!("fish shell integration disabled: {e}");
-                }
-                // fish 4.0+ writes its own OSC 133 A/B; ours would double it.
-                cmd.env("fish_features", "no-mark-prompt");
-                cmd.arg("-i");
-                // Re-assert our prompt after config.fish (-C runs last), so a
-                // framework prompt (starship etc.) loaded there can't override
-                // the markers and break cwd tracking.
-                cmd.arg("-C");
-                cmd.arg(super::FISH_REINSTALL_PROMPT);
-            }
-            Shell::Other => {
-                log::info!(
-                    "unsupported shell '{}', spawning without integration",
-                    shell_path
-                );
-            }
-        }
-    }
-
-    fn integration_root() -> Result<PathBuf, String> {
-        let home = dirs::home_dir().ok_or_else(|| "could not resolve home dir".to_string())?;
-        let root = home.join(".cache").join("terax").join("shell-integration");
-        fs::create_dir_all(&root).map_err(|e| format!("create {}: {e}", root.display()))?;
-        Ok(root)
-    }
-
-    fn prepare_zdotdir() -> Result<PathBuf, String> {
-        let dir = integration_root()?.join("zsh");
-        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        write_if_changed(&dir.join(".zshenv"), ZSHENV)?;
-        write_if_changed(&dir.join(".zprofile"), ZPROFILE)?;
-        write_if_changed(&dir.join(".zshrc"), ZSHRC)?;
-        write_if_changed(&dir.join(".zlogin"), ZLOGIN)?;
-        Ok(dir)
-    }
-
-    fn prepare_bash_rcfile() -> Result<PathBuf, String> {
-        let dir = integration_root()?.join("bash");
-        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        let rc = dir.join("bashrc");
-        write_if_changed(&rc, BASHRC)?;
-        Ok(rc)
-    }
-
-    fn prepare_fish_conf_d() -> Result<(), String> {
-        let home = dirs::home_dir().ok_or_else(|| "could not resolve home dir".to_string())?;
-        let dir = home.join(".config").join("fish").join("conf.d");
-        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        write_if_changed(&dir.join("terax.fish"), FISH_INIT)?;
-        Ok(())
-    }
-
-    fn write_if_changed(path: &Path, content: &str) -> Result<(), String> {
-        if let Ok(existing) = fs::read_to_string(path) {
-            if existing == content {
-                return Ok(());
-            }
-        }
-        // Atomic replace: a parallel shell startup must never source a half-written file.
-        let mut tmp: OsString = path.as_os_str().to_owned();
-        tmp.push(".__terax_tmp__");
-        let tmp = PathBuf::from(tmp);
-        fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        fs::rename(&tmp, path).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("rename {} -> {}: {e}", tmp.display(), path.display())
-        })
-    }
-
-}
-
 #[cfg(windows)]
 mod windows {
-    use std::ffi::OsString;
     use std::fs;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     use crate::modules::workspace::WorkspaceEnv;
@@ -508,7 +265,7 @@ mod windows {
         shell: Option<String>,
         control: Option<super::ShellControlEnv>,
         gateway_provider: Option<String>,
-    ) -> Result<CommandBuilder, String> {
+    ) -> Result<(CommandBuilder, super::ShellQuoteKind), String> {
         if let WorkspaceEnv::Wsl { distro } = workspace {
             // A WSL shell cannot reach a Windows loopback listener by
             // 127.0.0.1, so routing it through the gateway would hand it a URL
@@ -531,7 +288,13 @@ mod windows {
         let is_bash = shell_name == "bash.exe";
 
         let mut cmd = CommandBuilder::new(&shell_path);
-        super::apply_common(&mut cmd, cwd, blocks, control.as_ref(), gateway_provider.as_deref());
+        super::apply_common(
+            &mut cmd,
+            cwd,
+            blocks,
+            control.as_ref(),
+            gateway_provider.as_deref(),
+        );
 
         if is_powershell {
             match prepare_ps_profile() {
@@ -568,10 +331,22 @@ mod windows {
         }
 
         log::info!("spawning Windows shell: {}", shell_path.display());
-        Ok(cmd)
+        let quote_kind = if is_powershell {
+            super::ShellQuoteKind::Powershell
+        } else if is_bash {
+            super::ShellQuoteKind::Posix
+        } else if shell_name == "cmd.exe" {
+            super::ShellQuoteKind::Cmd
+        } else {
+            super::ShellQuoteKind::Unknown
+        };
+        Ok((cmd, quote_kind))
     }
 
-    fn build_wsl(cwd: Option<String>, distro: String) -> Result<CommandBuilder, String> {
+    fn build_wsl(
+        cwd: Option<String>,
+        distro: String,
+    ) -> Result<(CommandBuilder, super::ShellQuoteKind), String> {
         crate::modules::workspace::validate_wsl_distro_name(&distro)?;
         let shell_path = crate::modules::workspace::wsl_login_shell(distro.clone())?;
         let shell_kind = ShellKind::from_path(&shell_path);
@@ -634,7 +409,15 @@ mod windows {
         cmd.env("TERAX_TERMINAL", "1");
         super::ensure_utf8_locale(&mut cmd);
         log::info!("spawning WSL shell: {distro} ({shell_path})");
-        Ok(cmd)
+        let quote_kind = match shell_kind {
+            ShellKind::Zsh | ShellKind::Bash => super::ShellQuoteKind::Posix,
+            ShellKind::Fish => super::ShellQuoteKind::Fish,
+            ShellKind::Other => match shell_path.rsplit('/').next().unwrap_or("") {
+                "sh" | "dash" | "ksh" | "ash" => super::ShellQuoteKind::Posix,
+                _ => super::ShellQuoteKind::Unknown,
+            },
+        };
+        Ok((cmd, quote_kind))
     }
 
     fn build_wsl_launch_spec(
@@ -708,7 +491,7 @@ mod windows {
     }
 
     fn prepare_wsl_integration_dir(distro: &str, shell: &str) -> Result<(String, PathBuf), String> {
-        let home = crate::modules::workspace::wsl_home(distro.to_string())?;
+        let home = crate::modules::workspace::wsl_home_blocking(distro)?;
         let linux_dir = format!(
             "{}/.cache/terax/shell-integration/{shell}",
             home.trim_end_matches('/')
@@ -753,7 +536,7 @@ mod windows {
     }
 
     fn prepare_wsl_fish_conf_d(distro: &str) -> Result<(), String> {
-        let home = crate::modules::workspace::wsl_home(distro.to_string())?;
+        let home = crate::modules::workspace::wsl_home_blocking(distro)?;
         let linux_dir = format!("{}/.config/fish/conf.d", home.trim_end_matches('/'));
         let unc_dir = crate::modules::workspace::wsl_path_to_unc(distro, &linux_dir);
         fs::create_dir_all(&unc_dir).map_err(|e| format!("create {}: {e}", unc_dir.display()))?;
@@ -841,7 +624,7 @@ mod windows {
                     r"Programs\Git\bin\bash.exe",
                 ] {
                     let candidate = base.join(rel);
-                    if candidate.is_file() {
+                    if super::is_real_executable(&candidate) {
                         return Some(candidate);
                     }
                 }
@@ -856,16 +639,17 @@ mod windows {
                 return Ok(());
             }
         }
-        let mut tmp: OsString = path.as_os_str().to_owned();
-        tmp.push(".__terax_tmp__");
-        let tmp = PathBuf::from(tmp);
-        fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        fs::rename(&tmp, path).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("rename {} -> {}: {e}", tmp.display(), path.display())
-        })
+        let parent = path
+            .parent()
+            .ok_or_else(|| "missing script directory".to_string())?;
+        let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+        tmp.write_all(content.as_bytes())
+            .map_err(|e| e.to_string())?;
+        tmp.as_file().sync_all().map_err(|e| e.to_string())?;
+        tmp.persist(path)
+            .map_err(|e| format!("replace {}: {}", path.display(), e.error))?;
+        Ok(())
     }
-
 }
 
 #[cfg(windows)]
@@ -876,7 +660,7 @@ pub fn windows_shell_path() -> PathBuf {
 
     if let Some(pf) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
         let candidate = pf.join("PowerShell").join("7").join("pwsh.exe");
-        if candidate.is_file() {
+        if is_real_executable(&candidate) {
             return candidate;
         }
     }
@@ -889,7 +673,7 @@ pub fn windows_shell_path() -> PathBuf {
         .join("WindowsPowerShell")
         .join("v1.0")
         .join("powershell.exe");
-    if ps5.is_file() {
+    if is_real_executable(&ps5) {
         return ps5;
     }
 

@@ -60,7 +60,7 @@ export function WorkspaceInputBar({
 
   const terminalChips = isTerminalTab ? (
     <>
-      {os && <Chip tone="neutral" iconNode={<OsIcon os={os} />} title={os} />}
+      {os && <Chip tone="neutral" iconNode={<OsIcon />} title={os} />}
       {cwd && (
         <Chip tone="blue" icon={Folder01Icon} title={cwd}>
           {relPath(cwd, home)}

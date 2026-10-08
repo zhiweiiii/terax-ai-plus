@@ -25,6 +25,11 @@ import { useEffect, useRef, useState } from "react";
 import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { defaultWorktreePath, gitWorktreeAdd } from "./worktreeOps";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 
 /**
  * Add a linked worktree: pick a target path and an existing branch, or give a
@@ -45,6 +50,23 @@ export function WorktreeDialog({
   branches: GitBranchEntry[];
   onCreated: () => void;
 }) {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const scope = workspaceScopeKey(workspace);
+  const identity = JSON.stringify([open, repoRoot, scope]);
+  const identityRef = useRef(identity);
+  const epochRef = useRef(0);
+  if (identityRef.current !== identity) epochRef.current++;
+  identityRef.current = identity;
+  const epoch = epochRef.current;
+  const aliveRef = useRef(false);
+  const busyRef = useRef(false);
+  const initializedRef = useRef<string | null>(null);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
   // The checked-out branch cannot be shared with a linked worktree ("already
   // checked out"), so it is not pickable; with nothing else left the Select
   // disables and `git worktree add <path>` auto-creates a fresh branch.
@@ -60,14 +82,20 @@ export function WorktreeDialog({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      initializedRef.current = null;
+      return;
+    }
+    if (initializedRef.current === identity) return;
+    initializedRef.current = identity;
     setBranchName(defaultBranch);
     setPath(defaultWorktreePath(repoRoot, defaultBranch));
     setNewBranch("");
     setPathTouched(false);
-    setBusy(false);
-    setTimeout(() => inputRef.current?.focus(), 0);
-  }, [open, repoRoot, defaultBranch]);
+    setBusy(busyRef.current);
+    const timer = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(timer);
+  }, [open, repoRoot, defaultBranch, identity]);
 
   const selectBranch = (name: string) => {
     setBranchName(name);
@@ -77,13 +105,35 @@ export function WorktreeDialog({
   const submit = async () => {
     const target = path.trim();
     const created = newBranch.trim();
-    if (!target || busy) return;
+    if (
+      !target ||
+      busyRef.current ||
+      !open ||
+      !aliveRef.current ||
+      identityRef.current !== identity ||
+      epochRef.current !== epoch ||
+      currentWorkspaceScopeKey() !== scope
+    )
+      return;
+    busyRef.current = true;
     setBusy(true);
     try {
-      await gitWorktreeAdd(repoRoot, target, {
-        branch: created || undefined,
-        commit: branchName || undefined,
-      });
+      await gitWorktreeAdd(
+        repoRoot,
+        target,
+        {
+          branch: created || undefined,
+          commit: branchName || undefined,
+        },
+        workspace,
+      );
+      if (
+        !aliveRef.current ||
+        identityRef.current !== identity ||
+        epochRef.current !== epoch ||
+        currentWorkspaceScopeKey() !== scope
+      )
+        return;
       toast.success(
         created
           ? `Created worktree for ${created} in ${repoName}`
@@ -92,9 +142,15 @@ export function WorktreeDialog({
       onOpenChange(false);
       onCreated();
     } catch (e) {
-      errorToast(`Could not create worktree in ${repoName}`, e);
+      if (
+        aliveRef.current &&
+        identityRef.current === identity &&
+        epochRef.current === epoch
+      )
+        errorToast(`Could not create worktree in ${repoName}`, e);
     } finally {
-      setBusy(false);
+      busyRef.current = false;
+      if (aliveRef.current) setBusy(false);
     }
   };
 
@@ -128,7 +184,11 @@ export function WorktreeDialog({
                 setPathTouched(true);
               }}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
+                if (
+                  e.key === "Enter" &&
+                  !e.nativeEvent.isComposing &&
+                  e.keyCode !== 229
+                ) {
                   e.preventDefault();
                   void submit();
                 }
@@ -176,7 +236,11 @@ export function WorktreeDialog({
               value={newBranch}
               onChange={(e) => setNewBranch(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
+                if (
+                  e.key === "Enter" &&
+                  !e.nativeEvent.isComposing &&
+                  e.keyCode !== 229
+                ) {
                   e.preventDefault();
                   void submit();
                 }

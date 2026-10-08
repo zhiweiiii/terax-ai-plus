@@ -105,6 +105,7 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **目录归属两边不一样**。Claude 按 `<escaped cwd>` 分目录，但转义有损，目录内可能混有不同 cwd 的会话，必须逐文件核对记录中的 cwd（同时复用 `transcript::claude_project_dir` 定位目录）；Codex 按**日期**分目录，cwd 从每个文件的首行读出来再比。
 - **标题要过滤注入的前言**。两边都用一条 user 消息注入上下文（codex 是 `<environment_context>`，Claude 是 slash 命令包装与 reminder），还可能以 `# AGENTS.md` 开头。判据是"以 `<` 开头或是这两个标题"，用它们当标题比不给标题更糟。user 的 content 可能是字符串也可能是块数组（带附件时），两种都要认。
 - 历史目录扫描缓存 2 秒（最多 32 个目录），头部缓存最多 512 个文件，文件状态变化才刷新；菜单**打开时才加载**，不开就零开销；异步结果必须和当前 cwd、打开代次一致，切换项目不能显示旧列表。
+- 历史菜单还绑定工作区环境。当前读取器只访问 Windows 用户记录，WSL 不回退到本机历史，明确提示 CLI resume；新建对话仍可在 WSL 使用。窗口状态查询按请求代次应用，卸载后晚到的监听注册立即释放，窗口操作错误被观察。
 
 ### PTY shell 集成
 
@@ -129,7 +130,7 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 
 每个模块自包含，通过 `index.ts` 导出一层薄 barrel，自己的 hook 放在 `lib/` 下。
 
-- **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。blocks 终端只在主缓冲区把 OSC 133 当作 shell 边界，alt-screen 内的序列属于全屏 TUI，不能让底部输入栏切换焦点或可编辑状态；即使 inline TUI 发出伪 prompt 标记，也要等 PTY 确认前台任务退出才移交输入焦点。shell 提示符的独立输入栏通过 `disableStdin` 接管光标，运行中把焦点交给 xterm；Codex 的光标和输入法定位均交由 xterm 原生处理。终端历史用 xterm `xterm-scrollable-element` 的右侧 slider 拖动，不依赖会被 WebView 隐藏的浏览器原生滚动条，也绝不另存或镜像一份滚动状态；alternate buffer 没有终端历史，因此隐藏 slider，避免 Claude Code 的内层全屏界面占满整屏。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，上限 5）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
+- **terminal/** - `TerminalStack` 通过 `useTerminalSession` + `pty-bridge` 为每个标签维持一个挂载的 xterm。`osc-handlers.ts` 解析 OSC 7（含 Windows 盘符规范化：`/C:/Users/foo` -> `C:/Users/foo`）与 OSC 133 标记。blocks 终端只在主缓冲区把 OSC 133 当作 shell 边界，alt-screen 内的序列属于全屏 TUI，不能让底部输入栏切换焦点或可编辑状态；即使 inline TUI 发出伪 prompt 标记，也要等 PTY 确认前台任务退出才移交输入焦点。shell 提示符的独立输入栏通过 `disableStdin` 接管光标，运行中把焦点交给 xterm；Codex 的光标和输入法定位均交由 xterm 原生处理。终端历史用 xterm `xterm-scrollable-element` 的右侧 slider 拖动，不依赖会被 WebView 隐藏的浏览器原生滚动条，也绝不另存或镜像一份滚动状态；alternate buffer 没有终端历史，因此隐藏 slider，避免 Claude Code 的内层全屏界面占满整屏。xterm 调色板由中央主题引擎驱动，不用本地表。渲染槽位是池化的（`rendererPool.ts`，普通预算与 WebGL 上限 5，容量压力下保留必要忙碌网格）：隐藏但有前台任务的 leaf 保持活网格停靠、渲染暂停；隐藏且空闲的 leaf 释放槽位，缓冲区保留、被别人抢走时才惰性序列化。`DormantRing`（1 MiB）只为完全没有槽位的 leaf 缓冲。**正在执行命令的 leaf 绝不序列化**：把 TUI 的增量重绘回放到过期快照上，正是当初把 Claude Code 界面搞乱的原因。
 - **editor/** - CodeMirror 6（`EditorStack` 与 `TerminalStack` 对称）。缓冲区活在 LF 空间，保存时还原原始 EOL（`lib/eol.ts` 多数投票检测）；缩进单位按文件检测（`lib/indent.ts`）。保存时用 `fs_read_file` / `fs_write_file` 返回的磁盘 mtime 做冲突检查（不一致时弹警告并要求显式覆盖，绝不静默 last-writer-wins）。超过 10 MB 的文件提供"仍然打开"（硬上限 50 MB），超过 4 MB 关掉语法高亮与 LSP。保存时格式化的实现在 `lib/externalFormat.ts`。编辑器字号单独存为 `editorFontSize`，不影响 `terminalFontSize`。
 - **explorer/** - 文件树，Material / Catppuccin 图标，键盘导航，行内重命名，右键操作。`basename` 认反斜杠。常驻搜索栏同时匹配**文件名**（模糊，`fs_search`）与**文件内容**（`fs_grep_interactive`）。两者都是模糊的：内容搜索把查询按空白拆成词，要求**每个词都出现在同一行里**（纯子串、不计顺序），而不是把整个查询当一个字面串，后者的效果是打个空格就什么都搜不到。**实现上刻意不用正则**：把词用 `.*?` 串成一个正则表达的是同一个意思，但会让 searcher 失去快路径：单个字面量能用 memchr 大步跳过文件，带空隙的模式则要让自动机逐字节爬完。所以只把**最长的那个词**当字面量交给 searcher 去筛候选行（最长 = 最稀有 = 跳得最多），其余词在活下来的少数行上用 `contains` 校验。大小写沿用 smart case，全小写查询即不区分大小写。两条搜索的 walk 都带 `hidden` + `git_ignore`，所以结果不会冒出隐藏文件或被 git 忽略的文件。工具栏的过滤按钮可开关"隐藏文件"与"git 忽略的文件"。定位按钮会展开当前文件的各级父目录并选中它，也能解析 git-diff / git-commit-file 标签（拼 `repoRoot` + 路径）。
 - **preview/** - 自动探测的开发服务器预览标签（状态栏发现 localhost URL 时提示打开）。
@@ -138,14 +139,14 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 - **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 用量（`ClaudeUsageButton`，见下）、Claude Code 供应商面板（`ClaudeProviderButton`：选中一个中转站，把 `$env:ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 临时写进当前命令行并指向本地网关的 `/p/<id>`）。按钮左侧的徽标显示**当前命令行**走的是哪个供应商，没走网关时不渲染，指向已删除的供应商时转为琥珀色告警。已知中转站有一键预设（`PRESETS`），填完只差 API Key。
 - **shortcuts/** - 快捷键注册表（`shortcuts.ts`）+ `useGlobalShortcuts`。处理函数在 `App.tsx` 里按 id 传入。平台修饰键用 `metaKey || ctrlKey`。
 - **settings/** - 设置 store（`store.ts`，基于 `tauri-plugin-store`）、偏好 hook、设置窗口打开器。**`usePreferencesStore.init()` 必须在每次启动时都跑**，不能只在首次创建空间时跑，否则几十项主窗口设置会被钉死在默认值、且没有变更监听。
-- **sidebar/** - 活动栏与可折叠侧面板。打开的文件面板**按归属命令行分组**并跟随当前终端标签。git 标签（diff / history / commit-file）是仓库级的，与当前命令行无关，恒显示。
+- **sidebar/** - 活动栏与可折叠侧面板。打开的文件面板按当前空间和归属命令行过滤，包含 Git 与预览标签；选择和关闭使用并列按钮，键盘可操作，并显示未保存标记。折叠时只有窗口按钮高亮。宽度只在用户调整时保存，关闭前保留尚未落盘的最新宽度。
 - **source-control/** - git 状态 / 暂存 / 提交面板与 diff 流程。丢弃改动跑在文件自己的仓库根上（多仓库安全）；提交忙状态在预检查之前置上，按钮点击即有反应。
 - **git-history/** - 提交图轨道、引用、单提交文件 diff。
 - **lsp/** - 可选的语言服务器支持，不启用时零开销。`sessionManager.ts` 按 (server, workspace root) 索引会话，对打开的文档引用计数，闲置 3 分钟杀掉，崩溃退避。资源不变量：**没有根标记就不起会话**，每个 server 硬上限 4 个会话。客户端是懒加载的 `codemirror-languageserver` 子类。WSL 工作区暂不支持。
 - **markdown/** - Markdown 预览渲染器（支撑 `markdown` 标签）。
 - **workspace/** - 工作区环境切换（Local + WSL 发行版）。
 - **theme/** - 自研主题引擎（不用 `next-themes`）。`ThemeProvider` + `applyTheme` 写 CSS 变量；内置预设在 `themes/`，可各自声明配套的 `editorTheme`。用户主题走 `customThemes.ts` + `validateTheme.ts`，可选背景图走 `bgImageStore.ts` + `SurfaceLayer`。
-- **updater/** - 默认检查 `zhiweiiii/terax-ai-plus` 的已发布 NSIS 版本并打开手动下载页。只有构建时启用本仓库自己的签名配置才使用 `tauri-plugin-updater`，签名端点不可用时退回手动检查。
+- **updater/** - 默认检查 `zhiweiiii/terax-ai-plus` 的已发布 NSIS 版本并打开手动下载页。只有构建时启用本仓库自己的签名配置才使用 `tauri-plugin-updater`，签名端点不可用时退回手动检查。检查与安装排除重复调用，Update 句柄按挂载代次回收。签名安装分开下载和安装，下载结束后由主窗口检查未保存文件/运行中的终端并等待工作区保存；设置窗口只请求主窗口安装确认，不能绕过保护。
 - **command-palette/** - 命令面板。
 - **spaces/** - 工作区空间/项目（名称、根目录、环境、颜色、按空间持久化标签），走 `useSpaces` 与 `GroupSwitcher`。
 
@@ -155,7 +156,7 @@ GitDiffPane 的差异计算使用显式 `scanLimit: 10000` 和 `timeout: 200`，
 
 - **shadcn/ui** 已配置（`components.json`，图标库 **hugeicons**）。`src/components/ui/` 里的原语**不要手改**，升级请重跑 `pnpm dlx shadcn add`。
 - **AI Elements**（Vercel）在 `src/components/ai-elements/`，同样是重新生成而不是手工打补丁（目前只剩 `markdown-code` 被 Markdown 预览用）。
-- **Tailwind v4** - 没有 `tailwind.config.*`，配置在 `src/App.css` 的 `@theme` 里。用 `@/lib/utils` 的 `cn()`。
+- **Tailwind v4** - 没有 `tailwind.config.*`，配置在 `src/styles/globals.css` 的 `@theme` 里。用 `@/lib/utils` 的 `cn()`。
 - 可调整布局用 `react-resizable-panels`。
 - 路径导入一律 `@/...`，跨模块绝不相对路径。
 - 跨平台路径：凡是可能来自 OSC 7、资源管理器或操作系统的路径，用 `.split(/[\\/]/)` 而不是 `.split("/")` 拆分隔符。
@@ -167,11 +168,11 @@ Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: tru
 
 ### Tauri capabilities
 
-`src-tauri/capabilities/default.json` 是 webview 可用插件 API 的白名单。新增插件通常要三步：
+`src-tauri/capabilities/desktop.json` 是 webview 可用插件 API 的白名单。新增插件通常要三步：
 
 1. `Cargo.toml` 加依赖
 2. `lib.rs` 的 `run()` 里加 `.plugin(...)`
-3. `default.json` 里加 capability 条目
+3. `desktop.json` 里加 capability 条目
 
 ### 跨平台约定
 
@@ -196,7 +197,91 @@ Windows：`tauri.windows.conf.json` 里 `decorations: false` + `transparent: tru
 - **标签 `cwd` 的存储形式**来自 OSC 7，是正斜杠（`parseOsc7` 已把 `/C:` 剥成 `C:`）。任何消费 `tab.cwd` 并把它传给 Rust 文件系统命令的地方，在 Windows 上必须规范分隔符或同时接受两种形式。`pty::shell_init` 的 `apply_common` 替 PTY 启动处理了，其他调用点得自己来。
 - **`clear` 之后不要假设任何一侧还留着历史。** 终端按行封顶，字节缓冲按字节封顶，两者必然分叉。
 
+## 1.0 审查补充（2026-10-02）
+
+- 手机按空间 ID 分组及逐面板目录同步，激活同时选择空间和面板；PTY 映射由原生 Session 的 leaf ID 推导，忽略前端旧快照。工作区恢复校验结构和有界面板树，损坏数据暂停持久化并保留原始记录；写入串行化，关闭前等待磁盘保存，失败保留窗口。环境切换绑定请求代次并在清理前重查 dirty，启动期间打开文件事件排队。
+
+- 设置磁盘加载与本地/跨窗口通知经过 settings/validation.ts；初始化先订阅后加载并保留期间更新，失败回收监听且允许重试。字体检测结合通用字体宽度基线，不以 fonts.check 单独判断安装情况。
+
+- CLI 控制面关闭时回收待回复请求；前端回复使用独立请求代次，超时重试不受旧回复影响。端点描述符写入和按所有权删除共用 Windows 独占锁，读取有大小上限，连接读取有总期限。
+- 命令历史的 IO 和 PATH 扫描在后台执行，默认读取 PowerShell PSReadLine 历史；读取字节、索引条目和查询数量有上限。会话记录时间统一使用 chrono，用户文本空白保留，工具结果按调用 ID 消费。
+- 网关令牌原子创建并在存储异常时拒绝启动，连接、请求期限和响应缓存有上限，异常 JSON 不会触发线程 panic。上游禁止重定向，SSE 中断返回错误而非成功结束。
+
+- PTY 的 master 最终析构取得 ConPTY 生命周期锁，关闭主动终止 Job；输出排空后才通知退出。手机订阅使用 ID，连接不持有发送器，慢队列驱逐能够真正断开。Web 启动不再额外创建无桌面 leaf 的孤立 shell。
+- WSL 探测有超时和输出限制，运行状态不依赖系统语言。已删除原生 Unix shell 初始化和 Windows 无作用的 AppImage/LSP 环境覆盖，保留 WSL 与 Git Bash 集成。
+
+- Web 访问必须先在桌面设置个人密码，已移除共享默认凭据；损坏凭据拒绝认证。保存使用原子替换，改密码同时撤销现有 WebSocket。连接并发上限 8，登录 body 和 WebSocket 分片按协议完整读取。
+- 编辑器读写绑定文件代次，保存串行化，异步读取不能覆盖新输入。后端写入时再核对可选 `expectedMtime`，保留只读属性和文件链接；mtime 检查不是针对外部进程的严格事务锁。
+- shell、Git 和 LSP 通过 Windows Job Object 回收子进程树，先终止后等待管道结束，避免后代持有管道导致超时不返回。
+- 定时终端发送复用 Session 提交路径，结果持久化，过期重新绑定重置激活窗口。执行与完成都核对触发身份，不让旧扫描结果影响新绑定。
+- LSP 的 preset 代次隔离禁用与重启；容量包含启动和关闭阶段。退出事件核对 transport 身份，启动前应答暂存至 session ID 可用，初始化失败清理并退避。
+- 打包指纹覆盖原生配置、图标、手机构建配置和二进制资源，不包含生成的手机 HTML。版本标签构建严格匹配清单版本，不自动增号；普通本地打包仍保持成功打包之间的增号行为。
+- 实际审查范围与未完成验收见 `docs/release-1.0-audit.md`，不能将构建通过视作全量逐行验收。
+
+- 2026-10-08 代码侧审查收尾：覆盖 467 个条目，最终两轮全仓工程检查与关键隔离回归通过；真实 Windows CLI、WSL、iOS 和安装更新仍须发布前验收。版本未增号，未提交或发布，以审查记录顶部为当前结论。
+
+
+- 文件监听使用绑定原环境的释放句柄，目录请求按根/环境/请求代次拒绝旧结果。事件队列和每批路径各限 4096，溢出显式 rescan，所有消费者重读。剪贴板图片用 binary IPC 和唯一文件名在 blocking 池保存，前后端限 32 MB；shell 提示符粘贴进入独立输入栏，TUI 保持 xterm 原生粘贴。
+
+- 终端 Session 固定所属空间的环境副本，延迟启动、失败重试和重启不读取其他空间当前环境。Git 批量操作按扫描根/环境检查每次调用，排除重复操作并拒绝过期推送确认；手机 protocol.ts 校验嵌套事件，非法数组项不进入渲染。文件树创建/重命名向输入控件返回成功与否，失败可重试，IME 确认不提交。
+
+- OpenCode SQLite 对话读取限制最近 600 条、单行 JSON 2 MiB、总 16 MiB 和 20000 部件，最多 8 个只读快照缓存，数据库/WAL 完整指纹驱动读取代次。搜索请求绑定项目及环境，原生拖放按物理像素换算，旧范围不继续读写。旧共享认证录制脚本及无人调用且误报成功的 verify-web 脚本已删除。
+
+编辑器读写、目录监听和外部格式化绑定所属空间环境，旧路径/环境回调在 effect 前拒绝，卸载后不保存。重命名保留未保存草稿并核对新磁盘基线，不一致要求覆盖确认。保存/格式化串行，Vim 写后关闭等待成功；语言扩展加载去重且不缓存无限未知文件名。
+
+Markdown 预览复用有环境和代次保护的文档读取，文件写入/变更后重新校验。搜索使用公开 Range/CSS Highlights，不拆改 React 管理的文本节点。Git 差异缓存限 6 项和 8 MiB 文本估算，失效后旧请求不回填；暂存与历史差异只读，工作区块回滚先核对磁盘正文，再带 mtime 写入。文件重命名/删除通知携带操作环境，只更新同环境标签。
+
+pty_open 返回 `{ id, shellKind }`，引用规则基于实际启动 shell，不按当前设置或平台推测。路径控制字符拒绝，PowerShell 同时转义普通及弯单引号；agent 路径不作为 shell 表达式。一次性本机命令要求 PowerShell，不静默改用 cmd 执行另一种语法。Worktree 命令绑定环境，对话框用请求代次和同步门闩拒绝旧结果、旧删除确认和重复提交。
+
 ## 延伸阅读
+
+文件变化按监听注册的原路径映射并携带所属环境，WSL UNC 还原 Linux 路径、junction 原路径保持，编辑器/目录树/Git 忽略其他环境事件。WSL 根键保留大小写，原生 Windows 键规范大小写；注册别名及每批事件路径有 8 MiB 限额，溢出按环境 rescan。LSP 自定义 preset 按配置记忆，避免无关重渲染重复检测。
+
+Windows 原生拖放/剪贴板附件进入 WSL 命令行前，使用 Session 固定的发行版批量 wslpath 转换，再按实际 shell/agent 引用；本机及已有 Linux 路径不额外 IPC。路径作为位置参数，不插入 shell 源码，跨发行版 UNC 拒绝，旧 PTY 转换结果拒绝。转换子进程继续使用隐藏窗口、Job、超时及输出上限。
+
+只有普通终端图标订阅 agent 活动，文件/预览/历史/私密图标不因该状态重绘。块耗时格式化正确处理秒/分钟进位，拖动捕获和文字选择样式在取消及卸载释放。
+
+历史搜索入口接通当前已加载提交，复杂正则只在按需 Worker 执行，超时终止；筛选及高亮共用其结果，旧查询不会回填，普通文本不启动 Worker。提交文件列表最多四个并发读取、16 项及 8 MiB 估算缓存，过大的单项明确报错；异步查询同步抛错也进入现有失败反馈。
+
+目录监听以不复用的注册句柄释放，不依赖目录仍存在或链接仍指向原路径；规范化与 watch/unwatch 在 blocking 池执行，注册数量和输入大小有上限。网关每次启动拥有独立停止标记及线程句柄，停止等待监听释放后才允许重启，应用退出显式停止。
+
+手机快照两段同步排入 xterm 队列，实时输出不能插入其间；网格总单元格限制 262144，屏幕对话历史额外限制 4 Mi 字符，未匹配发送限制 64 条及 2 Mi 字符。设置写入在单窗口串行，语言格式化规则按最新存储值修改，失败不阻断后续保存；设置入口不经包含终端编辑功能的主题导出层。
+
+Web 网格参数先无损转换再使用统一 PTY 校验，不接受整数截断后的尺寸。手机解析等待队列限 8 MiB，超限关闭连接重新同步，不丢掉部分 ANSI 后继续解析。手机快照按公开 serialize scrollback 参数缩小历史并限 2 Mi 字符，原生回复限 8 MiB；过大屏幕不提供 seed，退回实时流。桌面自身的缓冲恢复和滚动历史策略不受这些手机预算影响。
+
+查询函数和 debounce 参数纳入同步请求身份，切换实现时旧回复在 effect 前失效；同作用域搜索仍保留上一批结果。目录树只处理自身/文件行的无修饰导航键，不抢工具栏、输入法或全局快捷键，Windows 打开状态按路径身份匹配。旧空间概览命令及未传入的可选上下文已删除，现有 GroupSwitcher 保留。必要的 DOM 测量/显式重读/作用域失效依赖注明理由，不为消除检查警告删除其行为。
+
+语言服务安装元信息允许只有文档链接，不再给 Windows 展示 brew/xcode-select；已安装的服务器和自定义配置仍可检测启用。设置开关/选择器命名，单值 SettingSlider 直接命名 Radix Thumb，不把 label 放在无焦点的 Root 上；未修改生成原语，无调用方的原 Slider 整文件删除。
+
+丢弃改动及改写提交说明失败在当前确认框内显示 alert，不只在被遮挡的底栏反馈；打开新确认先清除旧错误，已有写入或旧范围不能再打开确认。新建/重命名/删除分支及 clone 的真实组件隔离复核重复确认、旧结果、失败保留与重试。
+
+桌面 pty_write 为异步命令，ConPTY 写入/尺寸 claim 在 blocking 池，不在界面线程等待 writer。每个前端 PtySession 串行发送原始输入，最多一条写 IPC 在途，积压限 4 MiB/2048 条，超限明确失败；关闭/退出拒绝剩余输入，失败不阻断后续独立写入。协议应答仍原样传输且不 claim，不增加光标/输入法或定时刷新适配。
+
+标签同步计算状态计划，React 只接收结果，分屏 ID 和资源释放不在 React 更新器内产生副作用；owner 核对同空间，关闭最后面板解绑文件，Markdown 改名更新路径。Windows 路径大小写/分隔符统一，Linux 保留大小写，历史文件标签不跨空间复用。无调用方的旧 SpaceSwitcher 及专用组件和 tab 入口已删除。设置保存错误可见，自启及手机密码提交去重并拒绝旧读取。
+
+提交面板按环境、上下文、仓库和分支隔离，同步门闩覆盖本面板写入与预览。预检查失败阻止提交，预览失败不直接推送，拉取仅快进；多仓库选择和打开路径包含所属仓库。改写说明核对 HEAD 并用 amend --only 保持提交内容及暂存区，仍不提供外部 Git 进程事务锁。无入口的 Amend 状态和 IPC 已删除。
+
+批量推送分别报告全部失败及可强制重试的拒绝，不因认证/网络错误缺失而误关闭确认；单仓库重试保留其他失败。目标固定为 tracking remote，已删除无效选择及 branchOps 转发层。仓库分支菜单按环境隔离，共用写入门闩，执行前重查当前分支，旧保护确认拒绝。
+
+LSP 检测按请求身份去重和回填，失败不伪装为 PATH 缺失；语言提示按路径代次和项目根匹配。格式化及跳转验证文档/插件身份，可见性变化不抢焦点。自定义配置失败重试复用 ID，设置写入单窗口串行。分支对话框固定工作区并排除重复提交，关闭重开作废旧完成；差异及分支比较使用有范围保护的查询，仓库定位卸载后不打开页面。
+
+语言扩展返回值绑定路径、语言、ready、启用服务器及运行代次，范围改变首次渲染就隐藏旧扩展；effect 前晚到的句柄立即释放，不在清理中写入新范围状态。新建文件输入明确命名，失败在 alert 中反馈，关闭重开拒绝旧成功回调。
+
+颜色 Widget 不覆盖 CodeMirror 基类只读 editable，使用独立 canEdit 标志并在写入前重查文档和权限；定位列表与只读 Markdown 在真实浏览器复核。fs_stat/fs_canonicalize 的磁盘访问也放入 blocking 池。
+
+WSL home 的 IPC 探测和手机密码的 Argon2/保存不阻塞界面线程，在 blocking 池执行；已有 PTY 后台初始化复用同步 home 内核，不嵌套启动第二次探测。
+
+引用核对后删除旧 SidebarRail、非响应式 shortcutLabel、旧远程状态展示 helper、无人调用的重置/焦点/颜色/服务器查找 helper；现用侧栏、快捷键 hook、远程操作和已保存空间颜色校验仍保留。仅未被其他文件导入但在本文件调用的导出，不当作死逻辑删除。
+
+Streamdown 升至 2.7.0，移除其已不用的 Mermaid/KaTeX 依赖链；项目代码围栏继续使用现有 Lezer 渲染，不新增图表插件。Tailwind 扫描整个 dist JS 分块。项目 Markdown 保留默认 raw/sanitize，不使用会把相对文件链接重写为网站根路径的 harden；实际打开仍由 MarkdownLink 验证并交给项目文件回调。
+
+供应商切换检查前台任务并保留当前目录，失败恢复 pin，探针和变更排除并发，明确提示请求与重启成本；卸载后的请求不重启终端。用量初始化缓存按代次应用，不覆盖新查询。历史分页重试、图缓存模式及刷新代次各自校验；快捷键菜单显示实际绑定，快速切换状态同步更新。主题颜色探针固定节点后只读，旧折叠/输入区展开样式及终端 macOS 死分支已删除。
+
+图标关联采用无原型线性字典并统一名称大小写，特殊文件名不读取对象原型。Git 历史的分支/文件请求绑定仓库与环境，提交确认有并发门闩、失败保留及旧范围保护；SSH 和多层 GitLab 分组链接正确解析，提交图不绘制到正文。WSL 刷新去重，Web 状态读取失败不等同于服务停止。
+
+网页预览只接受经过统一解析的 HTTP/HTTPS 地址，拒绝内部应用页面、凭据及控制字符；恢复记录和外部打开共用校验。主/设置入口拒绝 iframe 内启动，防止第二次清理 PTY。端口探测取消旧请求，地址栏忽略 IME 确认，超时明确反馈。
+
+主题与命令面板的存储边界校验损坏记录，主题加载按字段和请求代次拒绝旧回复。主题文件使用本地 Windows 环境，文件写入事件携带实际环境，重新编辑不覆盖已有文件。设置窗口不等待隐藏状态的 rAF 才显示。背景图片按 ID 隔离并释放 URL，IndexedDB 中止/阻塞明确失败并关闭晚到连接。第一轮全文审查已完成，最终复核状态见发布前覆盖表和审查记录，真实设备验收单独列出。
 
 长文贡献者指南在 `docs/` 下。这些指南是对 `TERAX.md` 的展开，冲突时以 `TERAX.md` 为准。
 

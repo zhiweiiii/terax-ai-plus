@@ -38,8 +38,22 @@ export type LspDocHandle = {
 };
 
 const sessions = new Map<string, Managed>();
+const closingSessions = new Set<Managed>();
 const creating = new Map<string, Promise<Managed | null>>();
+const presetEpochs = new Map<string, number>();
 const crashTimes = new Map<string, number[]>();
+
+function currentEpoch(presetId: string): number {
+  return presetEpochs.get(presetId) ?? 0;
+}
+
+function canAcquire(presetId: string, epoch: number): boolean {
+  return (
+    currentEpoch(presetId) === epoch &&
+    currentWorkspaceEnv().kind === "local" &&
+    usePreferencesStore.getState().lspActivation[presetId] === "enabled"
+  );
+}
 
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
@@ -72,8 +86,10 @@ export async function acquireDocExtension(
     prefs.lspActivation,
   );
   if (!preset) return null;
+  const epoch = currentEpoch(preset.id);
   if (prefs.lspActivation[preset.id] !== "enabled") return null;
   if (!(await detectBinary(preset.command))) return null;
+  if (!canAcquire(preset.id, epoch)) return null;
 
   // No project root means no session: a per-directory fallback multiplied
   // servers per open file and burned gigabytes.
@@ -83,6 +99,7 @@ export async function acquireDocExtension(
     markers,
   }).catch(() => null);
   if (!root) return null;
+  if (!canAcquire(preset.id, epoch)) return null;
   const key = `${preset.id}\u0000${root}`;
   if (crashedOut(key)) return null;
   if (
@@ -113,12 +130,18 @@ export async function acquireDocExtension(
   }
 
   const managed =
-    sessions.get(key) ?? (await getOrCreateSession(key, preset, root));
+    sessions.get(key) ?? (await getOrCreateSession(key, preset, root, epoch));
   if (!managed) return null;
 
   const uri = pathToFileUri(path);
   const languageId = preset.languages[langId] ?? langId;
   const mod = await import("./client");
+  if (
+    !canAcquire(preset.id, epoch) ||
+    managed.closing ||
+    sessions.get(key) !== managed
+  )
+    return null;
   const extension: Extension = [
     mod.lspInteractions({
       client: managed.client,
@@ -159,13 +182,23 @@ function getOrCreateSession(
   key: string,
   preset: LspPreset,
   root: string,
+  epoch: number,
 ): Promise<Managed | null> {
-  let inflight = creating.get(key);
+  const creationKey = `${key}\u0000${epoch}`;
+  let inflight = creating.get(creationKey);
   if (!inflight) {
-    inflight = createSession(key, preset, root).finally(() =>
-      creating.delete(key),
+    if (!canAcquire(preset.id, epoch)) return Promise.resolve(null);
+    const count =
+      [...sessions.values(), ...closingSessions].filter(
+        (m) => m.preset.id === preset.id,
+      ).length +
+      [...creating.keys()].filter((k) => k.startsWith(`${preset.id}\u0000`))
+        .length;
+    if (count >= MAX_SESSIONS_PER_PRESET) return Promise.resolve(null);
+    inflight = createSession(key, preset, root, epoch).finally(() =>
+      creating.delete(creationKey),
     );
-    creating.set(key, inflight);
+    creating.set(creationKey, inflight);
   }
   return inflight;
 }
@@ -174,11 +207,20 @@ async function createSession(
   key: string,
   preset: LspPreset,
   root: string,
+  epoch: number,
 ): Promise<Managed | null> {
   const existing = sessions.get(key);
   if (existing) return existing;
 
   const store = useLspRuntimeStore.getState();
+  const removeStarting = () => {
+    if (
+      !sessions.has(key) &&
+      (currentEpoch(preset.id) === epoch ||
+        !creating.has(`${key}\u0000${currentEpoch(preset.id)}`))
+    )
+      store.removeSessionQuiet(key);
+  };
   store.upsertSession({ key, presetId: preset.id, root, status: "starting" });
 
   const [{ TauriLspTransport }, { TeraxLspClient }] = await Promise.all([
@@ -193,6 +235,10 @@ async function createSession(
   }
 
   const transport = new TauriLspTransport();
+  if (!canAcquire(preset.id, epoch)) {
+    removeStarting();
+    return null;
+  }
   try {
     await transport.start({
       command: preset.command,
@@ -202,11 +248,21 @@ async function createSession(
       maxMemoryMb: preset.maxMemoryMb,
     });
   } catch (e) {
+    transport.close();
+    if (!canAcquire(preset.id, epoch)) {
+      removeStarting();
+      return null;
+    }
     recordCrash(key);
     store.removeSession(key, preset.id);
     toast.error(`${preset.name} language server failed to start`, {
       description: String(e),
     });
+    return null;
+  }
+  if (!canAcquire(preset.id, epoch)) {
+    transport.close();
+    removeStarting();
     return null;
   }
 
@@ -218,7 +274,7 @@ async function createSession(
     documentUri: rootUri,
     languageId: "",
     initializationOptions: preset.initializationOptions,
-    onClose: () => handleServerExit(key),
+    onClose: () => handleServerExit(key, transport),
     onError: (e) => console.error(`[lsp:${preset.id}]`, e),
   });
 
@@ -237,12 +293,17 @@ async function createSession(
   // Exit can beat the map insert when the binary dies instantly (e.g. a
   // rustup proxy for an uninstalled component); reap it here.
   if (transport.exitInfo) {
-    handleServerExit(key);
+    handleServerExit(key, transport);
     return null;
   }
 
   void client.initializePromise.then(() => {
     if (sessions.get(key) === managed) {
+      if (!client.ready) {
+        toast.error(`${preset.name} language server failed to initialize`);
+        handleServerExit(key, transport);
+        return;
+      }
       const runtime = useLspRuntimeStore.getState();
       runtime.clearFailed(preset.id);
       runtime.upsertSession({
@@ -257,9 +318,9 @@ async function createSession(
   return managed;
 }
 
-function handleServerExit(key: string): void {
+function handleServerExit(key: string, transport: TauriLspTransport): void {
   const managed = sessions.get(key);
-  if (!managed || managed.closing) return;
+  if (!managed || managed.closing || managed.transport !== transport) return;
   managed.closing = true;
   if (managed.idleTimer) clearTimeout(managed.idleTimer);
   recordCrash(key);
@@ -341,9 +402,21 @@ async function closeSession(managed: Managed): Promise<void> {
     managed.idleTimer = null;
   }
   sessions.delete(managed.key);
+  closingSessions.add(managed);
   useLspRuntimeStore.getState().removeSession(managed.key, managed.preset.id);
-  await managed.client.shutdownGracefully(SHUTDOWN_TIMEOUT_MS);
-  managed.transport.close();
+  try {
+    await managed.client.shutdownGracefully(SHUTDOWN_TIMEOUT_MS);
+  } catch (error) {
+    console.warn(`[lsp:${managed.preset.id}] shutdown failed`, error);
+  } finally {
+    managed.transport.close();
+    closingSessions.delete(managed);
+    if (
+      usePreferencesStore.getState().lspActivation[managed.preset.id] ===
+      "enabled"
+    )
+      useLspRuntimeStore.getState().bumpGeneration(managed.preset.id);
+  }
 }
 
 export function notifyDocumentSaved(path: string): void {
@@ -356,6 +429,7 @@ export function notifyDocumentSaved(path: string): void {
 }
 
 export async function stopPresetSessions(presetId: string): Promise<void> {
+  presetEpochs.set(presetId, currentEpoch(presetId) + 1);
   const targets = [...sessions.values()].filter(
     (m) => m.preset.id === presetId,
   );
@@ -386,9 +460,12 @@ export async function restartPresetSessions(presetId: string): Promise<void> {
 // the mirrored preference change instead of a direct call.
 usePreferencesStore.subscribe((state, prev) => {
   if (state.lspActivation === prev.lspActivation) return;
-  for (const managed of sessions.values()) {
-    if (state.lspActivation[managed.preset.id] !== "enabled") {
-      void stopPresetSessions(managed.preset.id);
+  for (const presetId of Object.keys(prev.lspActivation)) {
+    if (
+      prev.lspActivation[presetId] === "enabled" &&
+      state.lspActivation[presetId] !== "enabled"
+    ) {
+      void stopPresetSessions(presetId);
     }
   }
 });

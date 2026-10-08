@@ -3,13 +3,30 @@
 
 const KEY = "terax-palette-mru";
 const MAX_ENTRIES = 120;
+const MAX_STORAGE_CHARS = 64 * 1024;
 
 type MruMap = Record<string, number>;
 
 function read(): MruMap {
   try {
     const raw = localStorage.getItem(KEY);
-    return raw ? (JSON.parse(raw) as MruMap) : {};
+    if (!raw || raw.length > MAX_STORAGE_CHARS) return {};
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    const entries = Object.entries(value)
+      .filter((entry): entry is [string, number] => {
+        const [id, timestamp] = entry;
+        return (
+          id.length > 0 &&
+          id.length <= 256 &&
+          typeof timestamp === "number" &&
+          Number.isSafeInteger(timestamp) &&
+          timestamp >= 0
+        );
+      })
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, MAX_ENTRIES);
+    return Object.fromEntries(entries);
   } catch {
     return {};
   }
@@ -17,7 +34,12 @@ function read(): MruMap {
 
 export function recordUse(id: string): void {
   const map = read();
-  map[id] = Date.now();
+  if (!id || id.length > 256) return;
+  Object.defineProperty(map, id, {
+    value: Date.now(),
+    enumerable: true,
+    configurable: true,
+  });
   const ids = Object.keys(map);
   if (ids.length > MAX_ENTRIES) {
     for (const k of ids
@@ -38,5 +60,5 @@ export function mruSnapshot(): MruMap {
 }
 
 export function mruRank(snapshot: MruMap, id: string): number {
-  return snapshot[id] ?? 0;
+  return Object.getOwnPropertyDescriptor(snapshot, id)?.value ?? 0;
 }

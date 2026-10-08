@@ -2,7 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
+import { parentDir } from "@/modules/explorer/lib/watch";
 
 type Options = {
   rootPath: string | null;
@@ -10,26 +15,15 @@ type Options = {
   onCopied: (destDir: string) => void;
 };
 
-function parentDir(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i > 0 ? path.slice(0, i) : path;
-}
-
-// Tauri reports the drop point in physical pixels on some platforms; scale down
-// only when it overflows the logical viewport (mirrors the terminal drop).
 function dirAt(
   x: number,
   y: number,
   rootPath: string | null,
   isDir: (p: string) => boolean | undefined,
 ): string | null {
-  let lx = x;
-  let ly = y;
-  if (x > window.innerWidth || y > window.innerHeight) {
-    const dpr = window.devicePixelRatio || 1;
-    lx = x / dpr;
-    ly = y / dpr;
-  }
+  const dpr = window.devicePixelRatio || 1;
+  const lx = x / dpr;
+  const ly = y / dpr;
   const el = document.elementFromPoint(lx, ly) as HTMLElement | null;
   if (!el) return null;
   const row = el.closest<HTMLElement>("[data-fs-path]");
@@ -45,9 +39,11 @@ function dirAt(
 // via Tauri's native drag-drop. One webview-level listener; ignores drops that
 // land outside the explorer (the terminal handles its own).
 export function useExplorerFileDrop({ rootPath, isDir, onCopied }: Options) {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const scopeKey = workspaceScopeKey(workspace);
   const [targetDir, setTargetDir] = useState<string | null>(null);
-  const optsRef = useRef({ rootPath, isDir, onCopied });
-  optsRef.current = { rootPath, isDir, onCopied };
+  const optsRef = useRef({ rootPath, isDir, onCopied, workspace, scopeKey });
+  optsRef.current = { rootPath, isDir, onCopied, workspace, scopeKey };
 
   useEffect(() => {
     let disposed = false;
@@ -55,8 +51,11 @@ export function useExplorerFileDrop({ rootPath, isDir, onCopied }: Options) {
 
     void getCurrentWebview()
       .onDragDropEvent((e) => {
+        if (disposed) return;
         const p = e.payload;
-        const { rootPath, isDir, onCopied } = optsRef.current;
+        const { rootPath, isDir, onCopied, workspace, scopeKey } =
+          optsRef.current;
+        if (currentWorkspaceScopeKey() !== scopeKey) return;
         if (p.type === "enter" || p.type === "over") {
           setTargetDir(dirAt(p.position.x, p.position.y, rootPath, isDir));
           return;
@@ -72,9 +71,17 @@ export function useExplorerFileDrop({ rootPath, isDir, onCopied }: Options) {
           void invoke("fs_copy", {
             sources: p.paths,
             destDir: dir,
-            workspace: currentWorkspaceEnv(),
+            workspace,
           })
-            .then(() => onCopied(dir))
+            .then(() => {
+              if (
+                !disposed &&
+                optsRef.current.rootPath === rootPath &&
+                optsRef.current.scopeKey === scopeKey &&
+                currentWorkspaceScopeKey() === scopeKey
+              )
+                onCopied(dir);
+            })
             .catch((err) => toast.error(`Copy failed: ${String(err)}`));
         }
       })
@@ -82,7 +89,9 @@ export function useExplorerFileDrop({ rootPath, isDir, onCopied }: Options) {
         if (disposed) fn();
         else unlisten = fn;
       })
-      .catch((err) => console.error("[terax] explorer drop listen failed:", err));
+      .catch((err) =>
+        console.error("[terax] explorer drop listen failed:", err),
+      );
 
     return () => {
       disposed = true;

@@ -1,18 +1,34 @@
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 
 export async function copyToClipboard(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
-  } catch {
-    // Best-effort; ignore in environments without clipboard permission.
+  } catch (error) {
+    toast.error(`Could not copy path: ${String(error)}`);
   }
 }
 
 export function relativePath(rootPath: string, path: string): string {
-  if (path === rootPath) return ".";
-  if (path.startsWith(`${rootPath}/`)) return path.slice(rootPath.length + 1);
+  const root = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalized === root) return ".";
+  if (normalized.startsWith(`${root}/`))
+    return normalized.slice(root.length + 1);
   return path;
+}
+
+function systemPath(
+  path: string,
+  env: WorkspaceEnv = currentWorkspaceEnv(),
+): string {
+  if (env.kind === "wsl" && path.startsWith("/") && !path.startsWith("//")) {
+    if (!env.distro || /[\\/\x00-\x1f]/.test(env.distro))
+      throw new Error("Invalid WSL distribution");
+    return `\\\\wsl.localhost\\${env.distro}${path.replace(/\//g, "\\")}`;
+  }
+  return path.replace(/\//g, "\\");
 }
 
 /**
@@ -26,18 +42,13 @@ export function relativePath(rootPath: string, path: string): string {
  * swallowed into the console, so the menu item simply did nothing.
  */
 export async function revealInFinder(path: string): Promise<void> {
-  const native = isWindows() ? path.replace(/[/\\]+/g, "\\") : path;
   try {
-    await revealItemInDir(native);
+    await revealItemInDir(systemPath(path));
   } catch (e) {
     console.error("revealItemInDir failed:", e);
     const message = typeof e === "string" ? e : String(e);
     toast.error(`Could not reveal in the file manager: ${message}`);
   }
-}
-
-function isWindows(): boolean {
-  return navigator.userAgent.includes("Windows");
 }
 
 /**
@@ -47,7 +58,7 @@ function isWindows(): boolean {
  */
 export async function openWithSystemApp(path: string): Promise<void> {
   try {
-    await openPath(path);
+    await openPath(systemPath(path));
   } catch (e) {
     console.error("openPath failed:", e);
     const message = typeof e === "string" ? e : String(e);

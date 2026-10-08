@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   applyExternalGrid,
+  findLeafCwd,
   leafIds,
   ptyIdForLeaf,
   snapshotLeaf,
@@ -29,7 +30,7 @@ type Params = {
   terminalTabs: Tab[];
   activeId: number;
   /** Open a tab by id (activates it, which spawns the pty if cold). */
-  activateTab: (id: number) => void;
+  activateTab: (id: number, leafId: number, spaceId: string) => void;
 };
 
 /**
@@ -44,22 +45,22 @@ export function useWebTerminalSync({
   activateTab,
 }: Params) {
   const spaces = useSpaces((s) => s.spaces);
+  const latest = useRef({ terminalTabs, activateTab });
+  latest.current = { terminalTabs, activateTab };
 
   useEffect(() => {
-    const spaceName = new Map(spaces.map((sp) => [sp.id, sp.name]));
     const tabs: WebTab[] = [];
     for (const tab of terminalTabs) {
       if (tab.kind !== "terminal") continue;
       for (const leafId of leafIds(tab.paneTree)) {
         const ptyId = ptyIdForLeaf(leafId);
-        const space = spaceName.get(tab.spaceId);
         tabs.push({
           leaf_id: leafId,
-          cwd: tab.cwd ?? null,
+          cwd: findLeafCwd(tab.paneTree, leafId) ?? tab.cwd ?? null,
           title: tab.customTitle ?? tab.title ?? null,
-          active: tab.id === activeId,
+          active: tab.id === activeId && leafId === tab.activeLeafId,
           pty_id: ptyId,
-          space_id: space ?? tab.spaceId,
+          space_id: tab.spaceId,
         });
       }
     }
@@ -91,13 +92,16 @@ export function useWebTerminalSync({
       const off = await listen<{ leafId: number; cols: number; rows: number }>(
         "terax:pty-resized",
         (e) => {
+          if (disposed) return;
           const { leafId, cols, rows } = e.payload;
           if (typeof leafId === "number") applyExternalGrid(leafId, cols, rows);
         },
       );
       if (disposed) off();
       else unlisten = off;
-    })();
+    })().catch((error) =>
+      console.warn("[terax] resize listener failed:", error),
+    );
     return () => {
       disposed = true;
       unlisten?.();
@@ -115,6 +119,7 @@ export function useWebTerminalSync({
       const off = await listen<{ leafId: number; requestId: number }>(
         "terax:web-snapshot",
         (e) => {
+          if (disposed) return;
           const { leafId, requestId } = e.payload;
           let data: string | null = null;
           try {
@@ -132,7 +137,9 @@ export function useWebTerminalSync({
       );
       if (disposed) off();
       else unlisten = off;
-    })();
+    })().catch((error) =>
+      console.warn("[terax] snapshot listener failed:", error),
+    );
     return () => {
       disposed = true;
       unlisten?.();
@@ -144,18 +151,21 @@ export function useWebTerminalSync({
     let disposed = false;
     (async () => {
       const off = await listen<number>("terax:web-activate", (e) => {
+        if (disposed) return;
         const leafId = e.payload;
-        const tab = terminalTabs.find(
+        const tab = latest.current.terminalTabs.find(
           (t) => t.kind === "terminal" && leafIds(t.paneTree).includes(leafId),
         );
-        if (tab) activateTab(tab.id);
+        if (tab) latest.current.activateTab(tab.id, leafId, tab.spaceId);
       });
       if (disposed) off();
       else unlisten = off;
-    })();
+    })().catch((error) =>
+      console.warn("[terax] activation listener failed:", error),
+    );
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [terminalTabs, activateTab]);
+  }, []);
 }

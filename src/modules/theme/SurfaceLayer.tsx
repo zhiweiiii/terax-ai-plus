@@ -16,15 +16,14 @@ export function SurfaceLayer() {
     (s) => s.backgroundKind === "image" && !!s.backgroundImageId,
   );
   const hydrated = usePreferencesStore((s) => s.hydrated);
+  const storeImageId = usePreferencesStore((s) => s.backgroundImageId);
   const active = hydrated ? storeActive : fastPath.active;
   if (!active) return null;
-  return <BackgroundImage fastImageId={fastPath.imageId} />;
+  const imageId = hydrated ? storeImageId : fastPath.imageId;
+  return <BackgroundImage key={imageId} imageId={imageId} />;
 }
 
-function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
-  const storeImageId = usePreferencesStore((s) => s.backgroundImageId);
-  const hydrated = usePreferencesStore((s) => s.hydrated);
-  const imageId = hydrated ? storeImageId : fastImageId;
+function BackgroundImage({ imageId }: { imageId: string | null }) {
   const opacity = usePreferencesStore((s) => s.backgroundOpacity);
   const blur = usePreferencesStore((s) => s.backgroundBlur);
   const [state, setState] = useState<{ url: string; animated: boolean } | null>(
@@ -55,21 +54,18 @@ function BackgroundImage({ fastImageId }: { fastImageId: string | null }) {
         rafId = null;
         if (alive) setVisible(true);
       });
-    })();
+    })().catch((error) =>
+      console.error("[terax] background image load failed:", error),
+    );
     return () => {
       alive = false;
       if (rafId !== null) cancelAnimationFrame(rafId);
-    };
-  }, [imageId]);
-
-  useEffect(() => {
-    return () => {
       if (lastUrlRef.current) {
         URL.revokeObjectURL(lastUrlRef.current);
         lastUrlRef.current = null;
       }
     };
-  }, []);
+  }, [imageId]);
 
   if (!state || typeof document === "undefined") return null;
   const { url, animated } = state;

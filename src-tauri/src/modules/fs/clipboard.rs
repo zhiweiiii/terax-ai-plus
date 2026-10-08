@@ -3,7 +3,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 /// Cap a single pasted image. Screenshots are well under this; the limit keeps
 /// a runaway clipboard from filling the disk.
@@ -19,11 +19,6 @@ fn paste_dir() -> Result<PathBuf, String> {
     let dir = base.join("terax").join("pasted");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("create paste directory {}: {e}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
     Ok(dir)
 }
 
@@ -65,7 +60,15 @@ fn extension_for(mime: &str) -> Option<&'static str> {
 /// The frontend pastes that path into the terminal, which is what CLI agents
 /// (Claude Code) expect for an image attachment.
 #[tauri::command]
-pub async fn fs_save_clipboard_image(bytes: Vec<u8>, mime: String) -> Result<String, String> {
+pub async fn fs_save_clipboard_image(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let mime = request
+        .headers()
+        .get("x-image-mime")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "missing clipboard image MIME header".to_string())?;
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("clipboard image requires a raw body".to_string());
+    };
     if bytes.is_empty() {
         return Err("clipboard image is empty".to_string());
     }
@@ -76,28 +79,27 @@ pub async fn fs_save_clipboard_image(bytes: Vec<u8>, mime: String) -> Result<Str
             MAX_IMAGE_BYTES / (1024 * 1024)
         ));
     }
-    let ext = extension_for(&mime)
-        .ok_or_else(|| format!("unsupported clipboard image type: {mime}"))?;
+    let ext =
+        extension_for(mime).ok_or_else(|| format!("unsupported clipboard image type: {mime}"))?;
+    let bytes = bytes.clone();
+    super::blocking(move || save_image(&bytes, ext)).await
+}
 
+fn save_image(bytes: &[u8], ext: &str) -> Result<String, String> {
     let dir = paste_dir()?;
     sweep_old(&dir);
-
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let path = dir.join(format!("paste-{stamp}.{ext}"));
-
-    // Write via a temp file in the same directory, then persist, so a reader
-    // never sees a half-written image.
-    let mut temp = tempfile::NamedTempFile::new_in(&dir)
+    let mut temp = tempfile::Builder::new()
+        .prefix("paste-")
+        .suffix(&format!(".{ext}"))
+        .tempfile_in(&dir)
         .map_err(|e| format!("create temp file: {e}"))?;
-    temp.write_all(&bytes)
+    temp.write_all(bytes)
         .map_err(|e| format!("write clipboard image: {e}"))?;
     temp.as_file()
         .sync_all()
         .map_err(|e| format!("sync clipboard image: {e}"))?;
-    temp.persist(&path)
+    let (_file, path) = temp
+        .keep()
         .map_err(|e| format!("publish clipboard image: {}", e.error))?;
 
     Ok(super::to_canon(&path))
@@ -109,19 +111,9 @@ pub async fn fs_save_clipboard_image(bytes: Vec<u8>, mime: String) -> Result<Str
 /// is why it has to be read natively.
 #[tauri::command]
 pub async fn fs_clipboard_file_paths() -> Result<Vec<String>, String> {
-    #[cfg(windows)]
-    {
-        read_windows_clipboard_files()
-    }
-    #[cfg(not(windows))]
-    {
-        // macOS/Linux surface copied files through the webview's own paste
-        // payload, so nothing native is needed there.
-        Ok(Vec::new())
-    }
+    super::blocking(read_windows_clipboard_files).await
 }
 
-#[cfg(windows)]
 fn read_windows_clipboard_files() -> Result<Vec<String>, String> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::HANDLE;
@@ -160,11 +152,19 @@ fn read_windows_clipboard_files() -> Result<Vec<String>, String> {
 
         // 0xFFFF_FFFF asks for the count rather than a path.
         let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
+        if count > 1024 {
+            return Err("clipboard has more than 1024 file paths".to_string());
+        }
         let mut paths = Vec::with_capacity(count as usize);
+        let mut total_units = 0usize;
         for index in 0..count {
             let len = DragQueryFileW(hdrop, index, std::ptr::null_mut(), 0);
             if len == 0 {
                 continue;
+            }
+            total_units += len as usize;
+            if len > 32768 || total_units > 1024 * 1024 {
+                return Err("clipboard file paths exceed the size limit".to_string());
             }
             // +1 for the NUL that DragQueryFileW writes.
             let mut buf = vec![0u16; len as usize + 1];
@@ -179,5 +179,3 @@ fn read_windows_clipboard_files() -> Result<Vec<String>, String> {
         Ok(paths)
     }
 }
-
-

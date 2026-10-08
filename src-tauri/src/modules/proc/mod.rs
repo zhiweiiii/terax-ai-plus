@@ -1,4 +1,6 @@
 #[cfg(windows)]
+pub mod capture;
+#[cfg(windows)]
 pub mod job;
 
 use std::process::Command;

@@ -72,19 +72,19 @@ export class DormantRing {
 
   private emit(write: (bytes: Uint8Array) => void): void {
     const last = this.blocks.length - 1;
-    let skip = 0;
+    let seekLine = this.overflowed;
     if (this.overflowed && this.head <= last) {
       write(OVERFLOW_NOTICE);
-      // Cut landed mid-line, likely mid-escape-sequence; LF never occurs
-      // inside a multi-byte UTF-8 sequence so resuming there is safe.
-      const first = this.blocks[this.head];
-      const firstLen = this.head === last ? this.tailLen : first.length;
-      const lf = first.subarray(0, firstLen).indexOf(LF);
-      if (lf >= 0) skip = lf + 1;
     }
     for (let i = this.head; i <= last; i++) {
       const len = i === last ? this.tailLen : this.blocks[i].length;
-      const start = i === this.head ? skip : 0;
+      let start = 0;
+      if (seekLine) {
+        const lf = this.blocks[i].subarray(0, len).indexOf(LF);
+        if (lf < 0) continue;
+        start = lf + 1;
+        seekLine = false;
+      }
       if (start < len) write(this.blocks[i].subarray(start, len));
     }
   }

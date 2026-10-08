@@ -35,13 +35,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  type GitBranchEntry,
-  type GitRepoHead,
-  type GitStatusSnapshot,
-  native,
-} from "@/lib/native";
+import { errorToast } from "@/lib/errorToast";
+import { type GitRepoHead, type GitStatusSnapshot, native } from "@/lib/native";
 import { cn } from "@/lib/utils";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
 import {
   copyToClipboard,
   revealInFinder,
@@ -52,6 +49,7 @@ import {
   COMPACT_ITEM,
 } from "@/modules/explorer/lib/menuItemClass";
 import { joinPath } from "@/modules/explorer/lib/useFileTree";
+import { useWorkspaceEnvStore, workspaceScopeKey } from "@/modules/workspace";
 import {
   Alert02Icon,
   ArrowDown01Icon,
@@ -79,11 +77,11 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { errorToast } from "@/lib/errorToast";
 import { toast } from "sonner";
 import { PushDialog } from "./PushDialog";
 import {
@@ -106,6 +104,7 @@ import type { SourceControlSummary } from "./useSourceControl";
 import {
   type CheckState,
   type SourceControlFileEntry,
+  type SourceControlPanelAction,
   useSourceControlPanel,
 } from "./useSourceControlPanel";
 
@@ -333,6 +332,8 @@ function BranchDropdown({
   onFollowRepositoryContext,
   onNavigateToPath,
   onRefresh,
+  runAction,
+  actionBusy,
 }: {
   repoRoot: string | null;
   repoLabel: string;
@@ -341,93 +342,60 @@ function BranchDropdown({
   onFollowRepositoryContext: () => void;
   onNavigateToPath?: (path: string) => void;
   onRefresh: () => void;
+  runAction: SourceControlPanelAction;
+  actionBusy: string | null;
 }) {
   const [open, setOpen] = useState(false);
-  const [branches, setBranches] = useState<GitBranchEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [checkingOut, setCheckingOut] = useState(false);
-  // Remote branch being checked out as a new local branch, with the editable
-  // local name; null hides the naming row.
+  const workspace = useWorkspaceEnvStore((state) => state.env);
   const [pendingRemote, setPendingRemote] = useState<{
     remote: string;
     local: string;
   } | null>(null);
-  const requestRef = useRef(0);
-  const checkoutInFlight = useRef(false);
-
-  const loadBranches = useCallback(async () => {
-    const id = ++requestRef.current;
-    if (!repoRoot) {
-      setBranches([]);
-      setError(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await native.gitListBranches(repoRoot);
-      if (id !== requestRef.current) return;
-      setBranches(result.branches);
-    } catch (e) {
-      if (id !== requestRef.current) return;
-      setError(String(e));
-      setBranches([]);
-    } finally {
-      if (id === requestRef.current) {
-        setLoading(false);
-      }
-    }
-  }, [repoRoot]);
-
-  useEffect(() => {
-    if (open) {
-      void loadBranches();
-    }
-  }, [open, loadBranches]);
-
-  const handleCheckout = useCallback(
-    async (branch: string) => {
-      if (!repoRoot || checkoutInFlight.current) return;
-      checkoutInFlight.current = true;
-      setCheckingOut(true);
-      try {
-        await native.gitCheckoutBranch(repoRoot, branch);
-        setBranches([]);
+  const readBranches = useCallback(async () => {
+    if (!repoRoot) return [];
+    return (await native.gitListBranches(repoRoot, workspace)).branches;
+  }, [repoRoot, workspace]);
+  const query = useAsyncQuery({
+    enabled: open && !!repoRoot,
+    term: "",
+    minLength: 0,
+    debounceMs: 0,
+    scopeKey: JSON.stringify([repoRoot, workspaceScopeKey(workspace)]),
+    run: readBranches,
+  });
+  const { results: branches, loading, error } = query;
+  const checkingOut = actionBusy !== null;
+  const checkout = useCallback(
+    async (branch: string, localName?: string) => {
+      if (!repoRoot) return;
+      const succeeded = await runAction(
+        "checkout",
+        async (operationWorkspace, ensureCurrent) => {
+          await native.gitCheckoutBranch(
+            repoRoot,
+            branch,
+            localName,
+            operationWorkspace,
+          );
+          ensureCurrent();
+        },
+      );
+      if (succeeded) {
+        setPendingRemote(null);
         setOpen(false);
         onRefresh();
-      } catch (e) {
-        errorToast("Git 操作失败", e);
-      } finally {
-        checkoutInFlight.current = false;
-        setCheckingOut(false);
       }
     },
-    [repoRoot, onRefresh],
+    [repoRoot, runAction, onRefresh],
   );
-
+  const handleCheckout = useCallback(
+    (branch: string) => checkout(branch),
+    [checkout],
+  );
   const handleRemoteCheckout = useCallback(async () => {
-    if (!repoRoot || !pendingRemote || checkoutInFlight.current) return;
-    checkoutInFlight.current = true;
-    setCheckingOut(true);
-    try {
-      await native.gitCheckoutBranch(
-        repoRoot,
-        pendingRemote.remote,
-        pendingRemote.local.trim(),
-      );
-      setBranches([]);
-      setPendingRemote(null);
-      setOpen(false);
-      onRefresh();
-    } catch (e) {
-      errorToast("Git 操作失败", e);
-    } finally {
-      checkoutInFlight.current = false;
-      setCheckingOut(false);
-    }
-  }, [pendingRemote, repoRoot, onRefresh]);
+    if (!pendingRemote?.local.trim()) return;
+    await checkout(pendingRemote.remote, pendingRemote.local.trim());
+  }, [checkout, pendingRemote]);
 
   const localBranches = useMemo(
     () => branches.filter((b) => b.kind === "local"),
@@ -446,6 +414,7 @@ function BranchDropdown({
     <DropdownMenu
       open={open}
       onOpenChange={(next) => {
+        if (checkingOut) return;
         setOpen(next);
         if (!next) setPendingRemote(null);
       }}
@@ -508,6 +477,9 @@ function BranchDropdown({
         ) : error ? (
           <div className="px-3 py-3 text-[11px] leading-snug text-destructive">
             {error}
+            <Button size="xs" variant="ghost" onClick={query.retry}>
+              Retry
+            </Button>
           </div>
         ) : (
           <>
@@ -537,6 +509,7 @@ function BranchDropdown({
                   {localBranches.map((b) => (
                     <DropdownMenuItem
                       key={b.name}
+                      disabled={checkingOut || b.isHead}
                       onSelect={() => void handleCheckout(b.name)}
                       className="flex cursor-pointer items-center gap-2 text-[12px]"
                     >
@@ -567,7 +540,7 @@ function BranchDropdown({
                   <DropdownMenuSeparator />
                 )}
                 <DropdownMenuLabel className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/85">
-                  Remote Branches — checkout as a new local branch
+                  Remote Branches: checkout as a new local branch
                 </DropdownMenuLabel>
                 <DropdownMenuGroup>
                   {remotes.map((b) => (
@@ -642,7 +615,20 @@ function BranchDropdown({
   );
 }
 
-export const SourceControlPanel = memo(function SourceControlPanel({
+export const SourceControlPanel = memo(function SourceControlPanel(
+  props: Props,
+) {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const scopeKey = JSON.stringify([
+    workspaceScopeKey(workspace),
+    props.sourceControl.contextPath,
+    props.sourceControl.repo?.repoRoot,
+    props.sourceControl.status?.branch,
+  ]);
+  return <ScopedSourceControlPanel key={scopeKey} {...props} />;
+});
+
+function ScopedSourceControlPanel({
   open,
   sourceControl,
   onOpenGitGraph,
@@ -667,8 +653,6 @@ export const SourceControlPanel = memo(function SourceControlPanel({
 }: Props) {
   const repoList = useMemo(() => repos ?? [], [repos]);
   const [pushPlan, setPushPlan] = useState<PushPlan | null>(null);
-  const [planLoading, setPlanLoading] = useState(false);
-  const [pullBusy, setPullBusy] = useState(false);
   const repoCount = repoList.length;
   const scm = useSourceControlPanel(
     open,
@@ -741,15 +725,15 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         : 0;
   const canCommit =
     stagedRepoCount > 0 &&
-    (scm.commitMessage.trim().length > 0 || scm.amendEnabled) &&
+    scm.commitMessage.trim().length > 0 &&
     !fixedTargetPending &&
     !scm.actionBusy;
   const commitDisabledReason = scm.actionBusy
     ? "Wait for the current Git action to finish."
     : stagedRepoCount === 0
       ? "Stage changes to enable commit."
-      : scm.commitMessage.trim().length === 0 && !scm.amendEnabled
-        ? "Enter a commit message, or enable Amend to reuse the previous one."
+      : scm.commitMessage.trim().length === 0
+        ? "Enter a commit message."
         : null;
   const commitHint = canCommit
     ? `Commit with ${commitShortcut}.`
@@ -769,7 +753,17 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   // match what Commit will actually include across every repo.
   const stagedCount = scm.fileEntries.filter((f) => f.staged).length;
 
-  const [draftBusy, setDraftBusy] = useState(false);
+  const planLoading = scm.actionBusy === "push-preview";
+  const pullBusy = scm.actionBusy === "pull";
+  const draftBusy = scm.actionBusy === "draft";
+  const rowIdPrefix = useId();
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   /* Hand the staged diff to the agent and ask it for the commit message.
      The patch is what a message has to be written from; a list of file names
@@ -793,16 +787,20 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           ? [{ repoRoot: scm.repo.repoRoot, name: basename(scm.repo.repoRoot) }]
           : [];
     if (roots.length === 0) return;
-    setDraftBusy(true);
-    try {
+    await scm.runAction("draft", async (workspace, ensureCurrent) => {
       const parts: string[] = [];
+      let patchSize = 0;
       for (const r of roots) {
-        const res = await native.gitDiff(r.repoRoot, null, true);
+        const res = await native.gitDiff(r.repoRoot, null, true, workspace);
+        ensureCurrent();
         const patch = res.diffText.trim();
         if (!patch) continue;
-        parts.push(
-          roots.length > 1 ? `### ${r.name}\n\n${patch}` : patch,
-        );
+        patchSize += patch.length;
+        if (patchSize > 512 * 1024)
+          throw new Error(
+            "Staged changes are too large to send. Select fewer files first.",
+          );
+        parts.push(roots.length > 1 ? `### ${r.name}\n\n${patch}` : patch);
       }
       if (parts.length === 0) {
         toast.error("勾选的变更没有可读的差异");
@@ -817,12 +815,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       ].join("\n");
       if (!onSendToAgent(body)) return;
       toast.success("已发送到 agent");
-    } catch (e) {
-      errorToast("读取变更失败", e);
-    } finally {
-      setDraftBusy(false);
-    }
-  }, [onSendToAgent, scm.repoGroups, scm.repo]);
+    });
+  }, [onSendToAgent, scm.repoGroups, scm.repo, scm.runAction]);
   const changedCount = scm.fileEntries.length;
   const pushStatusLabel = upstreamBadgeLabel(scm.status?.upstream);
   const hasUpstream = !!scm.status?.upstream;
@@ -855,6 +849,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   }, [scm.actionError, scm.actionMessage, scm.remoteError]);
 
   const handleCommitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (
       event.key === "Enter" &&
       (event.metaKey || event.ctrlKey) &&
@@ -871,12 +866,18 @@ export const SourceControlPanel = memo(function SourceControlPanel({
     if (refreshAnimationRef.current) {
       window.clearTimeout(refreshAnimationRef.current);
     }
-    void scm.refresh().finally(() => {
-      refreshAnimationRef.current = window.setTimeout(() => {
-        setRefreshAnimating(false);
-        refreshAnimationRef.current = null;
-      }, 450);
-    });
+    void scm
+      .refresh()
+      .catch((error) => {
+        if (scm.isCurrent()) errorToast("Git refresh failed", error);
+      })
+      .finally(() => {
+        if (!mountedRef.current || !scm.isCurrent()) return;
+        refreshAnimationRef.current = window.setTimeout(() => {
+          setRefreshAnimating(false);
+          refreshAnimationRef.current = null;
+        }, 450);
+      });
   }, [scm]);
 
   const handleFetch = useCallback(() => {
@@ -884,44 +885,43 @@ export const SourceControlPanel = memo(function SourceControlPanel({
   }, [sourceControl]);
 
   const handlePull = useCallback(async () => {
-    if (pullBusy) return;
-    setPullBusy(true);
-    try {
-      if (repoList.length > 1) {
-        const failures: string[] = [];
-        for (const repo of repoList) {
-          try {
-            await native.gitPullAdvanced(repo.repoRoot, "merge");
-          } catch (error) {
-            failures.push(
-              `${basename(repo.repoRoot)}: ${
-                typeof error === "string" ? error : String(error)
-              }`,
-            );
-          }
+    await scm.runAction("pull", async (workspace, ensureCurrent) => {
+      const targets =
+        repoList.length > 1
+          ? repoList
+          : scm.repo
+            ? [{ repoRoot: scm.repo.repoRoot }]
+            : [];
+      const failures: string[] = [];
+      for (const target of targets) {
+        ensureCurrent();
+        try {
+          await native.gitPullFfOnly(target.repoRoot, workspace);
+          ensureCurrent();
+        } catch (error) {
+          ensureCurrent();
+          failures.push(`${basename(target.repoRoot)}: ${String(error)}`);
         }
-        if (failures.length > 0) {
-          errorToast(
-            failures.length === repoList.length
-              ? `Pull failed for all ${failures.length} repos`
-              : `Pulled ${repoList.length - failures.length}/${repoList.length} repos; ${failures.length} failed`,
-            failures.join("\n"),
-          );
-        }
-        await scm.refresh();
-        await refreshAllRepoStatuses?.();
-      } else {
-        const root = scm.repo?.repoRoot;
-        if (!root) return;
-        await native.gitPullAdvanced(root, "merge");
-        await scm.refresh();
       }
-    } catch (error) {
-      errorToast("Git 操作失败", error);
-    } finally {
-      setPullBusy(false);
+      await scm.refresh();
+      ensureCurrent();
+      await refreshAllRepoStatuses?.();
+      ensureCurrent();
+      if (failures.length) throw new Error(failures.join("\n"));
+    });
+  }, [refreshAllRepoStatuses, repoList, scm]);
+
+  const handlePushPreview = useCallback(async () => {
+    if (!buildPushPlan) {
+      await scm.push();
+      return;
     }
-  }, [pullBusy, refreshAllRepoStatuses, repoList, scm]);
+    await scm.runAction("push-preview", async (_workspace, ensureCurrent) => {
+      const plan = await buildPushPlan();
+      ensureCurrent();
+      setPushPlan(plan);
+    });
+  }, [buildPushPlan, scm]);
 
   const rows = useMemo<RowDescriptor[]>(() => {
     const result: RowDescriptor[] = [];
@@ -953,7 +953,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
           return a.localeCompare(b);
         });
         for (const dir of sortedDirs) {
-          const entries = groups.get(dir)!;
+          const entries = groups.get(dir) ?? [];
           const folderKey = `${repoKey}:folder:${dir}`;
           const collapsed = collapsedGroups.has(folderKey);
           if (entries.length > 1) {
@@ -1003,7 +1003,9 @@ export const SourceControlPanel = memo(function SourceControlPanel({
 
   const rowKeyToIndex = useMemo(() => {
     const map = new Map<string, number>();
-    rows.forEach((row, index) => map.set(row.key, index));
+    rows.forEach((row, index) => {
+      map.set(row.key, index);
+    });
     return map;
   }, [rows]);
 
@@ -1055,7 +1057,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       if (focusableIndices.length === 0) return;
       const currentIndex =
         focusedRowKey === null ? -1 : (rowKeyToIndex.get(focusedRowKey) ?? -1);
-      let pos = focusableIndices.findIndex((i) => i === currentIndex);
+      let pos = focusableIndices.indexOf(currentIndex);
       if (pos === -1) pos = direction > 0 ? -1 : focusableIndices.length;
       let nextPos = pos + direction;
       if (nextPos < 0) nextPos = 0;
@@ -1127,7 +1129,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         case "D": {
           if (meta) break;
           const entry = focusedEntry();
-          if (entry && entry.unstaged) {
+          if (entry?.unstaged) {
             event.preventDefault();
             scm.requestDiscardFile(entry);
           }
@@ -1166,6 +1168,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 onFollowRepositoryContext={onFollowRepositoryContext}
                 onNavigateToPath={onNavigateToPath}
                 onRefresh={handleRefresh}
+                runAction={scm.runAction}
+                actionBusy={scm.actionBusy}
               />
             )}
             {scm.status && (scm.status.ahead > 0 || scm.status.behind > 0) ? (
@@ -1347,6 +1351,8 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 )}
               >
                 <Textarea
+                  aria-label="Commit message"
+                  disabled={!!scm.actionBusy}
                   value={scm.commitMessage}
                   onChange={(event) => scm.setCommitMessage(event.target.value)}
                   onKeyDown={handleCommitShortcut}
@@ -1455,19 +1461,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                         planLoading
                       }
                       onClick={() => {
-                        // Pushes go through a preview: sending commits to a
-                        // remote is not something to fire off a single click
-                        // without showing what goes where.
-                        if (buildPushPlan) {
-                          setPlanLoading(true);
-                          void buildPushPlan()
-                            .then((plan) => {
-                              setPushPlan(plan);
-                            })
-                            .finally(() => setPlanLoading(false));
-                          return;
-                        }
-                        void scm.push();
+                        void handlePushPreview();
                       }}
                     >
                       {planLoading
@@ -1536,7 +1530,9 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                 role="listbox"
                 aria-label="Changed files"
                 aria-activedescendant={
-                  focusedRowKey ? `scm-row-${focusedRowKey}` : undefined
+                  focusedRowKey
+                    ? `${rowIdPrefix}-${encodeURIComponent(focusedRowKey)}`
+                    : undefined
                 }
                 onKeyDown={handlePanelKeyDown}
                 className="relative min-h-0 flex-1 outline-none focus-visible:ring-1 focus-visible:ring-primary/30"
@@ -1570,7 +1566,12 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                           <RowRenderer
                             row={row}
                             focused={focusedRowKey === row.key}
-                            selectedPath={scm.selected?.path ?? null}
+                            selectedKey={
+                              scm.selected
+                                ? `${scm.selected.repoRoot}\u0000${scm.selected.path}`
+                                : null
+                            }
+                            rowIdPrefix={rowIdPrefix}
                             actionBusy={scm.actionBusy}
                             headerCheckState={scm.headerCheckState}
                             repoRoot={scm.repo?.repoRoot ?? null}
@@ -1602,7 +1603,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
         onPush={(plan, options) =>
           pushAllAdvanced
             ? pushAllAdvanced(plan, options)
-            : Promise.resolve({ rejected: [] })
+            : Promise.reject(new Error("Push operation is unavailable"))
         }
         syncProgress={syncProgress}
       />
@@ -1610,7 +1611,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       <AlertDialog
         open={scm.pendingDiscard !== null}
         onOpenChange={(o) => {
-          if (!o) scm.cancelPendingDiscard();
+          if (!o && !scm.actionBusy) scm.cancelPendingDiscard();
         }}
       >
         <AlertDialogContent>
@@ -1624,11 +1625,28 @@ export const SourceControlPanel = memo(function SourceControlPanel({
                   : null}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {scm.actionError ? (
+            <p
+              role="alert"
+              className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-xs text-destructive"
+            >
+              {scm.actionError}
+            </p>
+          ) : null}
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => scm.cancelPendingDiscard()}>
+            <AlertDialogCancel
+              disabled={!!scm.actionBusy}
+              onClick={() => scm.cancelPendingDiscard()}
+            >
               Cancel
             </AlertDialogCancel>
-            <AlertDialogAction onClick={() => void scm.confirmPendingDiscard()}>
+            <AlertDialogAction
+              disabled={!!scm.actionBusy}
+              onClick={(event) => {
+                event.preventDefault();
+                void scm.confirmPendingDiscard();
+              }}
+            >
               Discard
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1638,7 +1656,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       <AlertDialog
         open={scm.preCommitWarnings !== null}
         onOpenChange={(o) => {
-          if (!o) scm.cancelPreCommitWarnings();
+          if (!o && !scm.actionBusy) scm.cancelPreCommitWarnings();
         }}
       >
         <AlertDialogContent>
@@ -1660,11 +1678,18 @@ export const SourceControlPanel = memo(function SourceControlPanel({
             ))}
           </ul>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => scm.cancelPreCommitWarnings()}>
+            <AlertDialogCancel
+              disabled={!!scm.actionBusy}
+              onClick={() => scm.cancelPreCommitWarnings()}
+            >
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => void scm.confirmPreCommitWarnings()}
+              disabled={!!scm.actionBusy}
+              onClick={(event) => {
+                event.preventDefault();
+                void scm.confirmPreCommitWarnings();
+              }}
             >
               Commit anyway
             </AlertDialogAction>
@@ -1675,7 +1700,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       <AlertDialog
         open={scm.rewordOpen}
         onOpenChange={(o) => {
-          if (!o) scm.cancelReword();
+          if (!o && !scm.actionBusy) scm.cancelReword();
         }}
       >
         <AlertDialogContent>
@@ -1687,10 +1712,15 @@ export const SourceControlPanel = memo(function SourceControlPanel({
             </AlertDialogDescription>
           </AlertDialogHeader>
           <Input
+            aria-label="New commit message"
+            disabled={!!scm.actionBusy}
             value={scm.rewordMessage}
             onChange={(event) => scm.setRewordMessage(event.target.value)}
             onKeyDown={(event) => {
               if (
+                !event.nativeEvent.isComposing &&
+                event.keyCode !== 229 &&
+                !scm.actionBusy &&
                 event.key === "Enter" &&
                 scm.rewordMessage.trim().length > 0
               ) {
@@ -1702,15 +1732,29 @@ export const SourceControlPanel = memo(function SourceControlPanel({
             autoFocus
             className="rounded-xl"
           />
+          {scm.actionError ? (
+            <p
+              role="alert"
+              className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-xs text-destructive"
+            >
+              {scm.actionError}
+            </p>
+          ) : null}
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => scm.cancelReword()}>
+            <AlertDialogCancel
+              disabled={!!scm.actionBusy}
+              onClick={() => scm.cancelReword()}
+            >
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               disabled={
                 scm.rewordMessage.trim().length === 0 || !!scm.actionBusy
               }
-              onClick={() => void scm.confirmReword()}
+              onClick={(event) => {
+                event.preventDefault();
+                void scm.confirmReword();
+              }}
             >
               Reword
             </AlertDialogAction>
@@ -1719,7 +1763,7 @@ export const SourceControlPanel = memo(function SourceControlPanel({
       </AlertDialog>
     </TooltipProvider>
   );
-});
+}
 
 function PanelCenter({
   title,
@@ -1766,7 +1810,8 @@ function CleanTreeHint({ repoLabel }: { repoLabel: string }) {
 type RowRendererProps = {
   row: RowDescriptor;
   focused: boolean;
-  selectedPath: string | null;
+  selectedKey: string | null;
+  rowIdPrefix: string;
   actionBusy: string | null;
   headerCheckState: CheckState;
   repoRoot: string | null;
@@ -1902,7 +1947,7 @@ function ListHeader({
       <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-border/60 px-1 text-[9.5px] font-semibold tabular-nums text-muted-foreground">
         {row.count}
       </span>
-      <label className="ml-auto flex shrink-0 cursor-pointer select-none items-center gap-1.5 text-[10.5px] font-medium text-muted-foreground hover:text-foreground">
+      <div className="ml-auto flex shrink-0 cursor-pointer select-none items-center gap-1.5 text-[10.5px] font-medium text-muted-foreground hover:text-foreground">
         <span>All</span>
         <Checkbox
           aria-label="Stage all changes"
@@ -1911,7 +1956,7 @@ function ListHeader({
           onCheckedChange={() => void onToggleAll()}
           className="size-3.5"
         />
-      </label>
+      </div>
     </div>
   );
 }
@@ -1919,7 +1964,8 @@ function ListHeader({
 const EntryRow = memo(function EntryRow({
   row,
   focused,
-  selectedPath,
+  selectedKey,
+  rowIdPrefix,
   actionBusy,
   repoRoot,
   onFocusRow,
@@ -1931,16 +1977,17 @@ const EntryRow = memo(function EntryRow({
   row: Extract<RowDescriptor, { kind: "entry" }>;
 }) {
   const entry = row.entry;
-  const isSelected = selectedPath === entry.path;
+  const isSelected = selectedKey === entry.key;
   const fileName = basename(entry.path);
   const iconUrl = fileIconUrl(fileName);
   const isStageBusy =
-    actionBusy === `stage:${entry.path}` ||
-    actionBusy === `unstage:${entry.path}`;
+    actionBusy === `stage:${entry.key}` ||
+    actionBusy === `unstage:${entry.key}`;
   const disabled = actionBusy !== null;
 
-  const absolutePath = repoRoot
-    ? joinPath(repoRoot.replace(/\\/g, "/"), entry.path.replace(/\\/g, "/"))
+  const root = entry.repoRoot || repoRoot;
+  const absolutePath = root
+    ? joinPath(root.replace(/\\/g, "/"), entry.path.replace(/\\/g, "/"))
     : null;
   const isDeleted = entry.statusCode === "D";
   const revealLabel = "Reveal in File Manager";
@@ -1949,7 +1996,8 @@ const EntryRow = memo(function EntryRow({
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
-          id={`scm-row-${row.key}`}
+          id={`${rowIdPrefix}-${encodeURIComponent(row.key)}`}
+          tabIndex={-1}
           data-focused={focused || undefined}
           data-selected={isSelected || undefined}
           role="option"
@@ -2125,7 +2173,6 @@ function IconActionButton({
   );
 }
 
-
 function CommitFeedback({
   feedback,
   rewordable,
@@ -2145,6 +2192,7 @@ function CommitFeedback({
     }
     setVisibleFeedback(feedback);
     setIsVisible(true);
+    if (feedback.tone === "error") return;
     const hideTimer = window.setTimeout(() => setIsVisible(false), 3600);
     const clearTimer = window.setTimeout(() => {
       setVisibleFeedback((current) =>
@@ -2180,7 +2228,10 @@ function CommitFeedback({
       />
       <span
         className={cn(
-          "min-w-0 flex-1 truncate",
+          "min-w-0 flex-1",
+          isError
+            ? "max-h-32 overflow-y-auto whitespace-pre-wrap break-words pointer-events-auto"
+            : "truncate",
           isError ? "text-destructive" : "text-muted-foreground",
         )}
       >

@@ -14,6 +14,7 @@ type PanelSpec = {
   items: LocationItem[];
   onPick: (item: LocationItem) => void;
 };
+let panelSequence = 0;
 
 export const setLocationList = StateEffect.define<PanelSpec | null>();
 
@@ -51,13 +52,19 @@ function createPanel(view: EditorView, spec: PanelSpec): Panel {
 
   const list = document.createElement("ul");
   list.tabIndex = 0;
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", spec.title);
+  const panelId = `terax-lsp-locations-${++panelSequence}`;
   dom.appendChild(list);
 
   let active = 0;
   const rows: HTMLElement[] = spec.items.map((item, i) => {
     const li = document.createElement("li");
+    li.setAttribute("role", "option");
+    li.id = `${panelId}-${i}`;
     li.textContent = item.label;
     li.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
       e.preventDefault();
       pick(i);
     });
@@ -68,17 +75,21 @@ function createPanel(view: EditorView, spec: PanelSpec): Panel {
   const renderActive = () => {
     rows.forEach((row, i) => {
       row.classList.toggle("cm-lsp-locations-active", i === active);
+      row.setAttribute("aria-selected", String(i === active));
     });
     rows[active]?.scrollIntoView({ block: "nearest" });
+    if (rows[active]) list.setAttribute("aria-activedescendant", rows[active].id);
   };
 
   const pick = (i: number) => {
     const item = spec.items[i];
+    if (!item) return;
     closePanel(view);
     spec.onPick(item);
   };
 
   list.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "ArrowDown") {
       active = Math.min(active + 1, spec.items.length - 1);
       renderActive();
@@ -93,6 +104,7 @@ function createPanel(view: EditorView, spec: PanelSpec): Panel {
       return;
     }
     e.preventDefault();
+    e.stopPropagation();
   });
 
   renderActive();

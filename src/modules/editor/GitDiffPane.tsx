@@ -3,7 +3,13 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { errorToast } from "@/lib/errorToast";
-import { native } from "@/lib/native";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  type WorkspaceEnv,
+  workspaceScopeKey,
+  currentWorkspaceScopeKey,
+  parseWorkspaceScopeKey,
+} from "@/modules/workspace";
 import { joinPath } from "@/modules/explorer/lib/useFileTree";
 import { setDiffCollapseUnchanged } from "@/modules/settings/store";
 import { usePreferencesStore } from "@/modules/settings/preferences";
@@ -65,6 +71,7 @@ type CommitSource = {
 
 type Props = {
   source: WorkingSource | CommitSource;
+  workspace: WorkspaceEnv;
   chipLabel?: string;
   active: boolean;
   /** Hand this file to the agent, the same way the explorer's menu does. */
@@ -74,14 +81,12 @@ type Props = {
 const LARGE_FILE_THRESHOLD = 256 * 1024;
 
 const SHARED_EXT = buildSharedExtensions();
-/* Typing is off in both cases. `readOnly` additionally blocks programmatic
-   transactions, which is right for a commit diff (history cannot be edited)
-   and wrong for a working-tree one, where reverting a chunk has to dispatch. */
+/* Read-only facets also disable custom widgets; explicit chunk reverts are
+   available only for unstaged working-tree content. */
 const READONLY_EXT = [
   EditorState.readOnly.of(true),
   EditorView.editable.of(false),
 ];
-const NO_TYPING_EXT = [EditorView.editable.of(false)];
 const DIFF_THEME = EditorView.theme({
   "&.cm-merge-b .cm-changedText, .cm-changedText": {
     background: "rgba(110, 200, 120, 0.20) !important",
@@ -143,14 +148,17 @@ const DIFF_THEME = EditorView.theme({
 function countDiffLines(patch: string): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
-  for (let i = 0; i < patch.length; i++) {
-    if (i > 0 && patch.charCodeAt(i - 1) !== 10) continue;
-    const c = patch.charCodeAt(i);
-    if (c === 43 && patch.charCodeAt(i + 1) !== 43) added++;
-    else if (c === 45 && patch.charCodeAt(i + 1) !== 45) removed++;
+  let hunk = false;
+  for (let start = 0; start < patch.length; ) {
+    const next = patch.indexOf("\n", start);
+    const end = next < 0 ? patch.length : next;
+    const line = patch.slice(start, end);
+    if (line.startsWith("diff --git ")) hunk = false;
+    else if (line.startsWith("@@ ")) hunk = true;
+    else if (hunk && line.startsWith("+")) added++;
+    else if (hunk && line.startsWith("-")) removed++;
+    start = end + 1;
   }
-  if (patch.length > 0 && patch.charCodeAt(0) === 43) added++;
-  else if (patch.length > 0 && patch.charCodeAt(0) === 45) removed++;
   return { added, removed };
 }
 
@@ -169,14 +177,32 @@ type LoadState =
     }
   | { kind: "error"; message: string };
 
-function cacheKey(source: WorkingSource | CommitSource): string {
+function cacheKey(
+  source: WorkingSource | CommitSource,
+  workspace: WorkspaceEnv,
+): string {
   return source.kind === "working"
-    ? workingDiffKey(source.repoRoot, source.path, source.mode)
-    : commitDiffKey(source.repoRoot, source.sha, source.path);
+    ? workingDiffKey(
+        source.repoRoot,
+        source.path,
+        source.mode,
+        source.originalPath,
+        workspace,
+      )
+    : commitDiffKey(
+        source.repoRoot,
+        source.sha,
+        source.path,
+        source.originalPath,
+        workspace,
+      );
 }
 
-function loadStateFromCache(source: WorkingSource | CommitSource): LoadState {
-  const hit = getCachedDiff(cacheKey(source));
+function loadStateFromCache(
+  source: WorkingSource | CommitSource,
+  workspace: WorkspaceEnv,
+): LoadState {
+  const hit = getCachedDiff(cacheKey(source, workspace));
   if (!hit) return { kind: "idle" };
   return {
     kind: "loaded",
@@ -196,13 +222,31 @@ export type GitDiffPaneHandle = {
 };
 
 export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
-  function GitDiffPane({ source, chipLabel, active, onAttachToAgent }, ref) {
+  function GitDiffPane(
+    { source: incomingSource, workspace, chipLabel, active, onAttachToAgent },
+    ref,
+  ) {
+    const scope = workspaceScopeKey(workspace);
+    const env = useMemo(() => parseWorkspaceScopeKey(scope), [scope]);
+    const sourceJson = JSON.stringify(incomingSource);
+    const source = useMemo(
+      () => JSON.parse(sourceJson) as WorkingSource | CommitSource,
+      [sourceJson],
+    );
+    const key = cacheKey(source, env);
+    const identityRef = useRef(key);
+    identityRef.current = key;
+    const loadedKeyRef = useRef(key);
     const cmRef = useRef<ReactCodeMirrorRef>(null);
     const themeExt = useEditorThemeExt();
-    const collapseUnchanged = usePreferencesStore((s) => s.diffCollapseUnchanged);
-    const [state, setState] = useState<LoadState>(() =>
-      active ? loadStateFromCache(source) : { kind: "idle" },
+    const collapseUnchanged = usePreferencesStore(
+      (s) => s.diffCollapseUnchanged,
     );
+    const [storedState, setState] = useState<LoadState>(() =>
+      active ? loadStateFromCache(source, env) : { kind: "idle" },
+    );
+    const state: LoadState =
+      loadedKeyRef.current === key ? storedState : { kind: "idle" };
 
     const openSearch = useCallback(() => {
       const view = cmRef.current?.view;
@@ -216,13 +260,11 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
       return from === to ? null : view.state.sliceDoc(from, to);
     }, []);
 
-    useImperativeHandle(
-      ref,
-      () => ({ openSearch, getSelection }),
-      [openSearch, getSelection],
-    );
+    useImperativeHandle(ref, () => ({ openSearch, getSelection }), [
+      openSearch,
+      getSelection,
+    ]);
 
-    const key = cacheKey(source);
     const [reloadNonce, setReloadNonce] = useState(0);
 
     /* Read the file again from scratch.
@@ -231,13 +273,15 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
        first, otherwise the load below would answer from it and the click would
        appear to do nothing. */
     const reload = useCallback(() => {
-      invalidateDiff(cacheKey(source));
+      invalidateDiff(cacheKey(source, env));
       setReloadNonce((n) => n + 1);
-    }, [source]);
+    }, [source, env]);
 
+    // biome-ignore lint/correctness/useExhaustiveDependencies: The reload revision forces a new read after cache invalidation.
     useEffect(() => {
       if (!active) return;
-      const cached = loadStateFromCache(source);
+      loadedKeyRef.current = key;
+      const cached = loadStateFromCache(source, env);
       if (cached.kind === "loaded") {
         setState(cached);
         return;
@@ -251,16 +295,18 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
               source.path,
               source.mode,
               source.originalPath,
+              env,
             )
           : fetchCommitDiff(
               source.repoRoot,
               source.sha,
               source.path,
               source.originalPath,
+              env,
             );
       Promise.all([promise, resolveLanguage(source.path).catch(() => null)])
         .then(([res, lang]) => {
-          if (cancelled) return;
+          if (cancelled || identityRef.current !== key) return;
           setState({
             kind: "loaded",
             originalContent: res.originalContent,
@@ -271,7 +317,7 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
           });
         })
         .catch((err) => {
-          if (cancelled) return;
+          if (cancelled || identityRef.current !== key) return;
           setState({
             kind: "error",
             message:
@@ -283,7 +329,7 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
       return () => {
         cancelled = true;
       };
-    }, [active, key, source, reloadNonce]);
+    }, [active, key, source, reloadNonce, env]);
 
     const path = source.path;
     const repoRoot = source.repoRoot;
@@ -321,9 +367,8 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
 
     const langExt = loaded?.langExt ?? null;
 
-    // Reverting is only meaningful against the working tree: a commit diff is
-    // history, and there is nothing there to put back.
-    const revertable = source.kind === "working";
+    // Staged and historical diffs must never overwrite working-tree content.
+    const revertable = source.kind === "working" && source.mode === "-";
     const absolutePath = useMemo(
       () => joinPath(source.repoRoot, source.path),
       [source.repoRoot, source.path],
@@ -338,24 +383,77 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
 
        Nothing is staged or committed: this is the same edit the user could
        have made by hand in the editor. */
-    const persistRevert = useCallback(() => {
-      const view = cmRef.current?.view;
-      if (!view) return;
-      native
-        .writeFile(absolutePath, restoreEol(view.state.doc.toString(), fileEol))
-        .then(() => {
-          invalidateRepoDiffs(source.repoRoot);
-          toast.success("已回滚该处改动");
-        })
-        .catch((e) => errorToast("回滚失败", e));
-    }, [absolutePath, source.repoRoot, fileEol]);
+    const revertBusyRef = useRef(false);
+    const persistedContentRef = useRef(rawModified);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: Changing files resets the save baseline even when their content is identical.
+    useEffect(() => {
+      persistedContentRef.current = rawModified;
+    }, [rawModified, key]);
+
+    const persistRevert = useCallback(
+      async (action: () => void) => {
+        const view = cmRef.current?.view;
+        if (!view || !revertable || revertBusyRef.current) return;
+        const before = view.state.doc;
+        const current = () =>
+          identityRef.current === key &&
+          cmRef.current?.view === view &&
+          currentWorkspaceScopeKey() === scope;
+        if (!current()) return;
+        revertBusyRef.current = true;
+        try {
+          const disk = await invoke<{
+            kind: string;
+            content?: string;
+            mtime?: number;
+          }>("fs_read_file", { path: absolutePath, workspace: env });
+          if (!current() || view.state.doc !== before) return;
+          if (
+            disk.kind !== "text" ||
+            disk.content !== persistedContentRef.current ||
+            typeof disk.mtime !== "number"
+          )
+            throw new Error("文件已被其他程序修改，请刷新差异后再回滚");
+          action();
+          const content = restoreEol(view.state.doc.toString(), fileEol);
+          await invoke<number>("fs_write_file", {
+            path: absolutePath,
+            content,
+            workspace: env,
+            expectedMtime: disk.mtime,
+            source: "git-diff",
+          });
+          if (identityRef.current === key)
+            persistedContentRef.current = content;
+          invalidateRepoDiffs(source.repoRoot, env);
+          if (current()) toast.success("已回滚该处改动");
+        } catch (error) {
+          if (current()) {
+            errorToast("回滚失败", error);
+            reload();
+          }
+        } finally {
+          revertBusyRef.current = false;
+        }
+      },
+      [
+        absolutePath,
+        source.repoRoot,
+        fileEol,
+        revertable,
+        key,
+        scope,
+        env,
+        reload,
+      ],
+    );
 
     const extensions = useMemo(
       () => [
         ...SHARED_EXT,
         DEFAULT_INDENT,
         languageCompartment.of(langExt ?? []),
-        ...(revertable ? NO_TYPING_EXT : READONLY_EXT),
+        ...READONLY_EXT,
         unifiedMergeView({
           original: originalContent,
           highlightChanges: true,
@@ -383,9 +481,9 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                 }
                 btn.textContent = "回滚";
                 btn.title = "把这一处改回提交时的内容";
-                btn.onmousedown = (e) => {
-                  action(e);
-                  persistRevert();
+                btn.onclick = (e) => {
+                  if (e.button !== 0) return;
+                  void persistRevert(() => action(e));
                 };
                 return btn;
               }
@@ -401,14 +499,20 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
     useEffect(() => {
       if (useFallback || state.kind !== "loaded" || state.langExt) return;
       let cancelled = false;
-      resolveLanguage(path).then((res) => {
-        if (cancelled || !res) return;
-        setState((s) => (s.kind === "loaded" ? { ...s, langExt: res.ext } : s));
-      });
+      resolveLanguage(path)
+        .then((res) => {
+          if (cancelled || identityRef.current !== key || !res) return;
+          setState((s) =>
+            s.kind === "loaded" ? { ...s, langExt: res.ext } : s,
+          );
+        })
+        .catch((error) => {
+          if (!cancelled) errorToast("加载差异语言支持失败", error);
+        });
       return () => {
         cancelled = true;
       };
-    }, [useFallback, path, state]);
+    }, [useFallback, path, state, key]);
 
     const stats = useMemo(
       () =>
@@ -483,7 +587,11 @@ export const GitDiffPane = forwardRef<GitDiffPaneHandle, Props>(
                     ? "当前：仅显示变动。点击展开为完整文件"
                     : "当前：完整文件。点击折叠未变动的部分"
                 }
-                onClick={() => void setDiffCollapseUnchanged(!collapseUnchanged)}
+                onClick={() =>
+                  void setDiffCollapseUnchanged(!collapseUnchanged).catch(
+                    (error) => errorToast("保存差异显示设置失败", error),
+                  )
+                }
               >
                 <HugeiconsIcon
                   icon={collapseUnchanged ? UnfoldMoreIcon : UnfoldLessIcon}

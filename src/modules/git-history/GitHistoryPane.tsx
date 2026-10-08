@@ -1,3 +1,4 @@
+import { FindBox, type FindBoxHandle } from "@/components/FindBox";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -7,7 +8,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { FindBox, type FindBoxHandle } from "@/components/ui/find-box";
 import {
   Popover,
   PopoverAnchor,
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { errorToast } from "@/lib/errorToast";
 import {
   type GitCommitFileChange,
   type GitLogEntry,
@@ -22,7 +23,23 @@ import {
   native,
 } from "@/lib/native";
 import { cn } from "@/lib/utils";
+import { useAsyncQuery } from "@/modules/command-palette/hooks/useAsyncQuery";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
+import {
+  type CommitSearchHit,
+  type SearchMatch,
+  searchCommitFields,
+} from "@/modules/git-history/lib/commitSearch";
+import {
+  serverFilterOptions,
+  uniqueAuthors,
+} from "@/modules/git-history/lib/filters";
+import { useCommitSearch } from "@/modules/git-history/lib/useCommitSearch";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace/env";
 import {
   ArrowDown01Icon,
   ChevronDownIcon,
@@ -53,13 +70,6 @@ import { CommitContextMenu } from "./CommitContextMenu";
 import { GraphRail, MAX_VISIBLE_LANES, railWidth } from "./GraphRail";
 import { HistoryFilterBar, useHistoryFilters } from "./HistoryFilters";
 import {
-  findMatch,
-  matchCommit,
-  type SearchOptions,
-  serverFilterOptions,
-  uniqueAuthors,
-} from "./lib/filters";
-import {
   applyFirstParent,
   EMPTY_GRAPH_STATE,
   type GraphRow,
@@ -82,6 +92,7 @@ const ROW_HEIGHT = 32;
 const TABLE_HEADER_HEIGHT = 24;
 const NEAR_BOTTOM_PX = 240;
 const FILES_CACHE_LIMIT = 16;
+const FILES_CACHE_BYTES = 8 * 1024 * 1024;
 
 type CommitFileDiffOpenInput = {
   repoRoot: string;
@@ -107,6 +118,35 @@ type FilesEntry =
   | { state: "loading" }
   | { state: "loaded"; files: GitCommitFileChange[] }
   | { state: "error"; error: string };
+
+function filesEntryBytes(entry: FilesEntry): number {
+  if (entry.state !== "loaded")
+    return entry.state === "error" ? entry.error.length * 2 + 128 : 128;
+  return entry.files.reduce(
+    (sum, file) =>
+      sum +
+      128 +
+      2 *
+        (file.path.length +
+          (file.originalPath?.length ?? 0) +
+          file.status.length +
+          file.statusLabel.length),
+    0,
+  );
+}
+
+function trimFilesCache(cache: Map<string, FilesEntry>, keep: string): void {
+  let bytes = [...cache.values()].reduce(
+    (sum, entry) => sum + filesEntryBytes(entry),
+    0,
+  );
+  for (const [sha, entry] of cache) {
+    if (cache.size <= FILES_CACHE_LIMIT && bytes <= FILES_CACHE_BYTES) break;
+    if (sha === keep) continue;
+    bytes -= filesEntryBytes(entry);
+    cache.delete(sha);
+  }
+}
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -200,11 +240,8 @@ function statusTone(code: string): string {
 
 function highlight(
   text: string,
-  query: string,
-  options: SearchOptions,
+  match: SearchMatch | null | undefined,
 ): ReactNode {
-  if (!query) return text;
-  const match = findMatch(text, query, options);
   if (!match) return text;
   return (
     <>
@@ -221,11 +258,18 @@ export type GitHistoryPaneHandle = {
   openSearch: () => void;
 };
 
-export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
+const ScopedGitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
   function GitHistoryPane(
     { repoRoot, repos, onSwitchRepo, onOpenCommitFile },
     ref,
   ) {
+    const workspace = useWorkspaceEnvStore((state) => state.env);
+    const environmentKey = workspaceScopeKey(workspace);
+    const mountedRef = useRef(true);
+    const current = useCallback(
+      () => mountedRef.current && currentWorkspaceScopeKey() === environmentKey,
+      [environmentKey],
+    );
     const [commits, setCommits] = useState<GitLogEntry[]>([]);
     const [loadStatus, setLoadStatus] = useState<LoadStatus>("idle");
     const [error, setError] = useState<string | null>(null);
@@ -254,10 +298,11 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
     } | null>(null);
     const [remoteWeb, setRemoteWeb] = useState<RemoteWebInfo | null>(null);
     const filesCacheRef = useRef(new Map<string, FilesEntry>());
-    const [filesTick, setFilesTick] = useState(0);
+    const [, setFilesTick] = useState(0);
     const bumpFiles = useCallback(() => setFilesTick((n) => n + 1), []);
 
     const requestIdRef = useRef(0);
+    const logOptionsRef = useRef<ReturnType<typeof serverFilterOptions>>(null);
     const inflightMoreRef = useRef(false);
     const filesInflightRef = useRef(new Set<string>());
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -279,7 +324,10 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
           setFindMatches([]);
           return;
         }
-        setFindMatches(commits.filter((c) => matchCommit(c, query, {})));
+        const hits = new Set(
+          searchCommitFields(commits, query, {}).map((hit) => hit.sha),
+        );
+        setFindMatches(commits.filter((commit) => hits.has(commit.sha)));
       },
       [commits],
     );
@@ -289,19 +337,21 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
       setFindMatches([]);
     }, []);
     const graphCacheRef = useRef<{
-      rows: GraphRow[];
       byCommit: Map<string, GraphRow>;
       tail: GraphState;
       firstSha: string | null;
       len: number;
       maxLaneCount: number;
+      entries: readonly GitLogEntry[];
+      firstParent: boolean;
     }>({
-      rows: [],
       byCommit: new Map(),
       tail: EMPTY_GRAPH_STATE,
       firstSha: null,
       len: 0,
       maxLaneCount: 1,
+      entries: [],
+      firstParent: false,
     });
 
     // First-parent view only touches the layout input; the list stays intact.
@@ -312,8 +362,11 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
 
     const { graphByCommit, maxLaneCount } = useMemo(() => {
       const cache = graphCacheRef.current;
+      const previousEntries = cache.entries;
+      const previousFirstParent = cache.firstParent;
+      cache.entries = commits;
+      cache.firstParent = firstParent;
       if (graphInput.length === 0) {
-        cache.rows = [];
         cache.byCommit = new Map();
         cache.tail = EMPTY_GRAPH_STATE;
         cache.firstSha = null;
@@ -323,7 +376,10 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
       }
       const firstSha = graphInput[0].sha;
       const canAppend =
-        cache.firstSha === firstSha && graphInput.length >= cache.len;
+        cache.firstSha === firstSha &&
+        graphInput.length >= cache.len &&
+        previousFirstParent === firstParent &&
+        previousEntries.every((entry, index) => entry === commits[index]);
       if (!canAppend) {
         const { rows, state } = layoutGraph(graphInput);
         const byCommit = new Map<string, GraphRow>();
@@ -332,7 +388,6 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
           byCommit.set(row.sha, row);
           if (row.laneCount > max) max = row.laneCount;
         }
-        cache.rows = rows;
         cache.byCommit = byCommit;
         cache.tail = state;
         cache.firstSha = firstSha;
@@ -348,7 +403,6 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
           cache.byCommit.set(row.sha, row);
           if (row.laneCount > max) max = row.laneCount;
         }
-        cache.rows = cache.rows.concat(newRows);
         cache.tail = state;
         cache.len = graphInput.length;
         cache.maxLaneCount = max;
@@ -357,13 +411,11 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
         graphByCommit: cache.byCommit,
         maxLaneCount: cache.maxLaneCount,
       };
-    }, [graphInput]);
+    }, [graphInput, commits, firstParent]);
     const gridTemplate = GRID_TEMPLATE;
 
-    const filtered = useMemo(() => {
-      if (!activeSearch) return commits;
-      return commits.filter((c) => matchCommit(c, activeSearch, searchOptions));
-    }, [activeSearch, commits, searchOptions]);
+    const commitSearch = useCommitSearch(commits, activeSearch, searchOptions);
+    const filtered = commitSearch.results;
 
     const virtualizer = useVirtualizer({
       count: filtered.length,
@@ -384,7 +436,9 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
     );
 
     const loadInitial = useCallback(async () => {
+      if (!current()) return;
       const requestId = ++requestIdRef.current;
+      inflightMoreRef.current = false;
       setLoadStatus("initial");
       setError(null);
       setEndReached(false);
@@ -393,72 +447,92 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
           { author, date, branch, noMerges },
           Date.now(),
         );
+        logOptionsRef.current = options;
         const entries = options
-          ? await native.gitLogFiltered(repoRoot, {
-              ...options,
-              maxCount: PAGE_SIZE,
-            })
-          : await native.gitLog(repoRoot, { limit: PAGE_SIZE });
-        if (requestId !== requestIdRef.current) return;
+          ? await native.gitLogFiltered(
+              repoRoot,
+              {
+                ...options,
+                maxCount: PAGE_SIZE,
+              },
+              workspace,
+            )
+          : await native.gitLog(repoRoot, { limit: PAGE_SIZE }, workspace);
+        if (requestId !== requestIdRef.current || !current()) return;
         setCommits(entries);
         setLoadStatus("idle");
         if (entries.length < PAGE_SIZE) setEndReached(true);
       } catch (err) {
-        if (requestId !== requestIdRef.current) return;
+        if (requestId !== requestIdRef.current || !current()) return;
         setError(normalizeError(err));
         setLoadStatus("error");
       }
-    }, [author, branch, date, noMerges, repoRoot]);
+    }, [author, branch, date, noMerges, repoRoot, current, workspace]);
 
     const loadMore = useCallback(async () => {
-      if (inflightMoreRef.current || endReached) return;
-      if (loadStatus !== "idle") return;
+      if (!current() || inflightMoreRef.current || endReached) return;
+      if (loadStatus !== "idle" && loadStatus !== "error") return;
       const last = commits[commits.length - 1];
       if (!last) return;
       inflightMoreRef.current = true;
       setLoadStatus("more");
       const requestId = requestIdRef.current;
       try {
-        const options = serverFilterOptions(
-          { author, date, branch, noMerges },
-          Date.now(),
-        );
+        const options = logOptionsRef.current;
         const entries = options
-          ? await native.gitLogFiltered(repoRoot, {
-              ...options,
-              maxCount: PAGE_SIZE,
-              skip: commits.length,
-            })
-          : await native.gitLog(repoRoot, {
-              limit: PAGE_SIZE,
-              beforeSha: last.sha,
-            });
-        if (requestId !== requestIdRef.current) return;
+          ? await native.gitLogFiltered(
+              repoRoot,
+              {
+                ...options,
+                maxCount: PAGE_SIZE,
+                skip: commits.length,
+              },
+              workspace,
+            )
+          : await native.gitLog(
+              repoRoot,
+              {
+                limit: PAGE_SIZE,
+                beforeSha: last.sha,
+              },
+              workspace,
+            );
+        if (requestId !== requestIdRef.current || !current()) return;
         setCommits((prev) => {
           const seen = new Set(prev.map((c) => c.sha));
           const merged = [...prev];
-          for (const e of entries) if (!seen.has(e.sha)) merged.push(e);
+          for (const e of entries) {
+            if (seen.has(e.sha)) continue;
+            seen.add(e.sha);
+            merged.push(e);
+          }
           return merged;
         });
-        if (entries.length < PAGE_SIZE) setEndReached(true);
+        if (
+          entries.length < PAGE_SIZE ||
+          !entries.some(
+            (entry) => !commits.some((existing) => existing.sha === entry.sha),
+          )
+        )
+          setEndReached(true);
         setLoadStatus("idle");
       } catch (err) {
-        if (requestId !== requestIdRef.current) return;
+        if (requestId !== requestIdRef.current || !current()) return;
         setError(normalizeError(err));
         setLoadStatus("error");
       } finally {
-        inflightMoreRef.current = false;
+        if (requestId === requestIdRef.current) inflightMoreRef.current = false;
       }
-    }, [
-      author,
-      branch,
-      commits,
-      date,
-      endReached,
-      loadStatus,
-      noMerges,
-      repoRoot,
-    ]);
+    }, [commits, endReached, loadStatus, repoRoot, current, workspace]);
+
+    useEffect(() => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        requestIdRef.current++;
+        filesInflightRef.current.clear();
+      };
+    }, []);
 
     useEffect(() => {
       filesInflightRef.current.clear();
@@ -472,9 +546,9 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
     useEffect(() => {
       let cancelled = false;
       native
-        .gitRemoteUrl(repoRoot)
+        .gitRemoteUrl(repoRoot, undefined, workspace)
         .then((url) => {
-          if (cancelled) return;
+          if (cancelled || !current()) return;
           setRemoteWeb(parseRemoteWebUrl(url));
         })
         .catch(() => {
@@ -484,7 +558,7 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
       return () => {
         cancelled = true;
       };
-    }, [repoRoot]);
+    }, [repoRoot, workspace, current]);
 
     const handleScroll = useCallback(() => {
       const el = scrollRef.current;
@@ -524,30 +598,48 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
 
     const fetchFiles = useCallback(
       async (sha: string) => {
+        if (!current()) return;
+        const generation = requestIdRef.current;
         if (filesInflightRef.current.has(sha)) return;
         const cache = filesCacheRef.current;
         const existing = cache.get(sha);
         if (existing && existing.state !== "error") return;
+        if (filesInflightRef.current.size >= 4) {
+          cache.set(sha, {
+            state: "error",
+            error: "Too many file lists are loading. Please retry shortly.",
+          });
+          trimFilesCache(cache, sha);
+          bumpFiles();
+          return;
+        }
         filesInflightRef.current.add(sha);
         cache.set(sha, { state: "loading" });
+        trimFilesCache(cache, sha);
         bumpFiles();
         try {
-          const files = await native.gitCommitFiles(repoRoot, sha);
-          cache.set(sha, { state: "loaded", files });
-          while (cache.size > FILES_CACHE_LIMIT) {
-            const oldest = cache.keys().next().value;
-            if (oldest === undefined || oldest === sha) break;
-            cache.delete(oldest);
-          }
+          const files = await native.gitCommitFiles(repoRoot, sha, workspace);
+          if (generation !== requestIdRef.current || !current()) return;
+          const entry: FilesEntry = { state: "loaded", files };
+          if (filesEntryBytes(entry) > FILES_CACHE_BYTES)
+            throw new Error(
+              "This commit's file list exceeds the 8 MiB display limit. Inspect it with Git instead.",
+            );
+          cache.delete(sha);
+          cache.set(sha, entry);
+          trimFilesCache(cache, sha);
           bumpFiles();
         } catch (err) {
+          if (generation !== requestIdRef.current || !current()) return;
           cache.set(sha, { state: "error", error: normalizeError(err) });
+          trimFilesCache(cache, sha);
           bumpFiles();
         } finally {
-          filesInflightRef.current.delete(sha);
+          if (generation === requestIdRef.current)
+            filesInflightRef.current.delete(sha);
         }
       },
-      [repoRoot],
+      [repoRoot, workspace, current, bumpFiles],
     );
 
     const handleRowClick = useCallback(
@@ -576,10 +668,9 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
 
     const closePopover = useCallback(() => setOpenAnchor(null), []);
 
-    const openFilesEntry = useMemo(() => {
-      if (!openAnchor) return null;
-      return filesCacheRef.current.get(openAnchor.sha) ?? null;
-    }, [openAnchor, filesTick]);
+    const openFilesEntry = openAnchor
+      ? (filesCacheRef.current.get(openAnchor.sha) ?? null)
+      : null;
 
     const handleFileOpen = useCallback(
       (commit: GitLogEntry, file: GitCommitFileChange) => {
@@ -599,8 +690,9 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
     const copyToClipboard = useCallback(async (value: string) => {
       try {
         await navigator.clipboard.writeText(value);
-      } catch {
-        /* noop */
+      } catch (error) {
+        errorToast("Could not copy commit SHA", error);
+        throw error;
       }
     }, []);
 
@@ -627,8 +719,23 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
             multiRepo={!!repos && repos.length > 1}
             authors={uniqueAuthors(commits)}
             hasSearchQuery={activeSearch.length > 0}
+            searchInput={searchInput}
+            onSearchChange={setSearchInput}
             onClearSearch={() => setSearchInput("")}
           />
+          {commitSearch.loading ||
+          commitSearch.error ||
+          (activeSearch && filtered.length === 0) ? (
+            <div
+              role="status"
+              className="shrink-0 px-3 py-2 text-[11px] text-muted-foreground"
+            >
+              {commitSearch.error ??
+                (commitSearch.loading
+                  ? "Searching commits…"
+                  : "No loaded commits match. Clear search to load more history.")}
+            </div>
+          ) : null}
           {loadStatus === "initial" && commits.length === 0 ? (
             <CenterPlaceholder>
               <Spinner className="size-4" />
@@ -708,10 +815,13 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
                         >
                           <CommitRow
                             commit={commit}
-                            query={activeSearch}
-                            searchOptions={searchOptions}
+                            matches={commitSearch.matches.get(commit.sha)}
                             active={openAnchor?.sha === commit.sha}
-                            isHead={!activeSearch && virtualRow.index === 0}
+                            isHead={
+                              !activeSearch &&
+                              !serverActive &&
+                              virtualRow.index === 0
+                            }
                             graphRow={graphByCommit.get(commit.sha) ?? null}
                             maxLaneCount={maxLaneCount}
                             gridTemplate={gridTemplate}
@@ -829,6 +939,19 @@ export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
   },
 );
 
+export const GitHistoryPane = forwardRef<GitHistoryPaneHandle, Props>(
+  function GitHistoryPane(props, ref) {
+    const workspace = useWorkspaceEnvStore((state) => state.env);
+    return (
+      <ScopedGitHistoryPane
+        key={JSON.stringify([props.repoRoot, workspaceScopeKey(workspace)])}
+        {...props}
+        ref={ref}
+      />
+    );
+  },
+);
+
 function CenterPlaceholder({ children }: { children: ReactNode }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
@@ -942,8 +1065,7 @@ function HistoryRepoSwitcher({
 
 type CommitRowProps = {
   commit: GitLogEntry;
-  query: string;
-  searchOptions: SearchOptions;
+  matches: CommitSearchHit | undefined;
   active: boolean;
   /** The newest commit of the loaded list, shown as the HEAD of the branch. */
   isHead: boolean;
@@ -955,8 +1077,7 @@ type CommitRowProps = {
 
 const CommitRow = memo(function CommitRow({
   commit,
-  query,
-  searchOptions,
+  matches,
   active,
   isHead,
   graphRow,
@@ -1006,7 +1127,7 @@ const CommitRow = memo(function CommitRow({
         ) : null}
         <span className="min-w-0 truncate text-[12px] leading-tight">
           {commit.subject ? (
-            highlight(commit.subject, query, searchOptions)
+            highlight(commit.subject, matches?.subject)
           ) : (
             <span className="text-muted-foreground">(no subject)</span>
           )}
@@ -1027,7 +1148,7 @@ const CommitRow = memo(function CommitRow({
         </span>
         <span className="min-w-0 truncate">
           {commit.author
-            ? highlight(commit.author, query, searchOptions)
+            ? highlight(commit.author, matches?.author)
             : "Unknown"}
         </span>
       </span>
@@ -1069,7 +1190,7 @@ const CommitRow = memo(function CommitRow({
             ) : null}
           </span>
         ) : commit.filesChanged === 0 ? (
-          <span className="text-muted-foreground/40">—</span>
+          <span className="text-muted-foreground/40">-</span>
         ) : null}
       </span>
     </button>
@@ -1101,6 +1222,13 @@ function CommitDetail({
   const absolute = absoluteTime(commit.timestampSecs);
   const webUrl = remoteWeb ? commitWebUrl(remoteWeb, commit.sha) : null;
   const [copied, setCopied] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!copied) return;
@@ -1141,8 +1269,12 @@ function CommitDetail({
             variant="ghost"
             className="h-6 cursor-pointer gap-1.5 px-1.5 text-[11px] text-muted-foreground hover:text-foreground"
             onClick={() => {
-              void onCopySha(commit.sha);
-              setCopied(true);
+              void Promise.resolve()
+                .then(() => onCopySha(commit.sha))
+                .then(() => {
+                  if (mountedRef.current) setCopied(true);
+                })
+                .catch(() => {});
             }}
           >
             <HugeiconsIcon icon={Copy01Icon} size={11} strokeWidth={1.9} />
@@ -1153,14 +1285,18 @@ function CommitDetail({
               size="xs"
               variant="ghost"
               className="h-6 cursor-pointer gap-1.5 px-1.5 text-[11px] text-muted-foreground hover:text-foreground"
-              onClick={() => void openUrl(webUrl).catch(console.error)}
+              onClick={() =>
+                void openUrl(webUrl).catch((error) =>
+                  errorToast("Could not open commit URL", error),
+                )
+              }
             >
               <HugeiconsIcon
                 icon={LinkSquare02Icon}
                 size={11}
                 strokeWidth={1.9}
               />
-              {hostLabel(remoteWeb!)}
+              {remoteWeb ? hostLabel(remoteWeb) : "View commit"}
             </Button>
           ) : null}
         </div>
@@ -1188,35 +1324,37 @@ function ContainedBranches({
   sha: string;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [status, setStatus] = useState<"idle" | "loading" | "loaded" | "error">(
-    "idle",
-  );
-  const [branches, setBranches] = useState<string[]>([]);
-
-  const load = useCallback(async () => {
-    setStatus("loading");
-    try {
-      const list = await native.gitBranchesContaining(repoRoot, sha);
-      setBranches(list);
-      setStatus("loaded");
-    } catch {
-      setStatus("error");
-    }
-  }, [repoRoot, sha]);
-
-  const toggle = useCallback(() => {
-    setExpanded((current) => {
-      const next = !current;
-      if (next && status === "idle") void load();
-      return next;
-    });
-  }, [load, status]);
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const environmentKey = workspaceScopeKey(workspace);
+  const run = useCallback(async () => {
+    if (currentWorkspaceScopeKey() !== environmentKey) return [];
+    const branches = await native.gitBranchesContaining(
+      repoRoot,
+      sha,
+      workspace,
+    );
+    return currentWorkspaceScopeKey() === environmentKey ? branches : [];
+  }, [repoRoot, sha, workspace, environmentKey]);
+  const {
+    results: branches,
+    loading,
+    error,
+    retry,
+  } = useAsyncQuery<string>({
+    enabled: expanded,
+    term: sha,
+    minLength: 1,
+    debounceMs: 0,
+    scopeKey: JSON.stringify([repoRoot, sha, environmentKey]),
+    run,
+  });
 
   return (
     <div className="shrink-0 border-b border-border/45 px-3 py-1.5">
       <button
         type="button"
-        onClick={toggle}
+        onClick={() => setExpanded((current) => !current)}
+        aria-expanded={expanded}
         className="flex cursor-pointer items-center gap-1.5 text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
       >
         <HugeiconsIcon
@@ -1229,26 +1367,26 @@ function ContainedBranches({
           )}
         />
         Included branches
-        {status === "loaded" && branches.length > 0 ? (
+        {!loading && !error && branches.length > 0 ? (
           <span className="rounded-sm bg-muted/55 px-1 py-px text-[9.5px] tabular-nums text-muted-foreground/85">
             {branches.length}
           </span>
         ) : null}
       </button>
       {expanded ? (
-        status === "loading" ? (
+        loading ? (
           <div className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
             <Spinner className="size-3" />
             Loading branches…
           </div>
-        ) : status === "error" ? (
+        ) : error ? (
           <div className="mt-1.5 flex items-center justify-between gap-2 text-[11px] text-destructive">
             <span>Could not load branches</span>
             <Button
               size="xs"
               variant="ghost"
               className="h-5 cursor-pointer text-[10.5px]"
-              onClick={() => void load()}
+              onClick={retry}
             >
               Retry
             </Button>

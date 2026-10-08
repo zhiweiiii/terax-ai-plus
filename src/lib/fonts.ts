@@ -39,9 +39,7 @@ export function resolveFontFamily(userInput: string): string {
   if (!name) return detectMonoFontFamily();
   // A comma means the user gave a full stack; otherwise quote the single family.
   // Strip any quotes first so a stray quote can't produce a malformed token.
-  const head = name.includes(",")
-    ? name
-    : `"${name.replace(/['"]/g, "")}"`;
+  const head = name.includes(",") ? name : `"${name.replace(/['"]/g, "")}"`;
   return `${head}, ${FALLBACK_CHAIN}`;
 }
 
@@ -51,9 +49,23 @@ export function detectMonoFontFamily(): string {
     detected = FALLBACK_CHAIN;
     return detected;
   }
+  const context = document.createElement("canvas").getContext("2d");
+  const sample = "WwmMiIl1AaBb0123456789";
+  const baselines = ["monospace", "sans-serif", "serif"].map((family) => {
+    if (!context) return { family, width: 0 };
+    context.font = `32px ${family}`;
+    return { family, width: context.measureText(sample).width };
+  });
   for (const f of NERD_FONT_CANDIDATES) {
     try {
-      if (document.fonts.check(`12px "${f}"`)) {
+      if (
+        context &&
+        document.fonts.check(`12px "${f}"`) &&
+        baselines.some(({ family, width }) => {
+          context.font = `32px "${f}", ${family}`;
+          return Math.abs(context.measureText(sample).width - width) > 0.01;
+        })
+      ) {
         detected = `"${f}", ${FALLBACK_CHAIN}`;
         return detected;
       }

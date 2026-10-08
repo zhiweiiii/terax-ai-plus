@@ -1,4 +1,8 @@
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  currentWorkspaceScopeKey,
+  useWorkspaceEnvStore,
+  workspaceScopeKey,
+} from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback } from "react";
 import { type AsyncQueryState, useAsyncQuery } from "./useAsyncQuery";
@@ -33,18 +37,24 @@ export function useContentSearch(
   enabled: boolean,
   options?: Options,
 ): AsyncQueryState<ContentHit> {
+  const workspace = useWorkspaceEnvStore((state) => state.env);
+  const workspaceKey = workspaceScopeKey(workspace);
   const run = useCallback(
     async (q: string): Promise<ContentHit[]> => {
       if (!root) return [];
+      if (currentWorkspaceScopeKey() !== workspaceKey)
+        throw new Error("Workspace changed");
       const res = await invoke<GrepResponse>("fs_grep_interactive", {
         pattern: q,
         root,
         maxResults: LIMIT,
-        workspace: currentWorkspaceEnv(),
+        workspace,
       });
+      if (currentWorkspaceScopeKey() !== workspaceKey)
+        throw new Error("Workspace changed");
       return res.hits;
     },
-    [root],
+    [root, workspace, workspaceKey],
   );
 
   return useAsyncQuery({
@@ -53,5 +63,6 @@ export function useContentSearch(
     minLength: options?.minLength ?? CONTENT_SEARCH_MIN_QUERY,
     debounceMs: options?.debounceMs ?? DEBOUNCE_MS,
     run,
+    scopeKey: `${workspaceKey}\0${root ?? ""}`,
   });
 }

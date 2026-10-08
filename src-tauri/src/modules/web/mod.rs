@@ -64,66 +64,14 @@ const INDEX_HTML: &str = include_str!("../../../web.html");
 
 const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-// ──────────────────────────────────────────────────────────────────────────
-// Obfuscated auth constants
-// ──────────────────────────────────────────────────────────────────────────
-// The password digest and the auth cookie token are XOR-obfuscated at compile
-// time and decoded at runtime, so neither the plaintext password nor the token
-// shows up in `strings` on the binary. This is obfuscation, not real security:
-// anyone who can run the code can recover the values (see docs/issues.md #3).
-
-/// Recover an obfuscated byte constant. The caller keeps it in a fixed-size
-/// buffer; nothing is logged or sent to the page bundle.
-fn deobfuscate(encoded: &[u8]) -> Vec<u8> {
-    encoded
-        .iter()
-        .zip(OBFUSCATION_KEY.iter().cycle())
-        .map(|(b, k)| b ^ k)
-        .collect()
-}
-
-/// Key used to encode the constants below.
-const OBFUSCATION_KEY: [u8; 5] = [0x53, 0x2a, 0x7c, 0x91, 0x0d];
-
-/// The compile-time cookie token, used only until the user sets a password of
-/// their own. `auth::session_token` rotates a stored one on every change.
-pub(crate) fn legacy_token() -> String {
-    const ENCODED: [u8; 48] = [
-        0x6b, 0x13, 0x4d, 0xa1, 0x69, 0x30, 0x4e, 0x4a, 0xa8, 0x38, 0x64, 0x4c, 0x19, 0xf3, 0x68,
-        0x63, 0x1c, 0x1d, 0xa4, 0x35, 0x61, 0x4e, 0x18, 0xf7, 0x3f, 0x32, 0x18, 0x4f, 0xf5, 0x6b,
-        0x60, 0x48, 0x19, 0xa3, 0x3e, 0x65, 0x1d, 0x1e, 0xf4, 0x35, 0x61, 0x4b, 0x1a, 0xa4, 0x3d,
-        0x62, 0x19, 0x4c,
-    ];
-    String::from_utf8(deobfuscate(&ENCODED)).expect("web token is ascii")
-}
-
-/// SHA-1 digest of the compile-time access password, XOR-obfuscated. Only
-/// consulted while no password has been set (see `auth`), so an install that
-/// predates stored credentials is not locked out by an update.
-fn expected_digest() -> Vec<u8> {
-    const ENCODED: [u8; 20] = [
-        0x1c, 0x0a, 0x53, 0x33, 0xdf, 0x92, 0x31, 0x77, 0x18, 0xc1, 0x32, 0xba, 0xab, 0x4d, 0xfc,
-        0xca, 0x2e, 0xc0, 0x92, 0xe0,
-    ];
-    deobfuscate(&ENCODED)
-}
-
-/// Comparison against the compile-time digest. Only reached while no password
-/// has been stored.
-pub(crate) fn legacy_password_matches(password: &str) -> bool {
-    let mut hasher = Sha1::new();
-    hasher.update(password.as_bytes());
-    hasher.finalize()[..] == expected_digest()[..]
-}
-
 /// Set the web bridge password. Rotates the session token, so phones that were
 /// already signed in have to sign in again.
 #[tauri::command]
-pub fn web_set_password(password: String) -> Result<(), String> {
-    auth::set_password(&password)
+pub async fn web_set_password(password: String) -> Result<(), String> {
+    crate::modules::fs::blocking(move || auth::set_password(&password)).await
 }
 
-/// Whether a password has been set, as opposed to the compiled-in default.
+/// Whether a credential has been configured.
 #[tauri::command]
 pub fn web_has_custom_password() -> bool {
     auth::has_custom_password()
@@ -140,6 +88,15 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 /// a runaway client can't pile up unbounded threads.
 static CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const MAX_CONNECTIONS: usize = 8;
+static HTTP_CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_HTTP_CONNECTIONS: usize = 16;
+
+struct HttpConnectionGuard;
+impl Drop for HttpConnectionGuard {
+    fn drop(&mut self) {
+        HTTP_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Failed login attempts since boot (rate limit: >=5 consecutive fails = 5s
 /// delay before the next attempt is even evaluated).
@@ -153,11 +110,6 @@ static LAST_FAIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 pub fn start(app: tauri::AppHandle) -> Result<(), String> {
     SHUTDOWN.store(false, Ordering::Release);
     RUNNING.store(false, Ordering::Release);
-    // Make sure the page always has at least one terminal to attach to, even
-    // before the desktop opens any tab.
-    if let Some(state) = app.try_state::<PtyState>() {
-        state.web_ensure_session(&app);
-    }
     let listener = TcpListener::bind((BIND_ADDR, PORT))
         .map_err(|e| format!("web terminal: failed to bind {BIND_ADDR}:{PORT}: {e}"))?;
     log::info!("web terminal server listening on http://{BIND_ADDR}:{PORT}");
@@ -171,12 +123,20 @@ pub fn start(app: tauri::AppHandle) -> Result<(), String> {
                 }
                 match stream {
                     Ok(stream) => {
+                        if HTTP_CONNECTIONS.fetch_add(1, Ordering::AcqRel) >= MAX_HTTP_CONNECTIONS {
+                            HTTP_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+                            continue;
+                        }
+                        let guard = HttpConnectionGuard;
                         let app = app.clone();
                         let _ = stream.set_nodelay(true);
                         thread::Builder::new()
                             .name("terax-web-conn".into())
-                            .spawn(move || handle_connection(app, stream))
-                            .expect("spawn web connection thread");
+                            .spawn(move || {
+                                let _guard = guard;
+                                handle_connection(app, stream);
+                            })
+                            .ok();
                     }
                     Err(e) => {
                         log::warn!("web terminal: accept error: {e}");
@@ -232,6 +192,12 @@ pub fn web_status() -> WebStatus {
 /// attach open while an unresponsive window never replies.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(1500);
 
+fn checked_grid(cols: u64, rows: u64) -> Option<(u16, u16)> {
+    let cols = u16::try_from(cols).ok()?;
+    let rows = u16::try_from(rows).ok()?;
+    pty::valid_grid(cols, rows).then_some((cols, rows))
+}
+
 static NEXT_SNAPSHOT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static SNAPSHOT_WAITERS: OnceLock<Mutex<HashMap<u64, SyncSender<String>>>> = OnceLock::new();
 
@@ -269,7 +235,11 @@ fn request_snapshot(app: &tauri::AppHandle, leaf_id: u32) -> Option<String> {
 pub fn web_snapshot_reply(request_id: u64, data: String) {
     let waiter = snapshot_waiters().lock().unwrap().remove(&request_id);
     if let Some(tx) = waiter {
-        let _ = tx.try_send(data);
+        let _ = tx.try_send(if data.len() <= 8 * 1024 * 1024 {
+            data
+        } else {
+            String::new()
+        });
     }
 }
 
@@ -289,6 +259,8 @@ struct WsConn {
     buffer: Vec<u8>,
     /// Consume cursor into `buffer`.
     consume: usize,
+    fragment_opcode: Option<u8>,
+    fragment_payload: Vec<u8>,
     /// Last time any byte was read (drives the dead-peer timeout).
     last_read_at: std::time::Instant,
 }
@@ -351,6 +323,8 @@ impl WsConn {
             stream,
             buffer,
             consume: 0,
+            fragment_opcode: None,
+            fragment_payload: Vec::new(),
             last_read_at: std::time::Instant::now(),
         })
     }
@@ -361,15 +335,15 @@ impl WsConn {
     /// violations. Partial frames are never discarded.
     fn try_parse_message(&mut self) -> Result<Option<(u8, Vec<u8>)>, String> {
         let buf = self.buffer.as_slice();
-        let mut pos = self.consume;
-        let mut result_op: Option<u8> = None;
-        let mut result = Vec::new();
-        let mut total = 0usize;
         loop {
+            let mut pos = self.consume;
             if buf.len() - pos < 2 {
                 return Ok(None);
             }
             let fin = buf[pos] & 0x80 != 0;
+            if buf[pos] & 0x70 != 0 {
+                return Err("ws reserved bits set".into());
+            }
             let opcode = buf[pos] & 0x0F;
             let masked = buf[pos + 1] & 0x80 != 0;
             let mut len = (buf[pos + 1] & 0x7F) as usize;
@@ -386,19 +360,19 @@ impl WsConn {
                 }
                 let mut ext = [0u8; 8];
                 ext.copy_from_slice(&buf[pos..pos + 8]);
-                len = u64::from_be_bytes(ext) as usize;
+                len = usize::try_from(u64::from_be_bytes(ext)).map_err(|_| "ws length overflow")?;
                 pos += 8;
             }
             // Control frames must be small per RFC 6455; data frames capped
             // per-frame, and the reassembled message capped as a whole so
             // unlimited continuation frames cannot grow memory without bound.
-            if opcode >= OP_CLOSE && len > 125 {
+            if opcode >= OP_CLOSE && (len > 125 || !fin) {
                 return Err("ws control frame too large".into());
             }
             if len > 1024 * 1024 {
                 return Err("ws frame too large".into());
             }
-            if result_op.is_some() && total + len > 1024 * 1024 {
+            if opcode < OP_CLOSE && self.fragment_payload.len() + len > 1024 * 1024 {
                 return Err("ws message too large".into());
             }
             let mut mask = [0u8; 4];
@@ -408,7 +382,7 @@ impl WsConn {
                 }
                 mask.copy_from_slice(&buf[pos..pos + 4]);
                 pos += 4;
-            } else if opcode < OP_CLOSE {
+            } else {
                 // RFC 6455: client frames MUST be masked. A browser always
                 // masks; an unmasked data frame means a hand-rolled client.
                 // Strict per spec, so malformed peers fail fast instead of
@@ -425,28 +399,36 @@ impl WsConn {
                     *b ^= mask[i % 4];
                 }
             }
+            self.consume = pos;
             match opcode {
                 OP_CONT => {
-                    total += len;
-                    result.extend_from_slice(&payload);
+                    if self.fragment_opcode.is_none() {
+                        return Err("continuation without initial frame".into());
+                    }
+                    self.fragment_payload.extend_from_slice(&payload);
                 }
                 OP_TEXT | OP_BIN => {
-                    result_op = Some(opcode);
-                    total += len;
-                    result.extend_from_slice(&payload);
+                    if self.fragment_opcode.is_some() {
+                        return Err("new message before continuation finished".into());
+                    }
+                    self.fragment_opcode = Some(opcode);
+                    self.fragment_payload = payload;
                 }
                 OP_CLOSE | OP_PING | OP_PONG => {
-                    self.consume = pos;
                     return Ok(Some((opcode, payload)));
                 }
                 _ => return Err("unknown ws opcode".into()),
             }
             if fin {
-                if let Some(op) = result_op {
-                    self.consume = pos;
-                    return Ok(Some((op, result)));
+                let op = self
+                    .fragment_opcode
+                    .take()
+                    .ok_or("missing ws message opcode")?;
+                let message = std::mem::take(&mut self.fragment_payload);
+                if op == OP_TEXT && std::str::from_utf8(&message).is_err() {
+                    return Err("invalid ws text encoding".into());
                 }
-                return Err("continuation without initial frame".into());
+                return Ok(Some((op, message)));
             }
         }
     }
@@ -534,12 +516,17 @@ impl WsConn {
 
 fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    let header_deadline = std::time::Instant::now() + Duration::from_secs(5);
     // Read the complete request head (up to \r\n\r\n). Any bytes past the
     // terminator belong to the WebSocket stream and are kept in `head`.
     let mut head = Vec::with_capacity(2048);
     let mut buf = [0u8; 2048];
     let mut header_end = None;
     loop {
+        if std::time::Instant::now() >= header_deadline {
+            return;
+        }
         match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -571,10 +558,12 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
             cookie = Some(line[line.find(':').unwrap_or(6) + 1..].trim().to_string());
         }
     }
+    let token = auth::session_token();
     let authenticated = cookie
         .as_deref()
-        .map(|c| {
-            let want = format!("terax_web={}", auth::session_token());
+        .zip(token.as_deref())
+        .map(|(c, token)| {
+            let want = format!("terax_web={token}");
             c.split(';').any(|part| part.trim() == want)
         })
         .unwrap_or(false);
@@ -596,19 +585,15 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
                     .unwrap_or(0);
             }
         }
-        let pwd: String = if is_post {
+        let pwd: String = if is_post && (1..=256).contains(&content_length) {
             // The body may not have arrived in the same read as the head
             // (TCP fragmentation): read the remaining Content-Length bytes.
             let have = head.len().saturating_sub(header_end);
-            let need = content_length.saturating_sub(have);
-            if need > 0 && need <= 256 {
-                let mut rest = vec![0u8; need];
-                let _ = stream.read_exact(&mut rest);
-                String::from_utf8_lossy(&rest).trim().to_string()
-            } else if content_length <= 256 && have >= content_length {
-                String::from_utf8_lossy(&head[header_end..header_end + content_length])
-                    .trim()
-                    .to_string()
+            let prefix = have.min(content_length);
+            let mut body = vec![0u8; content_length];
+            body[..prefix].copy_from_slice(&head[header_end..header_end + prefix]);
+            if stream.read_exact(&mut body[prefix..]).is_ok() {
+                String::from_utf8(body).unwrap_or_default()
             } else {
                 String::new()
             }
@@ -638,15 +623,14 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
             FAILED_LOGINS.store(0, Ordering::Release);
         }
 
-        let ok = auth::verify(&pwd);
-        if ok {
+        if let Some(token) = auth::verify(&pwd) {
             FAILED_LOGINS.store(0, Ordering::Release);
             let body = "<html><body><p>OK</p><script>location.href='/'</script></body></html>";
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
                  Set-Cookie: terax_web={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n",
-                auth::session_token(),
+                token,
                 body.len()
             );
             let _ = stream.write_all(response.as_bytes());
@@ -713,7 +697,7 @@ fn handle_connection(app: tauri::AppHandle, mut stream: TcpStream) {
         }
         let _guard = ConnGuard;
         match WsConn::from_handshake(stream, head) {
-            Ok(conn) => handle_ws(app, conn),
+            Ok(conn) => handle_ws(app, conn, token.unwrap_or_default()),
             Err(e) => log::debug!("web terminal: ws handshake failed: {e}"),
         }
         return;
@@ -753,13 +737,14 @@ fn serve_login(mut stream: TcpStream) {
 <body>
   <div class="card">
     <h1>请输入密码</h1>
+    <p>首次使用请先在桌面设置中配置手机访问密码。</p>
     <input id="pwd" type="password" placeholder="访问密码" autofocus />
     <button onclick="login()">进入</button>
     <div class="err" id="err"></div>
   </div>
   <script>
     async function login() {
-      const v = document.getElementById('pwd').value.trim();
+      const v = document.getElementById('pwd').value;
       if (!v) return;
       const res = await fetch('/auth', { method: 'POST', body: v, credentials: 'same-origin' });
       if (res.ok) { location.href = '/'; }
@@ -793,20 +778,16 @@ fn serve_page(mut stream: TcpStream) {
 }
 
 /// Per-connection WS loop: one client watches one session at a time.
-fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
+fn handle_ws(app: tauri::AppHandle, mut conn: WsConn, token: String) {
     let state = app.state::<PtyState>();
     // Grid this phone would render at, learned from its attach / resize frames.
     // Kept per connection so a keystroke can claim the session without the
     // phone having to restate its dimensions.
     let mut web_grid: Option<(u16, u16)> = None;
     // The leaf id this connection is attached to (for exit notices), plus the
-    // (session, subscriber sender, live receiver) triple.
+    // (session, subscription ID, live receiver) triple.
     let mut attached_id: Option<u32> = None;
-    let mut attached: Option<(
-        Arc<Session>,
-        std::sync::mpsc::SyncSender<WebMsg>,
-        std::sync::mpsc::Receiver<WebMsg>,
-    )> = None;
+    let mut attached: Option<(Arc<Session>, u64, std::sync::mpsc::Receiver<WebMsg>)> = None;
     let mut last_ping = std::time::Instant::now();
     // What the attached leaf's agent has actually said, read from the agent's
     // own transcript rather than parsed off its screen. The cheap change
@@ -826,12 +807,16 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
     // Push the session list so the page renders without a round trip.
     send_sessions(&mut conn, &state);
 
-    loop {
+    'connection: loop {
+        if SHUTDOWN.load(Ordering::Acquire) || auth::session_token().as_deref() != Some(&token) {
+            let _ = conn.send_frame(OP_CLOSE, &1008u16.to_be_bytes());
+            break;
+        }
         // Drain pending output on every iteration, whether or not the client
         // has sent anything: a phone that only watches still receives live
         // output instead of freezing when its input queue is quiet.
-        if let Some((session, tx, rx)) = &attached {
-            loop {
+        if let Some((session, subscription, rx)) = &attached {
+            for _ in 0..64 {
                 match rx.try_recv() {
                     Ok(WebMsg::Output(chunk)) => {
                         if chunk.is_empty() {
@@ -841,7 +826,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         frame.push(b'0');
                         frame.extend_from_slice(&chunk);
                         if conn.send_frame(OP_BIN, &frame).is_err() {
-                            break;
+                            break 'connection;
                         }
                     }
                     Ok(WebMsg::Resized(cols, rows)) => {
@@ -859,7 +844,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                             &mut conn,
                             &json!({ "type": "exit", "id": attached_id, "code": code }).to_string(),
                         );
-                        session.web_unsubscribe(tx);
+                        session.web_unsubscribe(*subscription);
                         attached_id = None;
                         attached = None;
                         break;
@@ -957,11 +942,14 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     }
                 };
                 if let Some(id) = parsed.get("attach").and_then(|v| v.as_u64()) {
-                    let leaf_id = id as u32;
+                    let Ok(leaf_id) = u32::try_from(id) else {
+                        let _ = send_error(&mut conn, "invalid terminal id");
+                        continue;
+                    };
                     // Detach the previous subscription precisely, so other
                     // viewers of the same session are never affected.
-                    if let Some((session, tx, _)) = attached.take() {
-                        session.web_unsubscribe(&tx);
+                    if let Some((session, subscription, _)) = attached.take() {
+                        session.web_unsubscribe(subscription);
                     }
                     attached_id = None;
 
@@ -985,7 +973,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                     // few milliseconds in between can appear both in the seed
                     // and in the queue; a small duplicate is the accepted cost
                     // of not making the window count bytes for us.
-                    let Some((tx, rx)) = session.web_subscribe() else {
+                    let Some((subscription, rx)) = session.web_subscribe() else {
                         let _ = send_error(&mut conn, "session already exited");
                         continue;
                     };
@@ -1004,7 +992,7 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         .get("cols")
                         .and_then(|v| v.as_u64())
                         .zip(parsed.get("rows").and_then(|v| v.as_u64()))
-                        .map(|(c, r)| (c as u16, r as u16));
+                        .and_then(|(c, r)| checked_grid(c, r));
                     if let Some((c, r)) = grid {
                         web_grid = Some((c, r));
                         if let Some((c, r)) = session.web_take_grid(c, r) {
@@ -1043,11 +1031,12 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                         frame.push(b'0');
                         frame.extend_from_slice(bytes);
                         if conn.send_frame(OP_BIN, &frame).is_err() {
+                            session.web_unsubscribe(subscription);
                             break;
                         }
                     }
                     attached_id = Some(leaf_id);
-                    attached = Some((session, tx, rx));
+                    attached = Some((session, subscription, rx));
                     transcript_mark = None;
                     transcript_rev = None;
                     last_transcript = std::time::Instant::now();
@@ -1179,10 +1168,11 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
                                 v.get("cols").and_then(|x| x.as_u64()),
                                 v.get("rows").and_then(|x| x.as_u64()),
                             ) {
-                                web_grid = Some((c as u16, r as u16));
-                                if let Some((c, r)) =
-                                    session.request_grid(SizeOwner::Web, c as u16, r as u16)
-                                {
+                                let Some((c, r)) = checked_grid(c, r) else {
+                                    continue;
+                                };
+                                web_grid = Some((c, r));
+                                if let Some((c, r)) = session.request_grid(SizeOwner::Web, c, r) {
                                     let _ = app.emit(
                                         pty::PTY_RESIZED_EVENT,
                                         json!({ "leafId": attached_id, "cols": c, "rows": r }),
@@ -1208,8 +1198,8 @@ fn handle_ws(app: tauri::AppHandle, mut conn: WsConn) {
     }
 
     // Detach this connection's subscription precisely, never the whole table.
-    if let Some((session, tx, _)) = attached {
-        session.web_unsubscribe(&tx);
+    if let Some((session, subscription, _)) = attached {
+        session.web_unsubscribe(subscription);
     }
 }
 

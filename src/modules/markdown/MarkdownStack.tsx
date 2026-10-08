@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { MarkdownTab, Tab } from "@/modules/tabs";
+import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import { useEffect, useRef } from "react";
 import {
   MarkdownPreviewPane,
@@ -7,6 +8,7 @@ import {
 } from "./MarkdownPreviewPane";
 
 type Props = {
+  spaces: readonly SpaceMeta[];
   tabs: Tab[];
   activeId: number;
   registerHandle: (
@@ -19,6 +21,7 @@ type Props = {
 };
 
 export function MarkdownStack({
+  spaces,
   tabs,
   activeId,
   registerHandle,
@@ -59,6 +62,8 @@ export function MarkdownStack({
   return (
     <div className="relative h-full w-full">
       {markdowns.map((t) => {
+        const space = spaces.find((item) => item.id === t.spaceId);
+        if (!space) return null;
         const visible = t.id === activeId;
         return (
           <div
@@ -70,6 +75,7 @@ export function MarkdownStack({
             aria-hidden={!visible}
           >
             <MarkdownPreviewPane
+              workspace={space.env}
               ref={getRefCallback(t.id)}
               path={t.path}
               visible={visible}

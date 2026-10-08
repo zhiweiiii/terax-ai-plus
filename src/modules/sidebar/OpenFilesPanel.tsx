@@ -86,43 +86,77 @@ export function OpenFilesPanel({
             : null;
 
         return (
-          <button
+          <div
             key={tab.id}
-            type="button"
-            onClick={() => onSelectTab(tab.id)}
             className={cn(
-              "group flex h-7 w-full shrink-0 items-center gap-2 px-3 text-left text-[12px] transition-colors",
+              "group flex h-7 w-full shrink-0 items-center px-3 text-left text-[12px] transition-colors",
               isActive
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
             )}
           >
-            {iconUrl ? (
-              <img src={iconUrl} alt="" className="size-3.5 shrink-0" />
-            ) : tab.kind === "preview" ? (
-              <HugeiconsIcon icon={Globe02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-            ) : tab.kind === "git-diff" || tab.kind === "git-commit-file" ? (
-              <HugeiconsIcon icon={GitCompareIcon} size={14} strokeWidth={1.75} className="shrink-0" />
-            ) : tab.kind === "git-history" ? (
-              <HugeiconsIcon icon={HistoryIcon} size={14} strokeWidth={1.75} className="shrink-0" />
-            ) : tab.kind === "editor" ? (
-              <HugeiconsIcon icon={PencilEdit02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-            ) : (
-              <HugeiconsIcon icon={ComputerTerminal02Icon} size={14} strokeWidth={1.75} className="shrink-0" />
-            )}
-            <span className="min-w-0 flex-1 truncate">{name}</span>
-            <span
-              role="button"
-              aria-label="Close file"
-              onClick={(e) => {
-                e.stopPropagation();
-                onCloseTab(tab.id);
-              }}
-              className="rounded p-0.5 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-60"
+            <button
+              type="button"
+              onClick={() => onSelectTab(tab.id)}
+              aria-current={isActive ? "page" : undefined}
+              className="flex h-full min-w-0 flex-1 items-center gap-2 text-left outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              {iconUrl ? (
+                <img src={iconUrl} alt="" className="size-3.5 shrink-0" />
+              ) : tab.kind === "preview" ? (
+                <HugeiconsIcon
+                  icon={Globe02Icon}
+                  size={14}
+                  strokeWidth={1.75}
+                  className="shrink-0"
+                />
+              ) : tab.kind === "git-diff" || tab.kind === "git-commit-file" ? (
+                <HugeiconsIcon
+                  icon={GitCompareIcon}
+                  size={14}
+                  strokeWidth={1.75}
+                  className="shrink-0"
+                />
+              ) : tab.kind === "git-history" ? (
+                <HugeiconsIcon
+                  icon={HistoryIcon}
+                  size={14}
+                  strokeWidth={1.75}
+                  className="shrink-0"
+                />
+              ) : tab.kind === "editor" ? (
+                <HugeiconsIcon
+                  icon={PencilEdit02Icon}
+                  size={14}
+                  strokeWidth={1.75}
+                  className="shrink-0"
+                />
+              ) : (
+                <HugeiconsIcon
+                  icon={ComputerTerminal02Icon}
+                  size={14}
+                  strokeWidth={1.75}
+                  className="shrink-0"
+                />
+              )}
+              <span className="min-w-0 flex-1 truncate">{name}</span>
+              {tab.kind === "editor" && tab.dirty ? (
+                <span
+                  role="img"
+                  aria-label="Unsaved changes"
+                  className="size-1.5 shrink-0 rounded-full bg-foreground/60"
+                />
+              ) : null}
+            </button>
+            <button
+              type="button"
+              aria-label={`Close ${name}`}
+              onClick={() => onCloseTab(tab.id)}
+              className="ml-1 rounded p-0.5 opacity-0 transition-opacity hover:bg-accent group-hover:opacity-60 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
               <HugeiconsIcon icon={Cancel01Icon} size={11} strokeWidth={2} />
-            </span>
-          </button>
+            </button>
+          </div>
         );
       })}
     </div>

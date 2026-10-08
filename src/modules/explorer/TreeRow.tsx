@@ -10,7 +10,7 @@ import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
 export type RowActions = {
   toggle: (path: string) => void;
   beginRename: (path: string) => void;
-  commitRename: (newName: string) => void | Promise<void>;
+  commitRename: (newName: string) => boolean | Promise<boolean>;
   cancelRename: () => void;
 };
 
@@ -153,7 +153,7 @@ export const EntryRow = memo(EntryRowImpl);
 export type PendingRowProps = {
   depth: number;
   kind: "file" | "dir";
-  onCommit: (name: string) => void | Promise<void>;
+  onCommit: (name: string) => boolean | Promise<boolean>;
   onCancel: () => void;
 };
 

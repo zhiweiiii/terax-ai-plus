@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { formatDroppedPaths } from "./quoteShellPath";
 
 /** Clipboard image types we can spill to disk, best first. */
 const IMAGE_TYPES = [
@@ -20,10 +19,11 @@ const IMAGE_TYPES = [
  */
 async function spillImage(blob: Blob): Promise<string | null> {
   try {
+    if (blob.size > 32 * 1024 * 1024)
+      throw new Error("Clipboard image exceeds the 32 MB limit");
     const buf = new Uint8Array(await blob.arrayBuffer());
-    return await invoke<string>("fs_save_clipboard_image", {
-      bytes: Array.from(buf),
-      mime: blob.type || "image/png",
+    return await invoke<string>("fs_save_clipboard_image", buf, {
+      headers: { "x-image-mime": blob.type || "image/png" },
     });
   } catch (error) {
     console.error("[terax] could not save pasted image:", error);
@@ -36,13 +36,14 @@ async function spillImage(blob: Blob): Promise<string | null> {
 
 /**
  * Read the clipboard and, when it holds an image rather than text, spill it to
- * disk and return the shell-quoted path to paste. Returns null when the
+ * disk and return raw paths. Quoting belongs to the destination session.
+ * Returns null when the
  * clipboard has no image, so the caller falls back to a normal text paste.
  *
  * Uses the async Clipboard API — unlike a `paste` event's clipboardData, it can
  * read image bytes that were copied by another app (WeChat, Snipping Tool).
  */
-export async function clipboardAttachmentText(): Promise<string | null> {
+export async function clipboardAttachmentPaths(): Promise<string[] | null> {
   // Files copied in Explorer/Finder come first: on Windows they live in the
   // CF_HDROP clipboard format, which the web Clipboard API cannot see, so the
   // backend reads them natively.
@@ -54,7 +55,7 @@ export async function clipboardAttachmentText(): Promise<string | null> {
           ? "Pasted 1 file path"
           : `Pasted ${filePaths.length} file paths`,
       );
-      return formatDroppedPaths(filePaths);
+      return filePaths;
     }
   } catch (error) {
     console.error("[terax] could not read clipboard files:", error);
@@ -90,5 +91,5 @@ export async function clipboardAttachmentText(): Promise<string | null> {
       ? "Pasted screenshot as a file path"
       : `Pasted ${paths.length} images as file paths`,
   );
-  return formatDroppedPaths(paths);
+  return paths;
 }

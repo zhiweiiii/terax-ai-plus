@@ -10,15 +10,19 @@ export type DomMatch = {
 
 const FIND_LIMIT = 500;
 
-function collectTextNodes(root: Node): Text[] {
+function* collectTextNodes(root: Node): Generator<Text> {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const out: Text[] = [];
   let current: Node | null = walker.currentNode;
   while (current) {
-    if (current.nodeValue) out.push(current as Text);
+    if (current.nodeValue) yield current as Text;
     current = walker.nextNode();
   }
-  return out;
+}
+
+function newlines(text: string, from: number, to: number): number {
+  let count = 0;
+  for (let i = from; i < to; i++) if (text.charCodeAt(i) === 10) count++;
+  return count;
 }
 
 function preview(text: string, from: number, len: number): string {
@@ -36,83 +40,111 @@ export function findInDom(
   query: string,
   limit = FIND_LIMIT,
 ): DomMatch[] {
-  const q = query.toLowerCase();
+  if (!query || query.length > 16_384 || !Number.isFinite(limit) || limit <= 0)
+    return [];
+  limit = Math.min(FIND_LIMIT, Math.floor(limit));
+  const matcher = new RegExp(
+    query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    "giu",
+  );
   const out: DomMatch[] = [];
   let line = 1;
   for (const node of collectTextNodes(root)) {
     const text = node.nodeValue ?? "";
-    const lower = text.toLowerCase();
-    let from = 0;
+    matcher.lastIndex = 0;
+    let scanned = 0;
+    let lineOffset = 0;
     while (out.length < limit) {
-      const idx = lower.indexOf(q, from);
-      if (idx < 0) break;
-      const before = text.slice(0, idx);
-      const nl = before.split("\n").length - 1;
+      const match = matcher.exec(text);
+      if (!match) break;
+      const idx = match.index;
+      lineOffset += newlines(text, scanned, idx);
+      scanned = idx;
       out.push({
         node,
         offset: idx,
-        length: query.length,
-        line: line + nl,
-        text: preview(text, idx, query.length),
+        length: match[0].length,
+        line: line + lineOffset,
+        text: preview(text, idx, match[0].length),
       });
-      from = idx + Math.max(1, query.length);
     }
-    line += text.split("\n").length - 1;
+    if (out.length >= limit) break;
+    line += lineOffset + newlines(text, scanned, text.length);
   }
   return out;
 }
 
-const MARKS = new WeakMap<HTMLElement, HTMLSpanElement[]>();
-const ACTIVE_CLASS = "find-active";
+const MARKS = new WeakMap<HTMLElement, Range[]>();
+const ACTIVE = new WeakMap<HTMLElement, Range>();
+const MATCH_NAME = "terax-markdown-find";
+const ACTIVE_NAME = "terax-markdown-find-active";
 
-/**
- * Wrap every match in a `<mark class="bt-match">`, keeping references so they
- * can be unwrapped later. Returns the mark elements (sorted by doc order).
- */
+function registryHighlight(name: string): Highlight | null {
+  if (typeof Highlight !== "function" || !CSS.highlights) return null;
+  const existing = CSS.highlights.get(name);
+  if (existing) return existing;
+  const highlight = new Highlight();
+  CSS.highlights.set(name, highlight);
+  return highlight;
+}
+
 export function highlightMatches(
   root: HTMLElement,
   matches: DomMatch[],
-): HTMLSpanElement[] {
+): Range[] {
   clearMatches(root);
-  const marks: HTMLSpanElement[] = [];
-  for (const m of matches) {
-    try {
-      const { node, offset, length } = m;
-      const mark = document.createElement("mark");
-      mark.className = "bt-match";
-      const before = node.splitText(offset);
-      const middle = before.splitText(length);
-      mark.appendChild(before);
-      node.parentNode?.insertBefore(mark, middle);
-      marks.push(mark);
-    } catch {
-      // ignore
-    }
+  const ranges: Range[] = [];
+  const highlight = registryHighlight(MATCH_NAME);
+  for (const match of matches) {
+    if (
+      !root.contains(match.node) ||
+      match.offset < 0 ||
+      match.offset + match.length > match.node.length
+    )
+      continue;
+    const range = document.createRange();
+    range.setStart(match.node, match.offset);
+    range.setEnd(match.node, match.offset + match.length);
+    ranges.push(range);
+    highlight?.add(range);
   }
-  MARKS.set(root, marks);
-  return marks;
+  MARKS.set(root, ranges);
+  return ranges;
 }
 
 export function clearMatches(root: HTMLElement): void {
-  const marks = MARKS.get(root) ?? [];
+  const highlight = CSS.highlights?.get(MATCH_NAME);
+  const activeHighlight = CSS.highlights?.get(ACTIVE_NAME);
+  for (const range of MARKS.get(root) ?? []) highlight?.delete(range);
+  const active = ACTIVE.get(root);
+  if (active) activeHighlight?.delete(active);
   MARKS.delete(root);
-  for (const mark of marks) {
-    try {
-      mark.replaceWith(document.createTextNode(mark.textContent ?? ""));
-    } catch {
-      // ignore
-    }
-  }
+  ACTIVE.delete(root);
+  if (highlight?.size === 0) CSS.highlights.delete(MATCH_NAME);
+  if (activeHighlight?.size === 0) CSS.highlights.delete(ACTIVE_NAME);
 }
 
-export function setActiveMatch(
-  root: HTMLElement,
-  mark: HTMLSpanElement | null,
-): void {
-  root.querySelectorAll(`.${ACTIVE_CLASS}`).forEach((el) => {
-    el.classList.remove(ACTIVE_CLASS);
+export function setActiveMatch(root: HTMLElement, range: Range | null): void {
+  const previous = ACTIVE.get(root);
+  const highlight = registryHighlight(ACTIVE_NAME);
+  if (previous) highlight?.delete(previous);
+  ACTIVE.delete(root);
+  if (
+    !range ||
+    range.collapsed ||
+    !root.contains(range.startContainer) ||
+    !MARKS.get(root)?.includes(range)
+  ) {
+    if (highlight?.size === 0) CSS.highlights.delete(ACTIVE_NAME);
+    return;
+  }
+  ACTIVE.set(root, range);
+  highlight?.add(range);
+  const scroller = root.closest<HTMLElement>(".markdown-preview") ?? root;
+  const bounds = scroller.getBoundingClientRect();
+  const target = range.getBoundingClientRect();
+  scroller.scrollBy({
+    top: target.top - bounds.top - bounds.height / 2 + target.height / 2,
+    behavior: "auto",
   });
-  if (!mark) return;
-  mark.classList.add(ACTIVE_CLASS);
-  mark.scrollIntoView({ block: "center", behavior: "auto" });
 }

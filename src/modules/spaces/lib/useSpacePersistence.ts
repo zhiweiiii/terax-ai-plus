@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { Tab } from "@/modules/tabs";
+import { errorToast } from "@/lib/errorToast";
 import { isSerializableTab, serializeTabs } from "./serialize";
-import { saveState } from "./store";
+import { flushStore, saveActiveId, saveSpacesList, saveState } from "./store";
 import { useSpaces } from "./useSpaces";
 
 const DEBOUNCE_MS = 3000;
@@ -39,14 +40,15 @@ export function useSpacePersistence({
     }
   }
 
-  const flush = useCallback((snap: Snapshot) => {
+  const flush = useCallback(async (snap: Snapshot) => {
     const groups = new Map<string, Tab[]>();
+    for (const space of useSpaces.getState().spaces) groups.set(space.id, []);
     for (const t of snap.tabs) {
       const arr = groups.get(t.spaceId);
       if (arr) arr.push(t);
-      else groups.set(t.spaceId, [t]);
     }
 
+    const writes: Promise<void>[] = [];
     for (const [spaceId, group] of groups) {
       const serialized = serializeTabs(group);
       const prev = last.current.get(spaceId);
@@ -58,6 +60,10 @@ export function useSpacePersistence({
         if (idx >= 0) activeTabIndex = idx;
       }
       const json = JSON.stringify(serialized);
+      activeTabIndex = Math.min(
+        activeTabIndex,
+        Math.max(0, serialized.length - 1),
+      );
       if (
         prev &&
         prev.json === json &&
@@ -65,9 +71,14 @@ export function useSpacePersistence({
       ) {
         continue;
       }
-      last.current.set(spaceId, { json, activeTabIndex });
-      void saveState(spaceId, { tabs: serialized, activeTabIndex });
+      writes.push(
+        saveState(spaceId, { tabs: serialized, activeTabIndex }).then(() => {
+          last.current.set(spaceId, { json, activeTabIndex });
+        }),
+      );
     }
+    await Promise.all(writes);
+    await flushStore();
   }, []);
 
   useEffect(() => {
@@ -76,7 +87,7 @@ export function useSpacePersistence({
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       timer.current = null;
-      flush(snap);
+      void flush(snap).catch((error) => errorToast("保存工作区失败", error));
     }, DEBOUNCE_MS);
     return () => {
       if (timer.current) clearTimeout(timer.current);
@@ -86,9 +97,16 @@ export function useSpacePersistence({
   useEffect(() => {
     if (!enabled) return;
     const onHidden = () => {
-      if (document.visibilityState === "hidden") flush(latest.current);
+      if (document.visibilityState === "hidden")
+        void flush(latest.current).catch((error) =>
+          errorToast("保存工作区失败", error),
+        );
     };
-    const onLeave = () => flush(latest.current);
+    const onLeave = () => {
+      void flush(latest.current).catch((error) =>
+        errorToast("保存工作区失败", error),
+      );
+    };
     document.addEventListener("visibilitychange", onHidden);
     window.addEventListener("blur", onLeave);
     window.addEventListener("beforeunload", onLeave);
@@ -96,7 +114,14 @@ export function useSpacePersistence({
       document.removeEventListener("visibilitychange", onHidden);
       window.removeEventListener("blur", onLeave);
       window.removeEventListener("beforeunload", onLeave);
-      flush(latest.current);
+      onLeave();
     };
+  }, [enabled, flush]);
+
+  return useCallback(async () => {
+    if (!enabled) return;
+    await saveSpacesList(useSpaces.getState().spaces);
+    await saveActiveId(useSpaces.getState().activeId);
+    await flush(latest.current);
   }, [enabled, flush]);
 }

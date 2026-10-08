@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils";
 import { lspFormatDocument, useLspExtension } from "@/modules/lsp";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { type WorkspaceEnv, workspaceScopeKey } from "@/modules/workspace";
 import { redo, undo } from "@codemirror/commands";
 import {
   findNext,
@@ -80,6 +81,7 @@ export type EditorPaneHandle = {
 
 type Props = {
   path: string;
+  workspace: WorkspaceEnv;
   overrideLanguage?: string | null;
   onDirtyChange?: (dirty: boolean) => void;
   onSaved?: () => void;
@@ -100,7 +102,19 @@ function formatBytes(n: number): string {
 // skip re-rendering entirely when App re-renders (terminal events, tab churn).
 export const EditorPane = memo(
   forwardRef<EditorPaneHandle, Props>(function EditorPane(props, ref) {
-    const { path, overrideLanguage, onDirtyChange, onSaved, onClose } = props;
+    const {
+      path,
+      workspace,
+      overrideLanguage,
+      onDirtyChange,
+      onSaved,
+      onClose,
+    } = props;
+    const documentIdentity = `${workspaceScopeKey(workspace)}\0${path}`;
+    const documentIdentityRef = useRef(documentIdentity);
+    documentIdentityRef.current = documentIdentity;
+    const workspaceRef = useRef(workspace);
+    workspaceRef.current = workspace;
 
     const {
       doc,
@@ -112,6 +126,7 @@ export const EditorPane = memo(
       openAnyway,
     } = useDocument({
       path,
+      workspace,
       onDirtyChange,
     });
     const reloadRef = useRef(reload);
@@ -126,6 +141,7 @@ export const EditorPane = memo(
     const editorWordWrap = usePreferencesStore((s) => s.editorWordWrap);
     const languageRef = useRef<string | null>(null);
     const [langId, setLangId] = useState<string | null>(null);
+    const documentSize = doc.status === "ready" ? doc.size : 0;
 
     // Stabilize save + onSaved via refs so the extensions array never changes
     // identity — a new identity makes @uiw/react-codemirror reconfigure the
@@ -139,60 +155,96 @@ export const EditorPane = memo(
     const lspActiveRef = useRef(false);
     const warnedNoLspRef = useRef(false);
     const warnedNoFormatRef = useRef(false);
+    const saveBusyRef = useRef(false);
+    const saveAgainRef = useRef(false);
 
     const performSave = useCallback(async () => {
-      const view = cmRef.current?.view;
-      const prefs = usePreferencesStore.getState();
-      const formatter = resolveFormatter(languageRef.current, prefs);
-      if (prefs.editorFormatOnSave && formatter === "lsp" && view) {
-        if (lspActiveRef.current) {
-          let res: "done" | "unsupported" = "done";
-          try {
-            res = await lspFormatDocument(view);
-          } catch (e) {
-            toast.error("Language server format failed", {
-              description: String(e),
-            });
-          }
-          if (res === "unsupported" && !warnedNoFormatRef.current) {
-            warnedNoFormatRef.current = true;
+      if (saveBusyRef.current) {
+        saveAgainRef.current = true;
+        return false;
+      }
+      saveBusyRef.current = true;
+      try {
+        const targetPath = pathRef.current;
+        const targetIdentity = documentIdentityRef.current;
+        const targetWorkspace = { ...workspaceRef.current };
+        const stillCurrent = () =>
+          documentIdentityRef.current === targetIdentity &&
+          cmRef.current?.view === view;
+        const view = cmRef.current?.view;
+        const prefs = usePreferencesStore.getState();
+        const formatter = resolveFormatter(languageRef.current, prefs);
+        if (prefs.editorFormatOnSave && formatter === "lsp" && view) {
+          if (lspActiveRef.current) {
+            let res: "done" | "unsupported" = "done";
+            try {
+              res = await lspFormatDocument(view);
+            } catch (e) {
+              toast.error("Language server format failed", {
+                description: String(e),
+              });
+            }
+            if (res === "unsupported" && !warnedNoFormatRef.current) {
+              warnedNoFormatRef.current = true;
+              toast.warning("Format on save skipped", {
+                description:
+                  "The active language server has no formatter. Pick an external one in Settings (Ruff for Python, Prettier, rustfmt, ...).",
+              });
+            }
+          } else if (!warnedNoLspRef.current) {
+            warnedNoLspRef.current = true;
             toast.warning("Format on save skipped", {
               description:
-                "The active language server has no formatter. Pick an external one in Settings (Ruff for Python, Prettier, rustfmt, ...).",
+                "No active language server for this file. Enable one in the statusbar, or pick an external formatter in Settings.",
             });
           }
-        } else if (!warnedNoLspRef.current) {
-          warnedNoLspRef.current = true;
-          toast.warning("Format on save skipped", {
-            description:
-              "No active language server for this file. Enable one in the statusbar, or pick an external formatter in Settings.",
-          });
         }
-      }
-      // Snapshot before save: edits typed during the formatter round-trip
-      // must not be clobbered by the disk read-back.
-      const docAtSave = view?.state.doc;
-      const saved = await saveRef.current();
-      if (!saved) return;
-      if (prefs.editorFormatOnSave && formatter !== "lsp") {
-        const error = await runExternalFormatter(
-          formatter,
-          pathRef.current,
-          prefs.editorCustomFormatCommand,
-        );
-        if (error) {
-          toast.error(`${formatter} format failed`, { description: error });
-        } else {
-          const readBack = await readFileText(pathRef.current);
-          if (readBack !== null && view && view.state.doc === docAtSave) {
-            applyFormattedContent(
-              view,
-              adoptDiskTextRef.current(readBack.text, readBack.mtime),
-            );
+        // Snapshot before save: edits typed during the formatter round-trip
+        // must not be clobbered by the disk read-back.
+        const docAtSave = view?.state.doc;
+        if (!stillCurrent()) return false;
+        const saved = await saveRef.current();
+        if (!saved || !stillCurrent()) return false;
+        if (prefs.editorFormatOnSave && formatter !== "lsp") {
+          const error = await runExternalFormatter(
+            formatter,
+            targetPath,
+            prefs.editorCustomFormatCommand,
+            targetWorkspace,
+          );
+          if (error) {
+            toast.error(`${formatter} format failed`, { description: error });
+            return false;
+          } else {
+            if (!stillCurrent()) return false;
+            const readBack = await readFileText(targetPath, targetWorkspace);
+            if (
+              stillCurrent() &&
+              readBack !== null &&
+              view &&
+              cmRef.current?.view === view &&
+              view.state.doc === docAtSave
+            ) {
+              applyFormattedContent(
+                view,
+                adoptDiskTextRef.current(readBack.text, readBack.mtime),
+              );
+            }
           }
         }
+        if (stillCurrent()) onSavedRef.current?.();
+        return stillCurrent();
+      } catch (error) {
+        if (cmRef.current?.view)
+          toast.error("保存或格式化失败", { description: String(error) });
+        return false;
+      } finally {
+        saveBusyRef.current = false;
+        if (saveAgainRef.current) {
+          saveAgainRef.current = false;
+          void performSaveRef.current();
+        }
       }
-      onSavedRef.current?.();
     }, []);
     const performSaveRef = useRef(performSave);
     performSaveRef.current = performSave;
@@ -277,9 +329,7 @@ export const EditorPane = memo(
             : [],
         ),
         vimHandlersExtension(() => ({
-          save: () => {
-            void performSaveRef.current();
-          },
+          save: () => performSaveRef.current(),
           close: () => onCloseRef.current?.(),
         })),
         ...buildSharedExtensions(),
@@ -331,7 +381,11 @@ export const EditorPane = memo(
       });
     }, [doc]);
 
-    const lspExt = useLspExtension(path, langId, doc.status === "ready");
+    const lspExt = useLspExtension(
+      path,
+      langId,
+      doc.status === "ready" && workspace.kind === "local",
+    );
     useEffect(() => {
       lspActiveRef.current = lspExt !== null;
       const view = cmRef.current?.view;
@@ -342,8 +396,8 @@ export const EditorPane = memo(
     }, [lspExt]);
 
     useEffect(
-      () => () => useDiagnosticsStore.getState().report(pathRef.current, null),
-      [],
+      () => () => useDiagnosticsStore.getState().report(path, null),
+      [path],
     );
 
     // Warm the language chunk while the file is still being read; the
@@ -358,7 +412,7 @@ export const EditorPane = memo(
         overrideLanguage || (path.split(".").pop()?.toLowerCase() ?? null);
       languageRef.current = ext;
       if (doc.status !== "ready") return;
-      if (doc.size > SYNTAX_MAX_BYTES) {
+      if (documentSize > SYNTAX_MAX_BYTES) {
         setLangId(null);
         const view = cmRef.current?.view;
         view?.dispatch({ effects: languageCompartment.reconfigure([]) });
@@ -373,20 +427,25 @@ export const EditorPane = memo(
           (await resolveLanguage(resolvePath)) ?? { ext: [], name: "", id: "" }
         );
       };
-      void resolve().then((result) => {
-        if (cancelled) return;
-        if (result.id) languageRef.current = result.id;
-        setLangId(result.id || ext);
-        const view = cmRef.current?.view;
-        if (!view) return;
-        view.dispatch({
-          effects: languageCompartment.reconfigure(result.ext),
+      void resolve()
+        .then((result) => {
+          if (cancelled) return;
+          if (result.id) languageRef.current = result.id;
+          setLangId(result.id || ext);
+          const view = cmRef.current?.view;
+          if (!view) return;
+          view.dispatch({
+            effects: languageCompartment.reconfigure(result.ext),
+          });
+        })
+        .catch((error) => {
+          if (!cancelled)
+            toast.error("加载语言支持失败", { description: String(error) });
         });
-      });
       return () => {
         cancelled = true;
       };
-    }, [path, doc.status, overrideLanguage]);
+    }, [path, doc.status, documentSize, overrideLanguage]);
 
     useImperativeHandle(
       ref,
