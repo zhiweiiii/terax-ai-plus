@@ -10,6 +10,8 @@ checkout 成功后自动强制重读该仓库分支列表，每个读取带不�
 
 1.0.1 发布前验证：最新源码的 lint、TypeScript、Rust fmt/clippy、构建体积检查与四组实际模块模拟 IPC 验证通过；tag 模式重新完整构建 Windows x64 NSIS 成功，确保包含最终的强制状态刷新改动。安装包为 Terax_1.0.1_x64-setup.exe，5,127,076 字节。未对用户仓库执行分支切换，也未安装覆盖用户正在运行的应用。
 
+已提交并推送修复代码与版本清单，正式发布 [v1.0.1](https://github.com/zhiweiiii/terax-ai-plus/releases/tag/v1.0.1)，非草稿、非预发布并设为 latest。发布标签指向修复提交 a5805c6e325b5ba9db131599063d4b77450eb412；重新公开下载校验字节数和 SHA256 均与本地一致：`1edaa3c10976b81b43b792924ca0f046d0096e0146058a8e29f09b0a91fe56c6`。本发布记录是后续文档提交，不移动已发布标签。
+
 ## 1.0.0 正式发布
 
 正式版已发布为 [v1.0.0](https://github.com/zhiweiiii/terax-ai-plus/releases/tag/v1.0.0)，非草稿、非预发布并设为 latest；NSIS 公开下载 SHA256 与本机新产物一致。未启用签名自动更新，也未将测试通过描述为所有历史问题永不复现。
