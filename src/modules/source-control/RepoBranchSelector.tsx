@@ -145,12 +145,15 @@ function ScopedRepoBranchSelector({
   const [busyLabel, setBusyOp] = useState<string | null>(null);
   const busyOp = busy ? busyLabel : null;
   const protectedBranches = usePreferencesStore((s) => s.protectedBranches);
-  const inFlight = useRef<Set<string>>(new Set());
+  const inFlight = useRef(new Map<string, symbol>());
 
   const loadBranches = useCallback(
-    async (repoRoot: string) => {
-      if (!isCurrent() || inFlight.current.has(repoRoot)) return;
-      inFlight.current.add(repoRoot);
+    async (repoRoot: string, force = false) => {
+      if (!isCurrent() || (!force && inFlight.current.has(repoRoot))) return;
+      const request = Symbol();
+      inFlight.current.set(repoRoot, request);
+      const currentRequest = () =>
+        isCurrent() && inFlight.current.get(repoRoot) === request;
       setLoading((current) => new Set(current).add(repoRoot));
       setBranchErrors((current) => {
         const next = { ...current };
@@ -159,13 +162,13 @@ function ScopedRepoBranchSelector({
       });
       try {
         const result = await native.gitListBranches(repoRoot, workspace);
-        if (isCurrent())
+        if (currentRequest())
           setBranches((current) => ({
             ...current,
             [repoRoot]: result.branches,
           }));
       } catch (error) {
-        if (isCurrent()) {
+        if (currentRequest()) {
           setBranchErrors((current) => ({
             ...current,
             [repoRoot]: String(error),
@@ -176,13 +179,14 @@ function ScopedRepoBranchSelector({
           );
         }
       } finally {
-        inFlight.current.delete(repoRoot);
-        if (isCurrent())
+        if (currentRequest()) {
+          inFlight.current.delete(repoRoot);
           setLoading((current) => {
             const next = new Set(current);
             next.delete(repoRoot);
             return next;
           });
+        }
       }
     },
     [isCurrent, workspace],
@@ -213,6 +217,7 @@ function ScopedRepoBranchSelector({
             delete next[repoRoot];
             return next;
           });
+          void loadBranches(repoRoot, true);
           setOpen(false);
           setPendingRemote(null);
           onChangeRepo(repoRoot);
@@ -226,7 +231,7 @@ function ScopedRepoBranchSelector({
         `Checkout failed in ${shortName(repoRoot)}`,
       );
     },
-    [run, onChangeRepo, onCheckedOut],
+    [run, onChangeRepo, onCheckedOut, loadBranches],
   );
 
   const handleRemoteCheckout = useCallback(async () => {
@@ -243,7 +248,7 @@ function ScopedRepoBranchSelector({
 
   const refreshRepo = useCallback(
     (repoRoot: string) => {
-      void loadBranches(repoRoot);
+      void loadBranches(repoRoot, true);
       onCheckedOut?.(repoRoot);
     },
     [loadBranches, onCheckedOut],

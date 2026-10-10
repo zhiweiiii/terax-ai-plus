@@ -20,6 +20,7 @@ export function useRepoStatuses(
   activeRepoRoot: string | null,
   activeStatus: GitStatusSnapshot | null,
 ): {
+  heads: GitRepoHead[];
   entries: RepoStatusEntry[];
   applyStatus: (
     repoRoot: string,
@@ -171,24 +172,33 @@ export function useRepoStatuses(
     },
     [],
   );
-  const entries = useMemo(() => {
+  const { heads, entries } = useMemo(() => {
+    const heads: GitRepoHead[] = [];
     const out: RepoStatusEntry[] = [];
-    if (!enabled) return out;
     for (const repo of repos) {
-      const status =
-        repo.repoRoot === activeRepoRoot
+      const status = !enabled
+        ? null
+        : repo.repoRoot === activeRepoRoot
           ? activeStatus
           : others.scope === scope
             ? others.values[repo.repoRoot]
             : null;
-      if (status?.changedFiles.length)
+      const current = status?.repoRoot === repo.repoRoot ? status : null;
+      heads.push(
+        current &&
+          (current.branch !== repo.branch ||
+            current.isDetached !== repo.isDetached)
+          ? { ...repo, branch: current.branch, isDetached: current.isDetached }
+          : repo,
+      );
+      if (current?.changedFiles.length)
         out.push({
           repoRoot: repo.repoRoot,
           name: repoDisplayName(repo.repoRoot),
-          status,
+          status: current,
         });
     }
-    return out;
+    return { heads, entries: out };
   }, [repos, activeRepoRoot, activeStatus, others, scope, enabled]);
-  return { entries, applyStatus, refreshRepo, refreshAll };
+  return { heads, entries, applyStatus, refreshRepo, refreshAll };
 }

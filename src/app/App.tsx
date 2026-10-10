@@ -1714,6 +1714,7 @@ export default function App() {
                             onCheckedOut={() =>
                               void multiRepo.summary.refresh({
                                 remote: "never",
+                                force: true,
                               })
                             }
                             onOpenPath={cdInNewTab}

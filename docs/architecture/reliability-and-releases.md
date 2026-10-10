@@ -1,5 +1,13 @@
 # 可靠性与发布
 
+## 仓库 HEAD 与分支列表刷新（2026-10-10）
+
+扫描只负责仓库发现，不能作为长期不变的当前分支来源。多仓库层使用 useRepoStatuses 的最新 HEAD 元信息供菜单显示，活动仓库来自 summary，其他仓库来自同环境状态；没有工作区变更的仓库也更新分支名及 detached 标记，不额外扫描。变更文件列表仍过滤干净仓库。
+
+分支 checkout 成功后重新查询该仓库分支列表。读取按仓库持有独立请求身份，强制刷新取代切换前旧读取，成功/失败/loading 清理都仅由当前请求处理；普通菜单 hover/focus 保留去重，旧环境/卸载结果仍拒绝。仓库外实际模块隔离验证不操作用户 Git 数据。
+
+分支操作后的状态摘要 refresh 同样使用 force，绕过切换前在途请求的合并，调用已有 doRefresh 生成新代次；默认刷新不改变原合并策略，旧请求 finally 不能清除新句柄。
+
 ## 1.0.0 正式渠道
 
 用户确认测试通过后发布 1.0.0，清单同步到 package.json、tauri.conf.json、Cargo.toml 和 Cargo.lock 的三个 workspace 包。正式构建沿用 `pnpm tauri build` 的 tag 校验模式固定 v1.0.0，不执行普通本地自动 patch 增号。GitHub Release 标记为稳定正式版，提供 Windows x64 NSIS 安装包；没有签名配置时继续手动下载，不生成 latest.json 或伪装成签名自动更新。

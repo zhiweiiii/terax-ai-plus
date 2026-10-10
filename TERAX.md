@@ -141,6 +141,8 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 - **settings/** - 设置 store（`store.ts`，基于 `tauri-plugin-store`）、偏好 hook、设置窗口打开器。**`usePreferencesStore.init()` 必须在每次启动时都跑**，不能只在首次创建空间时跑，否则几十项主窗口设置会被钉死在默认值、且没有变更监听。
 - **sidebar/** - 活动栏与可折叠侧面板。打开的文件面板按当前空间和归属命令行过滤，包含 Git 与预览标签；选择和关闭使用并列按钮，键盘可操作，并显示未保存标记。折叠时只有窗口按钮高亮。宽度只在用户调整时保存，关闭前保留尚未落盘的最新宽度。
 - **source-control/** - git 状态 / 暂存 / 提交面板与 diff 流程。丢弃改动跑在文件自己的仓库根上（多仓库安全）；提交忙状态在预检查之前置上，按钮点击即有反应。
+- 仓库菜单 HEAD 使用最新 Git 状态推导，不沿用发现扫描快照，干净仓库也更新分支/detached；checkout 成功后按仓库请求身份重新读取分支列表，旧回复不能回填或清除新 loading。
+- 分支操作后的状态摘要 refresh 使用 force，发起新代次，不合并切换前在途快照；默认刷新仍合并。
 - **git-history/** - 提交图轨道、引用、单提交文件 diff。
 - **lsp/** - 可选的语言服务器支持，不启用时零开销。`sessionManager.ts` 按 (server, workspace root) 索引会话，对打开的文档引用计数，闲置 3 分钟杀掉，崩溃退避。资源不变量：**没有根标记就不起会话**，每个 server 硬上限 4 个会话。客户端是懒加载的 `codemirror-languageserver` 子类。WSL 工作区暂不支持。
 - **markdown/** - Markdown 预览渲染器（支撑 `markdown` 标签）。

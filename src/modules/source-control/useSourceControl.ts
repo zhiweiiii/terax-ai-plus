@@ -50,7 +50,10 @@ export type SourceControlSummary = {
   applyStatus: (
     updater: (status: GitStatusSnapshot) => GitStatusSnapshot,
   ) => void;
-  refresh: (options?: { remote?: SourceControlRefreshMode }) => Promise<void>;
+  refresh: (options?: {
+    remote?: SourceControlRefreshMode;
+    force?: boolean;
+  }) => Promise<void>;
   runRemoteAction: (
     mode?: SourceControlRemoteActionMode,
   ) => Promise<SourceControlRemoteActionResult>;
@@ -466,10 +469,10 @@ export function useSourceControl(
   );
 
   const refresh = useCallback(
-    async (options?: { remote?: SourceControlRefreshMode }) => {
+    async (options?: { remote?: SourceControlRefreshMode; force?: boolean }) => {
       const remoteMode = options?.remote ?? "never";
       const inflight = inflightRef.current;
-      if (inflight?.contextKey === contextKey) {
+      if (!options?.force && inflight?.contextKey === contextKey) {
         const cur = inflight.mode;
         const upgrade =
           (cur === "never" && remoteMode !== "never") ||

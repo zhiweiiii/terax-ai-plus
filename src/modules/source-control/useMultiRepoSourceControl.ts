@@ -327,6 +327,7 @@ export function useMultiRepoSourceControl(
   // rest are fetched here so the aggregate badge, the grouped change list and
   // the explorer decorations all read the same numbers.
   const {
+    heads: currentRepoHeads,
     entries: repoStatusEntries,
     applyStatus: applyRepoStatus,
     refreshRepo: refreshRepoStatus,
@@ -901,7 +902,7 @@ export function useMultiRepoSourceControl(
   );
 
   return {
-    repos,
+    repos: currentRepoHeads,
     activeRepo: effectiveRepoRoot,
     setActiveRepo,
     summary: wrappedSummary,
