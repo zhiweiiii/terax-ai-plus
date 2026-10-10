@@ -5005,7 +5005,7 @@ dependencies = [
 
 [[package]]
 name = "terax"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -5049,7 +5049,7 @@ dependencies = [
 
 [[package]]
 name = "terax-cli"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "dirs 6.0.0",
  "libc",
@@ -5060,7 +5060,7 @@ dependencies = [
 
 [[package]]
 name = "terax-control-protocol"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "serde",
  "serde_json",

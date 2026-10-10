@@ -8,7 +8,6 @@ export {
   leafCwd,
   leafWorkspace,
   leafShellKind,
-  cdCommandForLeaf,
   leafIdForPty,
   navigateFocusedBlocks,
   pasteToLeaf,

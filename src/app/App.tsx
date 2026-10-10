@@ -8,7 +8,10 @@ import {
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { agentFileRef } from "@/lib/agentRef";
-import { errorToast } from "@/lib/errorToast";
+import {
+  projectReorderGap,
+  useRunningProjects,
+} from "@/modules/spaces/lib/projectTabs";
 import { consumeLaunchCommand, getLaunchDir } from "@/lib/launchDir";
 import { native } from "@/lib/native";
 import { useZoom } from "@/lib/useZoom";
@@ -40,7 +43,6 @@ import {
 } from "@/modules/shortcuts";
 import type { SidebarViewId } from "@/modules/sidebar";
 import {
-  OpenFilesPanel,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   useSidebarPanel,
@@ -60,6 +62,9 @@ import {
   useSpacesBoot,
 } from "@/modules/spaces";
 import { StatusBar } from "@/modules/statusbar";
+import { WindowBar } from "@/modules/statusbar/WindowBar";
+import { canEvictWindow } from "@/modules/statusbar/lib/windowTabs";
+import { WorkspaceEnvSelector } from "@/modules/statusbar/WorkspaceEnvSelector";
 import {
   TabSwitcherHud,
   useTabSwitcher,
@@ -67,9 +72,12 @@ import {
   useWindowTitle,
   useWorkspaceCwd,
 } from "@/modules/tabs";
-import { DEFAULT_SPACE_ID } from "@/modules/tabs/lib/useTabs";
 import {
-  cdCommandForLeaf,
+  DEFAULT_SPACE_ID,
+  type Tab,
+  type TerminalTab,
+} from "@/modules/tabs/lib/useTabs";
+import {
   clearFocusedTerminal,
   disposeSession,
   findLeafCwd,
@@ -132,7 +140,6 @@ function HeaderTabs({
       label: "版本",
       badge: sourceControlChanged,
     },
-    { id: "open-files", label: "窗口" },
   ];
   return (
     <>
@@ -340,10 +347,22 @@ export default function App() {
     [tabs, activeSpaceId],
   );
 
-  // Only terminal tabs go to the Header TabBar; editor/file tabs only show in the Open Files panel.
+  const runningProjects = useRunningProjects(tabs);
   const headerTabs = useMemo(
-    () => spaceTabs.filter((t) => t.kind === "terminal"),
-    [spaceTabs],
+    () =>
+      spaceTabs.filter(
+        (t): t is TerminalTab =>
+          t.kind === "terminal" && runningProjects.has(t.id),
+      ),
+    [spaceTabs, runningProjects],
+  );
+
+  const reorderHeaderProject = useCallback(
+    (id: number, gap: number) => {
+      const fullGap = projectReorderGap(tabs, headerTabs, id, gap);
+      if (fullGap !== null) reorderTabByGap(id, fullGap);
+    },
+    [tabs, headerTabs, reorderTabByGap],
   );
 
   // ALL terminal tabs across every group: the phone's switcher lists every
@@ -412,15 +431,39 @@ export default function App() {
   useWindowTitle(activeTab, explorerRoot);
 
   const disposeTab = useCallback(
-    (id: number) => {
+    (
+      id: number,
+      canClose?: (tab: Tab, tabs: readonly Tab[], activeId: number) => boolean,
+    ) => {
+      if (!closeTab(id, canClose)) return;
       // Terminal-leaf-keyed maps (terminalRefs) are pruned by the effect
       // below as the pane tree changes; only the tab-id-keyed handles need
       // explicit cleanup here.
       editorRefs.current.delete(id);
       previewRefs.current.delete(id);
-      closeTab(id);
     },
     [closeTab],
+  );
+
+  const windowScopeRef = useRef({
+    spaceId: sourceControlSpaceId,
+    ownerId: currentOwnerTabId,
+  });
+  windowScopeRef.current = {
+    spaceId: sourceControlSpaceId,
+    ownerId: currentOwnerTabId,
+  };
+  const closeOverflowWindows = useCallback(
+    (spaceId: string, ownerId: number | null, ids: number[]) => {
+      const scope = windowScopeRef.current;
+      if (scope.spaceId !== spaceId || scope.ownerId !== ownerId) return;
+      for (const id of ids) {
+        disposeTab(id, (tab, latest, active) =>
+          canEvictWindow(tab, latest, active, spaceId, ownerId),
+        );
+      }
+    },
+    [disposeTab],
   );
 
   const {
@@ -731,22 +774,6 @@ export default function App() {
     newBlockTab(inheritedCwdForNewTab());
   }, [newBlockTab, inheritedCwdForNewTab]);
 
-  const sendCd = useCallback(
-    (path: string) => {
-      if (activeLeafId === null) return;
-      const term = terminalRefs.current.get(activeLeafId);
-      if (!term) return;
-      try {
-        term.write(cdCommandForLeaf(activeLeafId, path));
-      } catch (error) {
-        errorToast("切换终端目录失败", error);
-        return;
-      }
-      term.focus();
-    },
-    [activeLeafId],
-  );
-
   const cdInNewTab = useCallback(
     (path: string) => {
       const tabId = newTab(path);
@@ -846,21 +873,6 @@ export default function App() {
         null)
       : null;
 
-  const activeFilePath = (() => {
-    if (activeTab?.kind === "editor") return activeTab.path;
-    if (activeTab?.kind === "git-diff") {
-      if (/^([A-Za-z]:|\/|\\)/.test(activeTab.path)) return activeTab.path;
-      const root = activeTab.repoRoot.replace(/[\\/]+$/, "");
-      const rel = activeTab.path.replace(/^[\\/]+/, "");
-      return `${root}/${rel}`;
-    }
-    if (activeTab?.kind === "git-commit-file") {
-      const root = activeTab.repoRoot.replace(/[\\/]+$/, "");
-      const rel = activeTab.path.replace(/^[\\/]+/, "");
-      return `${root}/${rel}`;
-    }
-    return null;
-  })();
   const explorerActiveFilePath = (() => {
     if (activeTab?.kind === "editor" || activeTab?.kind === "markdown")
       return activeTab.path;
@@ -1406,6 +1418,20 @@ export default function App() {
     [focusMainView],
   );
 
+  const handleSelectProject = useCallback(
+    (project: TerminalTab) => {
+      const current = tabsRef.current.find(
+        (tab) => tab.id === project.id && tab.spaceId === project.spaceId,
+      );
+      if (current?.kind !== "terminal") return;
+      useSpaces.getState().setActive(current.spaceId);
+      setActiveSpaceForNewTabs(current.spaceId);
+      setActiveId(current.id);
+      focusMainView();
+    },
+    [setActiveId, setActiveSpaceForNewTabs, focusMainView],
+  );
+
   const spacesList = useSpaces((s) => s.spaces);
   useEditorFileSync({
     tabs,
@@ -1563,7 +1589,7 @@ export default function App() {
               onClose={handleClose}
               onPin={pinTab}
               onRename={handleRenameTab}
-              onReorder={reorderTabByGap}
+              onReorder={reorderHeaderProject}
               onOverrideLanguage={setOverrideLanguage}
               headerRight={
                 <SessionHistoryMenu
@@ -1572,14 +1598,23 @@ export default function App() {
                 />
               }
               groupSwitcher={
-                <GroupSwitcher
-                  spaces={spacesList}
-                  activeId={activeSpaceId}
-                  onSwitch={handleSwitchGroup}
-                  onCreate={handleCreateGroup}
-                  onRename={handleRenameGroup}
-                  onDelete={(id) => void requestGroupDelete(id)}
-                />
+                <>
+                  <GroupSwitcher
+                    spaces={spacesList}
+                    projects={allTerminalTabs}
+                    activeProjectId={currentOwnerTabId ?? activeId}
+                    runningProjectIds={runningProjects}
+                    onSelectProject={handleSelectProject}
+                    onRenameProject={handleRenameTab}
+                    onCloseProject={handleClose}
+                    activeId={activeSpaceId}
+                    onSwitch={handleSwitchGroup}
+                    onCreate={handleCreateGroup}
+                    onRename={handleRenameGroup}
+                    onDelete={(id) => void requestGroupDelete(id)}
+                  />
+                  <WorkspaceEnvSelector onSelect={handleWorkspaceChange} />
+                </>
               }
               headerTabs={
                 <HeaderTabs
@@ -1642,19 +1677,7 @@ export default function App() {
                     key={sidebarView}
                     className="min-h-0 flex-1 terax-panel-in"
                   >
-                    {sidebarView === "open-files" ? (
-                      <OpenFilesPanel
-                        // The panel lists what belongs to the project you are
-                        // in. Passing every tab let a diff opened in another
-                        // space show up here, because git tabs are not scoped
-                        // by owner the way file tabs are.
-                        tabs={spaceTabs}
-                        activeId={activeId}
-                        currentOwnerTabId={currentOwnerTabId}
-                        onSelectTab={setActiveId}
-                        onCloseTab={handleClose}
-                      />
-                    ) : sidebarView === "explorer" ? (
+                    {sidebarView === "explorer" ? (
                       <FileExplorer
                         ref={explorerRef}
                         rootPath={explorerRoot}
@@ -1769,16 +1792,23 @@ export default function App() {
 
           {!zenMode && (
             <StatusBar
-              cwd={activeCwd}
-              filePath={activeFilePath}
-              home={home}
-              onCd={sendCd}
-              onWorkspaceChange={handleWorkspaceChange}
+              windowBar={
+                <WindowBar
+                  key={`${sourceControlSpaceId}:${currentOwnerTabId ?? "unowned"}`}
+                  tabs={tabs}
+                  spaceId={sourceControlSpaceId}
+                  project={currentOwnerTab}
+                  activeId={activeId}
+                  onSelect={(id) => {
+                    setActiveId(id);
+                    focusMainView();
+                  }}
+                  onClose={handleClose}
+                  onOverflow={closeOverflowWindows}
+                />
+              }
               onOpenSettings={() => void openSettingsWindow()}
               activeLeafId={activeLeafId}
-              privateActive={
-                activeTab?.kind === "terminal" && activeTab.private === true
-              }
             />
           )}
 

@@ -62,11 +62,13 @@ transcript 里记的是**花掉的 token**，那是另一个量，不是"占套�
 
 所以只能问 Claude Code 本人：跑 `claude -p "/usage"`。
 
-### 由此而来的两条约束
+### 自动更新与缓存
 
-**绝不轮询。** 查一次用量本身就要消耗一次请求，轮询等于用查询把额度烧掉。后端缓存 10 分钟（`MIN_REFETCH`），打开面板只是读缓存，只有点刷新才真的重查。首屏走 `claude_usage_cached`，不触发任何子进程。
+底栏挂载先读取两种 CLI 的缓存，然后自动查询；面板关闭时也每 5 分钟更新一次。定时查询强制重读，手动刷新保留，打开面板使用普通查询复用 5 分钟缓存。同窗口共用在途 Promise，避免自动/手动查询或组件重新挂载时重复启动探针；每个挂载有独立请求代次，卸载释放计时器，旧缓存和旧查询不回填新状态。
 
-**失败不进缓存**，否则一次网络抖动会让面板顶着同一条错误十分钟。
+**失败不进后端缓存**。前端保留上次结果和成功时间，明确标记更新失败；详情展示错误，自动查询失败不反复弹通知，手动刷新失败才提示。CLI 缺失或未登录不显示伪造的 0%。移除旧实现未经验证的“查询必然消耗额度”提示，本项目不自行保证 CLI 或服务端的计费策略。
+
+常驻信息分 Claude/Codex 两行，格式为 `5h 73%（重置时间）- 周 36%（重置时间）`。Claude 优先整体 all models 周窗口，已识别的本地日期格式精简为月日时分，未知自然语言或其他时区保持原文，完整 CLI 文本可悬停及在详情查看。Codex 按 300/10080 分钟匹配 5h/周窗口，按本地时区显示月日时分；不把其他时长误标成 5h/周。缺失值显示 `--`。窄窗口底栏允许换行。
 
 ### 输出是给人看的，不是 JSON
 
@@ -93,9 +95,9 @@ claude -p "/usage"
 
 ### Codex：通过本机 app-server 查询
 
-Codex CLI 提供本机 JSON-RPC app-server。Terax 只在用户打开 Codex 用量面板或点刷新时启动一个短生命周期的 `codex app-server --stdio`，先发 `initialize`，再请求 `account/rateLimits/read`。结果包含短期和长期窗口的 `usedPercent`、`resetsAt`、窗口分钟数及套餐类型；面板据此显示 5 小时和周窗口。
+Codex CLI 提供本机 JSON-RPC app-server。Terax 在首次自动查询、每 5 分钟更新或用户刷新时启动一个短生命周期的 `codex app-server --stdio`，先发 `initialize`，再请求 `account/rateLimits/read`。结果包含短期和长期窗口的 `usedPercent`、`resetsAt`、窗口分钟数及套餐类型；面板据此显示实际窗口。
 
-这不是对运行中 Codex TUI 的连接，也不读取或传出 `~/.codex` 的登录凭据。查询完成（或超时）后该 app-server 立刻结束；和 Claude 一样，成功结果在内存缓存 10 分钟、不轮询，失败不缓存。没有已登录 Codex 或本机 CLI 不支持 app-server 时，面板原样显示错误，而不拿会话 transcript 的 token 数冒充套餐额度。
+这不是对运行中 Codex TUI 的连接，也不读取或传出 `~/.codex` 的登录凭据。查询完成（或超时）后该 app-server 立刻结束；和 Claude 一样，成功结果在内存缓存 5 分钟，失败不缓存。没有已登录 Codex 或本机 CLI 不支持 app-server 时，面板原样显示错误，而不拿会话 transcript 的 token 数冒充套餐额度。
 
 ### 运行环境边界
 

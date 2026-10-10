@@ -8,12 +8,8 @@
 //!
 //! So this asks Claude Code, by running `claude -p "/usage"`.
 //!
-//! Two consequences shape everything here. Asking costs a request against the
-//! very limit being reported, so a poll would be self defeating and the result
-//! is cached with a floor on how often it can be refetched. And the answer is
-//! prose meant for a human, not JSON, so parsing is best effort and the raw
-//! text is always kept: when Claude Code rewords something, the panel still has
-//! the authoritative answer to show.
+//! Successful replies are cached for five minutes. The answer is prose meant
+//! for a human, so parsing is best effort and the raw text is always kept.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -27,9 +23,7 @@ use shared_child::SharedChild;
 
 use crate::modules::workspace::WorkspaceEnv;
 
-/// How long a fetched answer stands before another `claude -p` is allowed.
-/// Limits move slowly and every check spends one request.
-const MIN_REFETCH: Duration = Duration::from_secs(600);
+const MIN_REFETCH: Duration = Duration::from_secs(300);
 const TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
@@ -232,8 +226,7 @@ fn fetch() -> Usage {
 /// Tauri command: the subscription's current limit usage.
 ///
 /// `force` bypasses the refetch floor for an explicit refresh. Without it a
-/// cached answer younger than `MIN_REFETCH` is returned untouched, because
-/// every fetch spends a request against the limit it reports.
+/// cached answer younger than `MIN_REFETCH` is returned untouched.
 #[tauri::command]
 pub async fn claude_usage(force: Option<bool>) -> Usage {
     let force = force.unwrap_or(false);
@@ -252,7 +245,7 @@ pub async fn claude_usage(force: Option<bool>) -> Usage {
             ..Usage::default()
         });
     // A failure is not worth caching: the next open should try again rather
-    // than show the same error for ten minutes.
+    // than show the same error for five minutes.
     if usage.error.is_none() {
         *cache().lock().expect("usage cache") = Some((usage.clone(), Instant::now()));
     }

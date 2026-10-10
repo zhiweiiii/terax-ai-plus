@@ -1,45 +1,21 @@
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
-import { LspStatusPill } from "@/modules/lsp";
-import type { WorkspaceEnv } from "@/modules/workspace";
-import { IncognitoIcon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getVersion } from "@tauri-apps/api/app";
-import { useEffect, useState } from "react";
-import { CwdBreadcrumb } from "./CwdBreadcrumb";
-import { DiagnosticsBadge } from "./DiagnosticsBadge";
+import { type ReactNode, useEffect, useState } from "react";
 import { ClaudeProviderButton } from "./ClaudeProviderButton";
 import { ClaudeUsageButton } from "./ClaudeUsageButton";
 import { ScheduleButton } from "./ScheduleButton";
 import { WebStatusBadge } from "./WebStatusBadge";
-import { WorkspaceEnvSelector } from "./WorkspaceEnvSelector";
 
 type Props = {
-  cwd: string | null;
-  filePath?: string | null;
-  home: string | null;
-  onCd: (path: string) => void;
-  onWorkspaceChange: (env: WorkspaceEnv) => void;
+  windowBar: ReactNode;
   onOpenSettings: () => void;
-  privateActive: boolean;
   /** The terminal a queued command runs in. Null when there is none. */
   activeLeafId?: number | null;
 };
 
-export function StatusBar({
-  cwd,
-  filePath,
-  home,
-  onCd,
-  onWorkspaceChange,
-  onOpenSettings,
-  privateActive,
-  activeLeafId,
-}: Props) {
+export function StatusBar({ windowBar, onOpenSettings, activeLeafId }: Props) {
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -57,30 +33,11 @@ export function StatusBar({
   }, []);
 
   return (
-    <footer className="flex h-8 shrink-0 items-center justify-between gap-3 border-t border-border/60 bg-card/60 pl-3 pr-4 text-[11px]">
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        <WorkspaceEnvSelector onSelect={onWorkspaceChange} />
-        <CwdBreadcrumb cwd={cwd} filePath={filePath} home={home} onCd={onCd} />
-        <LspStatusPill filePath={filePath ?? null} />
-        <DiagnosticsBadge filePath={filePath ?? null} />
-        {privateActive ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="flex shrink-0 cursor-default items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10.5px] font-medium text-amber-700 dark:text-amber-400">
-                <HugeiconsIcon icon={IncognitoIcon} size={11} strokeWidth={2} />
-                <span>Private</span>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent
-              side="top"
-              className="max-w-64 text-[11px] leading-relaxed"
-            >
-              Private terminal session. Use it for secrets or SSH.
-            </TooltipContent>
-          </Tooltip>
-        ) : null}
+    <footer className="flex min-h-8 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-border/60 bg-card/60 py-0.5 pl-3 pr-4 text-[11px]">
+      <div className="flex min-w-0 flex-1 basis-60 items-center gap-2">
+        {windowBar}
       </div>
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
         <ClaudeUsageButton />
         <ClaudeProviderButton leafId={activeLeafId ?? null} />
         <ScheduleButton leafId={activeLeafId ?? null} />

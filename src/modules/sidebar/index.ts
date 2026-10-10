@@ -1,4 +1,3 @@
-export { OpenFilesPanel } from "./OpenFilesPanel";
 export type { SidebarViewId } from "./types";
 export {
   useSidebarPanel,

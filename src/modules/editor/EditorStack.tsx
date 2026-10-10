@@ -24,8 +24,7 @@ export function EditorStack({
   onCloseTab,
   onSetMarkdownView,
 }: Props) {
-  // The open set is already capped at MAX_EDITOR_TABS_PER_SPACE when files are
-  // opened, so every open editor tab stays mounted.
+  // Keep buffers mounted until explicitly closed or evicted by the window bar.
   const open = tabs.filter(
     (t): t is EditorTab => t.kind === "editor" && !t.cold,
   );

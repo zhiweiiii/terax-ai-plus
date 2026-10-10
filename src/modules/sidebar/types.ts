@@ -1,1 +1,1 @@
-export type SidebarViewId = "explorer" | "source-control" | "open-files";
+export type SidebarViewId = "explorer" | "source-control";

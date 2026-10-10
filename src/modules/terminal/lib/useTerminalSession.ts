@@ -1,5 +1,5 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
-import { quoteForShell, type ShellKind } from "@/lib/shellQuote";
+import type { ShellKind } from "@/lib/shellQuote";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { terminalInputOwner } from "@/modules/terminal/lib/inputPolicy";
 import { formatDroppedPaths } from "@/modules/terminal/lib/quoteShellPath";
@@ -242,19 +242,6 @@ export function leafWorkspace(leafId: number): WorkspaceEnv | null {
 
 export function leafShellKind(leafId: number): ShellKind {
   return sessions.get(leafId)?.pty?.shellKind ?? "unknown";
-}
-
-export function cdCommandForLeaf(leafId: number, path: string): string {
-  const session = sessions.get(leafId);
-  if (session?.pty && isAgentActivePty(session.pty.id))
-    throw new Error(
-      "Exit the coding agent before changing the shell directory",
-    );
-  const shell = leafShellKind(leafId);
-  const quoted = quoteForShell(path, shell);
-  if (shell === "powershell") return `Set-Location -LiteralPath ${quoted}\r`;
-  if (shell === "cmd") return `cd /d ${quoted}\r`;
-  return `cd -- ${quoted}\r`;
 }
 
 export function navigateFocusedBlocks(dir: -1 | 1): boolean {

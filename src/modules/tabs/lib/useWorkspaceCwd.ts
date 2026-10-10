@@ -55,11 +55,7 @@ export function useWorkspaceCwd(
   const currentTerminalTab = useMemo(() => {
     const t = tabs.find((x) => x.id === activeTab?.id);
     if (t?.kind === "terminal") return t;
-    if (
-      t &&
-      (t.kind === "editor" || t.kind === "markdown" || t.kind === "git-diff") &&
-      t.ownerTabId !== undefined
-    ) {
+    if (t && t.ownerTabId !== undefined) {
       const owner = tabs.find((x) => x.id === t.ownerTabId);
       if (owner?.kind === "terminal" && owner.spaceId === t.spaceId)
         return owner;

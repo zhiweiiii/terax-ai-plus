@@ -288,54 +288,6 @@ export function planFileTabOpen(
   return { tabs: next, tabId };
 }
 
-/** File tabs a single terminal tab keeps open; opening past it closes the oldest. */
-export const MAX_EDITOR_TABS_PER_SPACE = 10;
-
-/**
- * Trims one terminal tab's files back to MAX_EDITOR_TABS_PER_SPACE editor /
- * markdown tabs, closing them in tab order — which is the order they were
- * opened, until tabs are dragged.
- *
- * Files are bucketed by their owning terminal tab (`ownerTabId`). Files with
- * no owner — restored from sessions saved before the owner model — fall back
- * to a per-space bucket so they still get capped.
- *
- * Two tabs are never evicted: the ones named in `keepIds` (the file just
- * opened and whatever is active), and any tab with unsaved edits, since
- * closing one would drop the buffer with no prompt. Both exemptions can leave
- * the bucket above the cap, which is the right way for this to fail.
- */
-export function capEditorTabs(
-  tabs: Tab[],
-  ownerTabId: number | undefined,
-  spaceId: string,
-  keepIds: number[],
-): Tab[] {
-  const isFileTab = (t: Tab): boolean =>
-    t.kind === "editor" || t.kind === "markdown";
-  const files = tabs.filter((t) =>
-    isFileTab(t) && t.spaceId === spaceId
-      ? ownerTabId !== undefined
-        ? t.ownerTabId === ownerTabId
-        : t.ownerTabId === undefined && t.spaceId === spaceId
-      : false,
-  );
-  let over = files.length - MAX_EDITOR_TABS_PER_SPACE;
-  if (over <= 0) return tabs;
-
-  const keep = new Set(keepIds);
-  const evict = new Set<number>();
-  for (const t of files) {
-    if (over <= 0) break;
-    if (keep.has(t.id)) continue;
-    if (t.kind === "editor" && t.dirty) continue;
-    evict.add(t.id);
-    over--;
-  }
-  if (evict.size === 0) return tabs;
-  return tabs.filter((t) => !evict.has(t.id));
-}
-
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : path;
@@ -812,11 +764,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         () => nextIdRef.current++,
         ownerTabId,
       );
-      const next = capEditorTabs(plan.tabs, ownerTabId, targetSpaceId, [
-        plan.tabId,
-        activeIdRef.current,
-      ]);
-      setTabs(next);
+      setTabs(plan.tabs);
       if (activate) setActiveId(plan.tabId);
       return plan.tabId;
     },
@@ -883,12 +831,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         () => nextIdRef.current++,
         owner,
       );
-      const next = capEditorTabs(plan.tabs, owner, activeSpaceIdRef.current, [
-        plan.tabId,
-        activeIdRef.current,
-      ]);
-      if (next !== curr) {
-        setTabs(next);
+      if (plan.tabs !== curr) {
+        setTabs(plan.tabs);
       }
       setActiveId(plan.tabId);
       return plan.tabId;
@@ -1051,18 +995,27 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   );
 
   const closeTab = useCallback(
-    (id: number) => {
+    (
+      id: number,
+      canClose?: (tab: Tab, tabs: readonly Tab[], activeId: number) => boolean,
+    ): boolean => {
       let toDispose: number[] = [];
+      let closed = false;
       setTabs((curr) => {
+        const target = curr.find((t) => t.id === id);
+        if (
+          !target ||
+          (canClose && !canClose(target, curr, activeIdRef.current))
+        )
+          return curr;
         const fallback = nextActiveInSpace(curr, id);
         if (fallback === null) return curr;
-        const target = curr.find((t) => t.id === id);
+        closed = true;
         if (target?.kind === "terminal") {
           toDispose = leafIds(target.paneTree);
         }
         let next = curr.filter((t) => t.id !== id);
-        // Files owned by the closed terminal keep their tabs but detach, so the
-        // Open Files panel shows them under "Unattached" instead of a ghost owner.
+        // Keep owned windows but detach them rather than retaining a ghost owner.
         if (target?.kind === "terminal") {
           next = next.map((t) =>
             t.ownerTabId === id ? { ...t, ownerTabId: undefined } : t,
@@ -1072,6 +1025,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         return next;
       });
       for (const lid of toDispose) disposeSession(lid);
+      return closed;
     },
     [setTabs, setActiveId],
   );

@@ -88,11 +88,12 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 
 底栏显示订阅的 5 小时窗口与周窗口用量。完整说明见 `docs/architecture/agent-sessions-and-usage.md`。数据靠跑 `claude -p "/usage"` 拿，因为**它不在磁盘上**：限额是 API 响应头带回来的，Claude Code 只把它转给 statusLine 命令，`~/.claude` 下没有任何文件存它。transcript 里记的是花掉的 token，那是另一个量，不是"占套餐窗口的百分之多少"。要点：
 
-- **绝不轮询**。查一次用量本身就要消耗一次请求，轮询等于用查询把额度烧掉。后端缓存 10 分钟（`MIN_REFETCH`），打开面板只是读缓存，只有点刷新才真的重查。首屏走 `claude_usage_cached`，不触发任何子进程。
-- **失败不进缓存**，否则一次网络抖动会让面板顶着同一条错误十分钟。
+- 底栏挂载后先读缓存并自动查询，面板关闭也每 5 分钟更新一次，手动刷新保留；成功结果缓存 5 分钟（`MIN_REFETCH`）。自动定时查询强制重读，避免缓存使更新延迟到下一轮。同窗口在途查询合并，卸载释放计时器并拒绝旧回复。
+- **失败不进缓存**。前端保留上次结果及成功时间，并标记更新失败；自动失败不弹 toast，详情可查看错误，手动失败提示。
 - **输出是给人看的自然语言，不是 JSON**。解析只认 `Current session` / `Current week` 两个行首，宽松地抠 `N% used` 和 `resets ...`，其余一律不猜；完整原文始终保留在 `raw` 里，Claude Code 改文案时面板还能把权威答案原样显示出来。
 - 命令写成 `claude -p "/usage"`，`/usage` 必须带引号：Git Bash 会把裸的 `/usage` 当路径翻译成 `D:\program\Git\usage`，这个坑会让人误以为该功能不存在。
-- Codex 则启动一次短生命周期的本机 `codex app-server --stdio`，初始化后请求 `account/rateLimits/read`，读取它返回的短期/长期窗口、重置时间和套餐类型；不读 `~/.codex` 的凭据，也不连接或干预正在运行的 Codex TUI。它与 Claude 一样只在打开面板或手动刷新时查询，并缓存 10 分钟。
+- Codex 则启动一次短生命周期的本机 `codex app-server --stdio`，初始化后请求 `account/rateLimits/read`，读取它返回的短期/长期窗口、重置时间和套餐类型；不读 `~/.codex` 的凭据，也不连接或干预正在运行的 Codex TUI。它与 Claude 同步每 5 分钟更新，成功结果缓存 5 分钟。
+- 常驻信息按 Claude/Codex 两行显示 `5h 用量（重置时间）- 周用量（重置时间）`。Codex 按实际窗口时长匹配 300/10080 分钟，未知时长不冒充 5h/周；时间戳转换为本地月日时分。Claude 周用量优先 all models，识别到本地时区的日期格式时精简为月日时分，未知格式或其他时区保留原文；悬停与详情保留完整 CLI 文本。未知数据使用 `--`，不显示伪造的 0%；窄窗口底栏可换行。
 
 ### 会话历史（`src-tauri/src/modules/sessions.rs`）
 
@@ -134,12 +135,12 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 - **editor/** - CodeMirror 6（`EditorStack` 与 `TerminalStack` 对称）。缓冲区活在 LF 空间，保存时还原原始 EOL（`lib/eol.ts` 多数投票检测）；缩进单位按文件检测（`lib/indent.ts`）。保存时用 `fs_read_file` / `fs_write_file` 返回的磁盘 mtime 做冲突检查（不一致时弹警告并要求显式覆盖，绝不静默 last-writer-wins）。超过 10 MB 的文件提供"仍然打开"（硬上限 50 MB），超过 4 MB 关掉语法高亮与 LSP。保存时格式化的实现在 `lib/externalFormat.ts`。编辑器字号单独存为 `editorFontSize`，不影响 `terminalFontSize`。
 - **explorer/** - 文件树，Material / Catppuccin 图标，键盘导航，行内重命名，右键操作。`basename` 认反斜杠。常驻搜索栏同时匹配**文件名**（模糊，`fs_search`）与**文件内容**（`fs_grep_interactive`）。两者都是模糊的：内容搜索把查询按空白拆成词，要求**每个词都出现在同一行里**（纯子串、不计顺序），而不是把整个查询当一个字面串，后者的效果是打个空格就什么都搜不到。**实现上刻意不用正则**：把词用 `.*?` 串成一个正则表达的是同一个意思，但会让 searcher 失去快路径：单个字面量能用 memchr 大步跳过文件，带空隙的模式则要让自动机逐字节爬完。所以只把**最长的那个词**当字面量交给 searcher 去筛候选行（最长 = 最稀有 = 跳得最多），其余词在活下来的少数行上用 `contains` 校验。大小写沿用 smart case，全小写查询即不区分大小写。两条搜索的 walk 都带 `hidden` + `git_ignore`，所以结果不会冒出隐藏文件或被 git 忽略的文件。工具栏的过滤按钮可开关"隐藏文件"与"git 忽略的文件"。定位按钮会展开当前文件的各级父目录并选中它，也能解析 git-diff / git-commit-file 标签（拼 `repoRoot` + 路径）。
 - **preview/** - 自动探测的开发服务器预览标签（状态栏发现 localhost URL 时提示打开）。
-- **tabs/** - `useTabs` 是标签列表与活动 id 的事实来源。`useWorkspaceCwd` 推导资源管理器根目录、新标签继承的 cwd，以及文件/版本/窗口三个侧栏跟随的当前终端标签。**文件标签归属某个命令行**：每个 editor / markdown 标签带 `ownerTabId` 指向它被打开时所在的终端标签，`capEditorTabs` **按归属**限流（每个终端标签 10 个，最老先驱逐，脏的/刚打开的/活动的保留）。归属信息在序列化和标签移动后仍然保留；关掉终端会让它的文件变成"未归属"。
+- **tabs/** - `useTabs` 是标签列表与活动 id 的事实来源。`useWorkspaceCwd` 推导资源管理器根目录、新标签继承的 cwd，以及文件/版本侧栏和底部窗口栏跟随的当前终端项目。文件、Git 和预览标签通过 `ownerTabId` 归属项目，按空间和项目隔离。旧的固定 10 个文件上限已移除，窗口数量由底部实际宽度决定；归属信息在序列化和标签移动后保留，关掉终端会让它的文件变成未归属。
 - **header/** - 顶栏与行内搜索。`WindowControls` 在 `USE_CUSTOM_WINDOW_CONTROLS` 为真时渲染（Windows 上恒真）。`headerRight` 插槽在窗口控件之前，目前放 `SessionHistoryMenu`（会话历史，见上）。
-- **statusbar/** - 底栏、`CwdBreadcrumb`（处理盘符与 `~`）、web 服务状态徽标、Claude Code 用量（`ClaudeUsageButton`，见下）、Claude Code 供应商面板（`ClaudeProviderButton`：选中一个中转站，把 `$env:ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` 临时写进当前命令行并指向本地网关的 `/p/<id>`）。按钮左侧的徽标显示**当前命令行**走的是哪个供应商，没走网关时不渲染，指向已删除的供应商时转为琥珀色告警。已知中转站有一键预设（`PRESETS`），填完只差 API Key。
+- **statusbar/** - 底部左侧改为 `WindowBar`，首项固定返回当前项目，后续窗口按打开顺序排列。`ResizeObserver` 测量可用宽度，满时自动关闭本项目中最早打开的干净窗口；未保存、活动和最新窗口保留，保护项放不下时允许横向滚动。关闭前重查当前空间、项目、活动状态和 dirty，不处理其他项目或过期测量。右侧保留 web 状态、Claude/Codex 用量、定时消息、版本及设置和供应商面板。供应商徽标只显示当前命令行的配置，删除的供应商显示告警。
 - **shortcuts/** - 快捷键注册表（`shortcuts.ts`）+ `useGlobalShortcuts`。处理函数在 `App.tsx` 里按 id 传入。平台修饰键用 `metaKey || ctrlKey`。
 - **settings/** - 设置 store（`store.ts`，基于 `tauri-plugin-store`）、偏好 hook、设置窗口打开器。**`usePreferencesStore.init()` 必须在每次启动时都跑**，不能只在首次创建空间时跑，否则几十项主窗口设置会被钉死在默认值、且没有变更监听。
-- **sidebar/** - 活动栏与可折叠侧面板。打开的文件面板按当前空间和归属命令行过滤，包含 Git 与预览标签；选择和关闭使用并列按钮，键盘可操作，并显示未保存标记。折叠时只有窗口按钮高亮。宽度只在用户调整时保存，关闭前保留尚未落盘的最新宽度。
+- **sidebar/** - 文件/版本两个可折叠侧面板，原窗口面板移至底栏并删除旧入口。旧的 open-files 偏好回退到文件面板。宽度只在用户调整时保存，关闭前保留尚未落盘的最新宽度。
 - **source-control/** - git 状态 / 暂存 / 提交面板与 diff 流程。丢弃改动跑在文件自己的仓库根上（多仓库安全）；提交忙状态在预检查之前置上，按钮点击即有反应。
 - 仓库菜单 HEAD 使用最新 Git 状态推导，不沿用发现扫描快照，干净仓库也更新分支/detached；checkout 成功后按仓库请求身份重新读取分支列表，旧回复不能回填或清除新 loading。
 - 分支操作后的状态摘要 refresh 使用 force，发起新代次，不合并切换前在途快照；默认刷新仍合并。
@@ -150,7 +151,7 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 - **theme/** - 自研主题引擎（不用 `next-themes`）。`ThemeProvider` + `applyTheme` 写 CSS 变量；内置预设在 `themes/`，可各自声明配套的 `editorTheme`。用户主题走 `customThemes.ts` + `validateTheme.ts`，可选背景图走 `bgImageStore.ts` + `SurfaceLayer`。
 - **updater/** - 默认检查 `zhiweiiii/terax-ai-plus` 的已发布 NSIS 版本并打开手动下载页。只有构建时启用本仓库自己的签名配置才使用 `tauri-plugin-updater`，签名端点不可用时退回手动检查。检查与安装排除重复调用，Update 句柄按挂载代次回收。签名安装分开下载和安装，下载结束后由主窗口检查未保存文件/运行中的终端并等待工作区保存；设置窗口只请求主窗口安装确认，不能绕过保护。
 - **command-palette/** - 命令面板。
-- **spaces/** - 工作区空间/项目（名称、根目录、环境、颜色、按空间持久化标签），走 `useSpaces` 与 `GroupSwitcher`。
+- **spaces/** - 分组由 `useSpaces` 管理，每个命令行标签是一个项目。`GroupSwitcher` 的分组下有二级项目列表，可选择、重命名及关闭，显示运行中的 agent；顶部只常驻当前分组正在运行 agent 的项目，等待输入也保留，退出后收回二级列表。拖动位置从可见项目映射回完整标签，避免隐藏文件影响排序。环境选择器移至顶部分组旁。详见 `docs/architecture/workspace-navigation.md`。
 
 ### UI 约定
 
