@@ -54,7 +54,7 @@ Web 手机桥接是远程 shell，必须设置个人密码，并放在可信网�
 
 项目品牌统一为 awei-work，安装包、辅助命令和源码包名同步更名。应用 bundle id、旧配置键/目录、IPC、shell 环境标识及 Explorer 注册表键保留兼容；否则已有项目、主题、定时任务和窗口记录可能无法读取。旧 `.terax-theme` 文件仍可导入，新文件使用 `.awei-work-theme`；更新检查兼容旧安装包名，不重命名已发布的历史附件。
 
-签名自动更新须同时配置 secret `TAURI_SIGNING_PRIVATE_KEY`、variable `TERAX_UPDATER_PUBLIC_KEY`，有密码时加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。工作流生成临时 overlay 并启用 `VITE_TERAX_SIGNED_UPDATES=true`；不得沿用上游公钥或 SignPath。安装前主窗口检查未保存文件/前台任务并等待工作区保存，设置窗口不能绕过。当前未完成实际签名渠道验收。
+签名自动更新须同时配置 secret `TAURI_SIGNING_PRIVATE_KEY`、variable `AWEI_WORK_UPDATER_PUBLIC_KEY`，有密码时加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。工作流生成临时 overlay 并启用 `VITE_AWEI_WORK_SIGNED_UPDATES=true`；兼容旧公钥 variable 和前端环境变量名称。辅助 CLI 的目标平台配置使用 `AWEI_WORK_CLI_TARGET`，兼容旧 `TERAX_CLI_TARGET`。不得沿用上游公钥或 SignPath。安装前主窗口检查未保存文件/前台任务并等待工作区保存，设置窗口不能绕过。当前未完成实际签名渠道验收。
 
 ## 文档维护
 

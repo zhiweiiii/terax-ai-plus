@@ -28,7 +28,7 @@ jobs:
         shell: pwsh
         env:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          PUBLIC_KEY: ${{ vars.TERAX_UPDATER_PUBLIC_KEY }}
+          PUBLIC_KEY: ${{ vars.AWEI_WORK_UPDATER_PUBLIC_KEY || vars.TERAX_UPDATER_PUBLIC_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
           $signed = -not [string]::IsNullOrWhiteSpace($env:SIGNING_KEY)
@@ -36,7 +36,7 @@ jobs:
           if ($signed -ne $hasPublic) { throw "Configure both signing key and updater public key, or neither" }
           $config = @{ bundle = @{ createUpdaterArtifacts = $signed } }
           if ($signed) { $config.plugins = @{ updater = @{ pubkey = $env:PUBLIC_KEY } } }
-          $configPath = Join-Path $env:RUNNER_TEMP "terax-release.json"
+          $configPath = Join-Path $env:RUNNER_TEMP "awei-work-release.json"
           $config | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $configPath -Encoding utf8
           "args=--config `"$configPath`"" | Out-File $env:GITHUB_OUTPUT -Append
           "signed=$($signed.ToString().ToLowerInvariant())" | Out-File $env:GITHUB_OUTPUT -Append
@@ -47,7 +47,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          VITE_TERAX_SIGNED_UPDATES: ${{ steps.channel.outputs.signed }}
+          VITE_AWEI_WORK_SIGNED_UPDATES: ${{ steps.channel.outputs.signed }}
         with:
           tauriScript: pnpm tauri
           args: ${{ steps.channel.outputs.args }}

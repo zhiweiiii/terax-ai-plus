@@ -9,7 +9,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const LAST_CHECK_KEY = "terax-plus:updater:last-check";
 const CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const RELEASES_URL = "https://github.com/zhiweiiii/awei-work/releases";
-const SIGNED_UPDATES = import.meta.env.VITE_TERAX_SIGNED_UPDATES === "true";
+const SIGNED_UPDATES =
+  (import.meta.env.VITE_AWEI_WORK_SIGNED_UPDATES ??
+    import.meta.env.VITE_TERAX_SIGNED_UPDATES) === "true";
 
 type ManualUpdate = {
   manual: true;

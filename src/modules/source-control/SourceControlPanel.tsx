@@ -101,6 +101,7 @@ import type {
 } from "./useMultiRepoSourceControl";
 import type { RepoStatusEntry } from "./useRepoStatuses";
 import type { SourceControlSummary } from "./useSourceControl";
+import { changeTreeRows, type ChangeTreeRow } from "./lib/changeTree";
 import {
   type CheckState,
   type SourceControlFileEntry,
@@ -267,25 +268,11 @@ type RowDescriptor =
       collapsed: boolean;
     }
   | { kind: "list-header"; key: string; count: number }
-  | {
-      kind: "folder-header";
-      key: string;
-      label: string;
-      count: number;
-      collapsed: boolean;
-    }
-  | { kind: "entry"; key: string; entry: SourceControlFileEntry };
+  | ChangeTreeRow;
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : path;
-}
-
-function dirname(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  const index = normalized.lastIndexOf("/");
-  if (index <= 0) return "";
-  return normalized.slice(0, index);
 }
 
 function upstreamBadgeLabel(upstream: string | null | undefined): string {
@@ -930,34 +917,8 @@ function ScopedSourceControlPanel({
         files: SourceControlFileEntry[],
         repoKey: string,
       ) => {
-        const groups = new Map<string, SourceControlFileEntry[]>();
-        for (const entry of files) {
-          const dir = dirname(entry.path);
-          const bucket = groups.get(dir);
-          if (bucket) bucket.push(entry);
-          else groups.set(dir, [entry]);
-        }
-        const sortedDirs = [...groups.keys()].sort((a, b) => {
-          if (a === "" && b !== "") return -1;
-          if (b === "" && a !== "") return 1;
-          return a.localeCompare(b);
-        });
-        for (const dir of sortedDirs) {
-          const entries = groups.get(dir) ?? [];
-          const folderKey = `${repoKey}:folder:${dir}`;
-          const collapsed = collapsedGroups.has(folderKey);
-          result.push({
-            kind: "folder-header",
-            key: folderKey,
-            label: dir || "(root)",
-            count: entries.length,
-            collapsed,
-          });
-          if (collapsed) continue;
-          for (const entry of entries) {
-            result.push({ kind: "entry", key: entry.key, entry });
-          }
-        }
+        for (const row of changeTreeRows(files, repoKey, collapsedGroups))
+          result.push(row);
       };
 
       // Multi-repo: a repo header above each repo's own folder grouping, so a
@@ -1895,7 +1856,8 @@ function FolderHeader({
       type="button"
       onClick={() => onToggle(row.key)}
       aria-expanded={!row.collapsed}
-      title={row.label}
+      title={row.path || "(root)"}
+      style={{ paddingLeft: 12 + row.depth * 16 }}
       className="flex h-6 w-full cursor-pointer items-center gap-2 px-3 text-left hover:bg-foreground/[0.03]"
     >
       <HugeiconsIcon
@@ -1991,10 +1953,10 @@ const EntryRow = memo(function EntryRow({
           data-selected={isSelected || undefined}
           role="option"
           aria-selected={isSelected}
+          style={{ paddingLeft: 12 + row.depth * 16 }}
           onMouseDown={() => onFocusRow(row.key)}
           className={cn(
             "group relative flex h-[30px] items-center gap-2 rounded-md pr-2 transition-all duration-100",
-            dirname(entry.path) ? "pl-5" : "pl-2",
             focused
               ? "bg-accent/60"
               : isSelected

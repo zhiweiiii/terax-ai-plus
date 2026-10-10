@@ -36,7 +36,7 @@ const MAX_PENDING: usize = 4 * 1024 * 1024;
 // Hard reset (ESC c) + dim notice. Written verbatim into the stream when
 // we're forced to discard backlog.
 const OVERFLOW_NOTICE: &[u8] =
-    b"\x1bc\x1b[2m[terax: dropped output due to backpressure]\x1b[0m\r\n";
+    b"\x1bc\x1b[2m[awei-work: dropped output due to backpressure]\x1b[0m\r\n";
 
 /// A full queue disconnects its viewer rather than blocking PTY output.
 const WEB_SUB_QUEUE: usize = 64;

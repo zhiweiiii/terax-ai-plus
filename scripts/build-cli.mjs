@@ -47,6 +47,7 @@ function requireArtifact(path, label) {
 }
 
 const target =
+  process.env.AWEI_WORK_CLI_TARGET?.trim() ||
   process.env.TERAX_CLI_TARGET?.trim() ||
   process.env.CARGO_BUILD_TARGET?.trim() ||
   hostTriple();

@@ -396,7 +396,7 @@ fn fetch_codex() -> CodexUsage {
     let initialize = json!({
         "id": 1,
         "method": "initialize",
-        "params": { "clientInfo": { "name": "terax", "version": env!("CARGO_PKG_VERSION") } }
+        "params": { "clientInfo": { "name": "awei-work", "version": env!("CARGO_PKG_VERSION") } }
     });
     let read_limits = json!({
         "id": 2,
