@@ -8,7 +8,7 @@ terax-ai-plus 是一个方向明确、由个人维护的分支项目。欢迎贡
 
 - 评审带宽有限。
 - 不是每个贡献都能被接受，哪怕技术上是对的。方向一致和代码质量同等重要。
-- 范围和方向见 [ROADMAP.md](ROADMAP.md)。开任何非琐碎的东西之前先读它。
+- 范围和开发规则见 [TERAX.md](TERAX.md)。开任何非琐碎的东西之前先读它。
 - 上游是 [crynta/terax-ai](https://github.com/crynta/terax-ai)。如果你的改动对上游也成立，优先提给上游。
 
 个人项目就是这样，PR 被拒不是针对人。

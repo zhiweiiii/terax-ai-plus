@@ -4,6 +4,8 @@ import type { EditorTab, Tab } from "@/modules/tabs";
 import type { SpaceMeta } from "@/modules/spaces/lib/store";
 import { useEffect, useRef } from "react";
 import { EditorPane, type EditorPaneHandle } from "./EditorPane";
+import { MediaPane } from "@/modules/editor/MediaPane";
+import { mediaKind } from "@/modules/editor/lib/mediaKind";
 
 type Props = {
   spaces: readonly SpaceMeta[];
@@ -102,6 +104,7 @@ export function EditorStack({
         const space = spaces.find((item) => item.id === t.spaceId);
         if (!space) return null;
         const visible = t.id === activeId;
+        const kind = mediaKind(t.path);
         return (
           <div
             key={t.id}
@@ -120,14 +123,23 @@ export function EditorStack({
                   renderedHint="Save to preview"
                 />
               )}
-              <EditorPane
-                workspace={space.env}
-                ref={getRefCallback(t.id)}
-                path={t.path}
-                overrideLanguage={t.overrideLanguage}
-                onDirtyChange={getDirtyCallback(t.id)}
-                onClose={getCloseCallback(t.id)}
-              />
+              {kind ? (
+                <MediaPane
+                  path={t.path}
+                  workspace={space.env}
+                  kind={kind}
+                  visible={visible}
+                />
+              ) : (
+                <EditorPane
+                  workspace={space.env}
+                  ref={getRefCallback(t.id)}
+                  path={t.path}
+                  overrideLanguage={t.overrideLanguage}
+                  onDirtyChange={getDirtyCallback(t.id)}
+                  onClose={getCloseCallback(t.id)}
+                />
+              )}
             </div>
           </div>
         );

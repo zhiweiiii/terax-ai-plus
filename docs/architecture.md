@@ -1,0 +1,62 @@
+# 架构与项目窗口
+
+Terax 是面向 Claude Code / Codex 的 Windows 终端工作区，支持本机和 WSL。Rust/Tauri 负责系统访问，React webview 负责界面；不内置另一套 AI agent 运行时。
+
+## 代码入口
+
+- `src/app/App.tsx`：连接模块、协调项目与窗口，不放领域实现。
+- `src/modules/terminal/`：PTY 桥接、xterm、分屏和输入策略，详见 [终端](terminal.md)。
+- `src/modules/spaces/`、`tabs/`：分组、标签和持久化。
+- `src/modules/editor/`、`explorer/`、`markdown/`：文件、编辑和预览。
+- `src/modules/source-control/`、`git-history/`：Git 界面；原生实现位于 `src-tauri/src/modules/git/`。
+- `src/web/`、`src-tauri/src/modules/web/`：手机页面与桥接，详见 [手机端](mobile.md)。
+- `src-tauri/src/modules/sessions.rs`、`usage.rs`、`schedule/`、`gateway/`：agent 配套功能，详见 [Agent](agents.md)。
+- `src/modules/settings/`、`theme/`、`lsp/`、`updater/`：配置及按需能力。
+
+## 系统边界
+
+文件、进程、网络、PTY 和 Git 操作通过 Tauri `invoke()` 或已授权插件执行。命令注册以 `src-tauri/src/lib.rs` 为准，不维护容易过时的重复命令目录。插件权限在 `src-tauri/capabilities/`，不能替代应用命令的参数、路径和工作区校验。
+
+新增命令放入所属原生模块，阻塞 IO/进程等待进入 blocking 池；注册后补带类型的前端封装。沿用工作区授权、输入上限、超时和进程树回收。已有命令封装优先复用 `src/lib/native.ts`。密钥和用户正文不进入诊断日志。
+
+## 分组、项目与窗口
+
+分组对应 Space，项目对应 terminal 标签，`useTabs` 是标签及活动 ID 的事实来源。文件、Markdown、网页、Git 窗口通过 `ownerTabId` 归属项目，并同时按 `spaceId` 隔离。
+
+分组按钮在原菜单内向下展开项目，再点收起；展开激活分组，选择项目切换其所属空间。顶部只常驻运行 agent 的项目，跨分组显示，图标仅为分组首字。拖动只改变排序，不改变归属。分屏任一面板运行 agent 即保留项目，进程退出才收纳。
+
+底部窗口栏首项返回当前项目，其余按打开顺序排列。文件单击默认持久打开，不覆盖旧窗口；去重与显式预览槽只在当前项目复用。关闭活动文件优先同项目窗口，否则返回所属终端。文件树的打开标识使用同一作用域。
+
+窗口栏按实际宽度关闭最旧的干净窗口，保留活动、最新和未保存窗口；保护项放不下时横向滚动。关闭前用最新作用域及 dirty 状态复核，隐藏的零宽度不触发驱逐。
+
+## 持久化与恢复
+
+空间状态保存标签、面板树、目录、文件归属及最近使用时间。写入串行化，关闭前等待磁盘保存；失败保留窗口。恢复校验结构、枚举、重复 ID 和有界面板树，损坏记录不被默认值覆盖。
+
+重启跨分组暖启动最近 5 个非私密项目，其余保持冷标签。每个项目只自动恢复上次活动面板已确认的 Claude/Codex 会话，不按最新历史猜测，也不重放消息。旧版无会话身份的项目需升级后先运行会话并正常保存，详见 [Agent](agents.md)。
+
+## 文件、媒体与 Git
+
+编辑缓冲统一 LF，保存还原原始 EOL。普通读取限 10 MB，明确继续读取最多 50 MB，大文件降级语法/LSP。保存与格式化串行，按文档代次拒绝旧结果，mtime 冲突要求确认；这不是外部进程事务锁。
+
+图片、视频、音频和 PDF 沿用 editor 标签，由 `EditorStack` 按扩展名选择 `MediaPane`。路径按所属工作区 canonicalize，再用 asset 协议加载，不完整读取媒体正文或启动文本编辑器。失败有提示和手动系统打开入口，隐藏音视频暂停；视频解码取决于 WebView2。
+
+文件事件携带执行环境，目录树、编辑器和 Git 只重读匹配范围。监听通过注册句柄释放，不依赖目录仍存在；事件溢出明确 rescan。Windows 路径身份统一大小写/分隔符，Linux 保留大小写，UNC 与 WSL 路径不混用。
+
+Changes 按文件完整父目录分组，根目录独立，单文件目录也可折叠；多仓库同名目录不合并。提交与分支操作固定仓库/环境，并用同步门闩拒绝重复操作；切换后旧回复不回填。检出后强制刷新 HEAD 与分支列表。
+
+拉取只允许快进；推送前复核 HEAD、分支及 upstream，批量失败逐仓库报告。改写当前提交说明使用 `amend --only` 保持暂存区，不擅自 abort 或重置外部冲突。差异统一 LF，CodeMirror 配置 `scanLimit: 10000`、`timeout: 200`，预算耗尽允许粗略结果。差异缓存有范围身份及 6 项/8 MiB 双预算。
+
+## 其他按需能力
+
+LSP 没有根标记就不启动，每个服务器最多 4 个会话，闲置 3 分钟回收；启停代次、文档身份与 transport 身份隔离。初始化失败清理并退避，当前不支持 WSL。
+
+网页预览只接受 HTTP/HTTPS，拒绝凭据、控制字符及内部应用 origin；入口拒绝 iframe 内启动。Markdown 使用安全 HTML/协议过滤，项目文件链接重新校验后打开，不允许内容直接执行宿主操作。
+
+设置启动时总是初始化，单窗口读改写串行，旧加载不覆盖新选择；跨窗口仍非事务。背景对象 URL、监听、动画和异步句柄均在切换/卸载时释放。
+
+## 本地 CLI
+
+应用运行时，原生面板中可用 `terax open <file> [--line N] [--no-focus] [--json]`，以及 `ping`、`capabilities`、`identify`。调用优先绑定发起面板所属空间；明确面板已关闭时失败，不转到其他项目。
+
+`control.rs` 使用临时回环 TCP 端口与随机令牌，用户缓存中的 `terax/control.json` 用于发现。消息上限 64 KiB，连接与待处理 UI 请求各限 32；每次转发使用独立编号，关闭释放等待者。文件必须为授权目录内普通文件，凭据不输出。辅助 CLI 随包分发，不全局安装，不能拉起未运行的应用，目前不向 WSL 注入控制凭据。

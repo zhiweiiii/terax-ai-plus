@@ -770,27 +770,12 @@ function ProjectGroupIcon({
     (state) =>
       state.spaces.find((space) => space.id === tab.spaceId)?.name ?? "Group",
   );
-  const status = useTabAgentStatus(tab);
   return (
     <span
       title={`${name}${tab.private ? " (private)" : ""}`}
-      className="relative flex size-4 shrink-0 items-center justify-center rounded bg-foreground/10 text-[10px] font-medium"
+      className="flex size-4 shrink-0 items-center justify-center rounded bg-foreground/10 text-[10px] font-medium"
     >
       {Array.from(name.trim())[0] ?? "G"}
-      {status.state && (
-        <span
-          role="img"
-          aria-label={status.state}
-          className={cn(
-            "absolute -right-0.5 -bottom-0.5 size-1.5 rounded-full ring-1 ring-card",
-            status.state === "attention"
-              ? "bg-amber-500"
-              : status.state === "finished"
-                ? "bg-emerald-500"
-                : "bg-primary",
-          )}
-        />
-      )}
     </span>
   );
 }

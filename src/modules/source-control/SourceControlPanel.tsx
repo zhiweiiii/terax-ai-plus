@@ -288,14 +288,6 @@ function dirname(path: string): string {
   return normalized.slice(0, index);
 }
 
-/** First path segment of a repo-relative path; "" for files at the repo root. */
-function topLevelDir(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  const index = normalized.indexOf("/");
-  if (index <= 0) return "";
-  return normalized.slice(0, index);
-}
-
 function upstreamBadgeLabel(upstream: string | null | undefined): string {
   if (!upstream) return "No upstream";
   return upstream;
@@ -934,15 +926,13 @@ function ScopedSourceControlPanel({
         key: "list-header",
         count: changedCount,
       });
-      // Group entries by their top-level directory (like IDEA's Changes view).
-      // Only insert a folder header when >=2 files share the same folder.
       const pushByFolder = (
         files: SourceControlFileEntry[],
         repoKey: string,
       ) => {
         const groups = new Map<string, SourceControlFileEntry[]>();
         for (const entry of files) {
-          const dir = topLevelDir(entry.path);
+          const dir = dirname(entry.path);
           const bucket = groups.get(dir);
           if (bucket) bucket.push(entry);
           else groups.set(dir, [entry]);
@@ -956,15 +946,13 @@ function ScopedSourceControlPanel({
           const entries = groups.get(dir) ?? [];
           const folderKey = `${repoKey}:folder:${dir}`;
           const collapsed = collapsedGroups.has(folderKey);
-          if (entries.length > 1) {
-            result.push({
-              kind: "folder-header",
-              key: folderKey,
-              label: dir || "(root)",
-              count: entries.length,
-              collapsed,
-            });
-          }
+          result.push({
+            kind: "folder-header",
+            key: folderKey,
+            label: dir || "(root)",
+            count: entries.length,
+            collapsed,
+          });
           if (collapsed) continue;
           for (const entry of entries) {
             result.push({ kind: "entry", key: entry.key, entry });
@@ -1907,6 +1895,7 @@ function FolderHeader({
       type="button"
       onClick={() => onToggle(row.key)}
       aria-expanded={!row.collapsed}
+      title={row.label}
       className="flex h-6 w-full cursor-pointer items-center gap-2 px-3 text-left hover:bg-foreground/[0.03]"
     >
       <HugeiconsIcon

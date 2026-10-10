@@ -22,11 +22,11 @@
 
 Windows 桌面：项目文件与 Codex 终端区域。
 
-![Windows 桌面中的文件树与 Codex 终端](docs/screenshots/desktop-codex.png)
+![Windows 桌面中的文件树与 Codex 终端](docs/desktop-codex.png)
 
 手机对话视图：当前页面渲染的演示内容，不是私人会话或真实模型调用。
 
-<img src="docs/screenshots/mobile-codex.png" width="300" alt="手机端 Codex 对话、工具结果与发送区" />
+<img src="docs/mobile-codex.png" width="300" alt="手机端 Codex 对话、工具结果与发送区" />
 
 ## 快速开始
 

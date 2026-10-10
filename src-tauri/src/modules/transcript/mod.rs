@@ -6,7 +6,7 @@
 //! Every supported agent persists the conversation in a structured
 //! form, so the conversation is read from there and the screen is left to do
 //! the one thing only it knows: what the program is asking you to pick right
-//! now (see `docs/architecture/mobile-conversation-view.md`).
+//! now (see `docs/mobile.md`).
 //!
 //! Three backends, one shape:
 //!
