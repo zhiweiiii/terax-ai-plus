@@ -22,7 +22,7 @@
 
 ## 架构指南
 
-- [分组、项目与窗口栏](architecture/workspace-navigation.md) - 二级项目收纳、运行中 agent 常驻、底部窗口与宽度驱逐保护。
+- [分组、项目与窗口栏](architecture/workspace-navigation.md) - 分组原地展开、跨分组活动项目、底部窗口、文件标识与宽度驱逐保护。
 
 - [可靠性与发布](architecture/reliability-and-releases.md) - 输入归属与诊断、会话绑定、增量缓存、手机确认与本仓库更新渠道。
 

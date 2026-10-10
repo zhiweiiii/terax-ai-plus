@@ -34,6 +34,8 @@ Terax 是两个进程：Rust 后端（`src-tauri/`）和 webview 前端（`src/`
 长生命周期的交互式终端会话。
 
 - `pty_open` - 新建 PTY 会话，返回 `{ id, shellKind }`，引用类型来自实际启动的 shell
+- `pty_agent_session` - blocking 池读取特定 PTY 已确认的 Claude/Codex 会话 ID/cwd，仅使用本机历史，不解析整段对话
+- `agent_resume_command` - blocking 池核对已保存 UUID、agent 和目录归属，返回固定恢复命令；缺失记录/非法参数/WSL 不启动新对话
 - `pty_write` - 发送输入字节（文本或控制序列）
 - `pty_resize` - 调整 PTY 尺寸
 - `pty_close` / `pty_close_all` - 销毁一个或全部会话

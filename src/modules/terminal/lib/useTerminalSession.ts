@@ -1,4 +1,6 @@
 import { ensureMonoFontsLoaded } from "@/lib/fonts";
+import { pathIdentity } from "@/lib/pathIdentity";
+import type { AgentResume } from "@/modules/spaces/lib/projectRestore";
 import type { ShellKind } from "@/lib/shellQuote";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { terminalInputOwner } from "@/modules/terminal/lib/inputPolicy";
@@ -112,6 +114,8 @@ type Session = {
   // A command was submitted on this leaf; kills the watermark synchronously,
   // before the shell's OSC 133 C round-trips through the PTY.
   everSubmitted: boolean;
+  restoringAgent: boolean;
+  manualInput: boolean;
   // True if the slot was in alt-screen mode (TUI like vim, htop, dofek)
   // at the most recent release. Read once on the next bind to trigger a
   // SIGWINCH-driven repaint instead of replaying dormant bytes.
@@ -173,6 +177,80 @@ export function whenSessionReady(
   });
 }
 
+export async function resumeAgentInLeaf(
+  leafId: number,
+  saved: AgentResume,
+  workspace: WorkspaceEnv,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const command = await invoke<string>("agent_resume_command", {
+    ...saved,
+    workspace,
+  });
+  if (!isCurrent()) return;
+  const deadline = Date.now() + 20000;
+  let session = sessions.get(leafId);
+  while (
+    isCurrent() &&
+    !session?.disposed &&
+    !session?.shellExited &&
+    (!session?.container || !session.pty) &&
+    Date.now() < deadline
+  ) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    session = sessions.get(leafId);
+  }
+  if (!isCurrent()) return;
+  if (
+    !session ||
+    session.disposed ||
+    session.shellExited ||
+    !session.container ||
+    !session.pty
+  )
+    throw new Error("Restored terminal did not become available");
+  session.restoringAgent = true;
+  try {
+    if (!session.hasSlot) {
+      bindLeafToSlot(leafId, session);
+      if (!session.visibleNow) parkLeafSlot(leafId);
+    }
+    await whenSessionReady(leafId, Math.max(1, deadline - Date.now()));
+    if (!isCurrent() || sessions.get(leafId) !== session) return;
+    if (
+      !session?.pty ||
+      session.disposed ||
+      session.shellExited ||
+      !readyLeaves.has(leafId)
+    )
+      throw new Error(
+        "Terminal shell did not become ready; session was not started",
+      );
+    if (
+      session.manualInput ||
+      session.everSubmitted ||
+      session.commandRunning ||
+      isAgentActivePty(session.pty.id)
+    )
+      throw new Error(
+        "Terminal is already running a command; automatic resume was skipped",
+      );
+    if (
+      !session.lastCwd ||
+      pathIdentity(session.lastCwd) !== pathIdentity(saved.cwd)
+    )
+      throw new Error(
+        "Terminal directory changed; automatic resume was skipped",
+      );
+    await session.pty.write(`${command}\r`);
+    session.everSubmitted = true;
+    onLeafCommandState(leafId, true);
+  } finally {
+    session.restoringAgent = false;
+    scheduleHiddenRelease(leafId, session);
+  }
+}
+
 const PENDING_INPUT_MAX = 256 * 1024;
 
 // Input typed before the pty attaches is queued and flushed on attach. Cap the
@@ -192,6 +270,7 @@ function observePty(operation: Promise<unknown>, action: string): void {
 export function writeToSession(leafId: number, data: string): boolean {
   const s = sessions.get(leafId);
   if (!s || s.shellExited) return false;
+  s.manualInput = true;
   if (s.pty) {
     observePty(s.pty.write(data), "write");
     return true;
@@ -202,6 +281,7 @@ export function writeToSession(leafId: number, data: string): boolean {
 export function submitToLeaf(leafId: number, text: string): boolean {
   const s = sessions.get(leafId);
   if (!s || s.shellExited) return false;
+  s.manualInput = true;
   // Bracketed paste keeps a multiline command atomic; trailing CR runs it.
   const data = text.includes("\n")
     ? `\x1b[200~${text}\x1b[201~\r`
@@ -220,6 +300,7 @@ export function submitToLeaf(leafId: number, text: string): boolean {
 export function pasteToLeaf(leafId: number, text: string): boolean {
   const s = sessions.get(leafId);
   if (!s || s.shellExited) return false;
+  s.manualInput = true;
   const data = `\x1b[200~${text}\x1b[201~`;
   if (s.pty) observePty(s.pty.write(data), "write");
   else if (!queuePendingInput(s, data)) return false;
@@ -304,7 +385,10 @@ export function getLeafDraft(leafId: number): string {
 
 export function setLeafDraft(leafId: number, text: string): void {
   const s = sessions.get(leafId);
-  if (s) s.inputDraft = text;
+  if (s) {
+    if (s.inputDraft !== text) s.manualInput = true;
+    s.inputDraft = text;
+  }
 }
 
 export function setLeafInputActivity(leafId: number, active: boolean): void {
@@ -401,7 +485,11 @@ export function snapshotLeaf(leafId: number): string | null {
 }
 
 function leafBusy(s: Session): boolean {
-  return s.commandRunning || (s.pty !== null && isAgentActivePty(s.pty.id));
+  return (
+    s.restoringAgent ||
+    s.commandRunning ||
+    (s.pty !== null && isAgentActivePty(s.pty.id))
+  );
 }
 
 const HIDDEN_RELEASE_DELAY_MS = 300;
@@ -526,6 +614,10 @@ ensureAgentActivityListener((ptyId) => {
 });
 
 configureRendererPool({
+  onUserInput(leafId) {
+    const session = sessions.get(leafId);
+    if (session) session.manualInput = true;
+  },
   async formatNativeLeafPaths(leafId, paths) {
     const session = sessions.get(leafId);
     if (!session || session.disposed || session.shellExited) return null;
@@ -626,6 +718,7 @@ configureRendererPool({
   },
   pasteLeafInput(leafId, text) {
     const s = sessions.get(leafId);
+    if (s) s.manualInput = true;
     if (!s || s.disposed || terminalInputOwner(s) !== "shell") return false;
     if (s.inputPaste) return s.inputPaste(text);
     s.inputDraft += text;
@@ -692,6 +785,8 @@ function ensureSession(
     inputDraft: "",
     inputActive: false,
     everSubmitted: false,
+    restoringAgent: false,
+    manualInput: false,
     altScreenAtRelease: false,
     commandRunning: false,
     foregroundBusy: false,

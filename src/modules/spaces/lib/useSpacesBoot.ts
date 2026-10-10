@@ -10,6 +10,7 @@ import { activeSpaceEnv, freshTabCwd } from "./activeSpace";
 import { freshTerminalTab, hydrateTabs } from "./serialize";
 import { loadAll, type SpaceMeta, saveActiveId, saveSpacesList } from "./store";
 import { useSpaces } from "./useSpaces";
+import { prepareProjectRestore } from "@/modules/spaces/lib/projectRestore";
 
 type Params = {
   ready: boolean;
@@ -135,7 +136,10 @@ export function useSpacesBoot({
         const inActive = restored.filter((t) => t.spaceId === active);
         const idx = states.get(active)?.activeTabIndex ?? 0;
         const activeTab = inActive[idx] ?? inActive[0] ?? restored[0];
-        replaceTabs(restored, activeTab.id);
+        replaceTabs(
+          prepareProjectRestore(restored, activeTab.id),
+          activeTab.id,
+        );
       } catch (e) {
         console.error("[terax] spaces boot failed:", e);
         if (mounted.current) errorToast("加载工作区失败，原始数据已保留", e);

@@ -5,7 +5,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { errorToast } from "@/lib/errorToast";
-import { ChartLineData01Icon, Refresh01Icon } from "@hugeicons/core-free-icons";
+import { Refresh01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -44,7 +44,6 @@ type CodexUsage = {
   error: string | null;
 };
 
-/** Where a window stops being worth a neutral colour. */
 const WARN_AT = 75;
 const DANGER_AT = 90;
 const REFRESH_INTERVAL = 5 * 60 * 1000;
@@ -73,7 +72,7 @@ function toneOf(percent: number | null): string {
   if (percent === null) return "text-muted-foreground";
   if (percent >= DANGER_AT) return "text-destructive";
   if (percent >= WARN_AT) return "text-amber-700 dark:text-amber-400";
-  return "text-foreground";
+  return "text-emerald-700 dark:text-emerald-400";
 }
 
 function barOf(percent: number): string {
@@ -129,7 +128,7 @@ function preserveOnError<T extends { error: string | null }>(
 function compactTextResetLabel(value: string | null): string | null {
   if (!value) return null;
   const match = value.match(
-    /^([a-z]{3})\s+(\d{1,2}),?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s+\(([^()]+)\))?$/i,
+    /^(?:([a-z]{3})\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s+\(([^()]+)\))?$/i,
   );
   if (!match) return value;
   const [, month, day, hour, minute = "00", period, zone] = match;
@@ -146,11 +145,9 @@ function compactTextResetLabel(value: string | null): string | null {
     "oct",
     "nov",
     "dec",
-  ].indexOf(month.toLowerCase());
+  ].indexOf(month?.toLowerCase());
   if (
-    monthIndex < 0 ||
-    Number(day) < 1 ||
-    Number(day) > 31 ||
+    (month && (monthIndex < 0 || Number(day) < 1 || Number(day) > 31)) ||
     Number(hour) < 1 ||
     Number(hour) > 12 ||
     Number(minute) > 59 ||
@@ -158,7 +155,20 @@ function compactTextResetLabel(value: string | null): string | null {
   )
     return value;
   const hour24 = (Number(hour) % 12) + (period.toLowerCase() === "pm" ? 12 : 0);
-  return `${String(monthIndex + 1).padStart(2, "0")}/${day.padStart(2, "0")} ${String(hour24).padStart(2, "0")}:${minute}`;
+  const date =
+    month && day
+      ? `${String(monthIndex + 1).padStart(2, "0")}/${day.padStart(2, "0")} `
+      : "";
+  return `${date}${String(hour24).padStart(2, "0")}:${minute}`;
+}
+
+function summaryResetLabel(
+  value: string | null,
+  period: "short" | "week",
+): string {
+  const compact = compactTextResetLabel(value);
+  const match = compact?.match(/^(?:(\d{2}\/\d{2})\s+)?(\d{2}:\d{2})$/);
+  return (period === "short" ? match?.[2] : match?.[1]) ?? "--";
 }
 
 export function ClaudeUsageButton() {
@@ -277,12 +287,7 @@ export function ClaudeUsageButton() {
           title={summaryTitle}
           aria-label="Claude Code 与 Codex 用量"
         >
-          <HugeiconsIcon
-            icon={ChartLineData01Icon}
-            size={12}
-            strokeWidth={1.75}
-          />
-          <span className="flex min-w-0 flex-col items-start gap-0.5 leading-[11px] tabular-nums">
+          <span className="flex min-w-0 items-center gap-2 whitespace-nowrap tabular-nums">
             <UsageSummary
               agent="Claude"
               shortPercent={session?.percent ?? null}
@@ -422,19 +427,15 @@ function UsageSummary({
     percent === null ? "--" : `${percent}%`;
   const title = `${agent}${error ? " 更新失败" : ""} 5h ${percentLabel(shortPercent)}（${shortReset || "--"}）- 周 ${percentLabel(weekPercent)}（${weekReset || "--"}）`;
   return (
-    <span className="block max-w-full truncate" title={title}>
-      <span>
-        {agent}
-        {error ? " 更新失败" : ""}{" "}
+    <span className="min-w-0 truncate" title={title}>
+      <span className={error ? "text-destructive" : undefined}>
+        {agent === "Claude" ? "C" : "O"}
+        {error ? "!" : ""}:5h-
       </span>
-      <span className={toneOf(shortPercent)}>
-        5h {shortPercent === null ? "--" : `${shortPercent}%`}
-      </span>
-      <span>（{compactTextResetLabel(shortReset) || "--"}）- </span>
-      <span className={toneOf(weekPercent)}>
-        周 {weekPercent === null ? "--" : `${weekPercent}%`}
-      </span>
-      <span>（{compactTextResetLabel(weekReset) || "--"}）</span>
+      <span className={toneOf(shortPercent)}>{percentLabel(shortPercent)}</span>
+      <span>({summaryResetLabel(shortReset, "short")}) 周-</span>
+      <span className={toneOf(weekPercent)}>{percentLabel(weekPercent)}</span>
+      <span>({summaryResetLabel(weekReset, "week")})</span>
     </span>
   );
 }

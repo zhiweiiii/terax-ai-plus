@@ -355,6 +355,44 @@ pub(crate) fn resolve_session_file(
     }
     (candidates.len() == 1).then(|| candidates.remove(0))
 }
+
+pub(crate) fn session_id_for_file(path: &Path, agent: &str, cwd: &str) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    let header = session_header(path, agent, &metadata)?;
+    (valid_id(&header.id) && crate::modules::transcript::same_dir(&header.cwd, cwd))
+        .then_some(header.id)
+}
+
+#[tauri::command]
+pub async fn agent_resume_command(
+    cwd: String,
+    agent: String,
+    id: String,
+    workspace: Option<crate::modules::workspace::WorkspaceEnv>,
+) -> Result<String, String> {
+    if !matches!(agent.as_str(), "claude" | "codex")
+        || !valid_id(&id)
+        || cwd.is_empty()
+        || cwd.len() > 32768
+        || cwd.chars().any(char::is_control)
+    {
+        return Err("Invalid saved agent session".into());
+    }
+    if crate::modules::workspace::WorkspaceEnv::from_option(workspace).is_wsl() {
+        return Err("Automatic session restore is not available for WSL history".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_session_file(&cwd, &agent, Some(&id), UNIX_EPOCH)
+            .ok_or("Saved agent session is missing or belongs to another directory")?;
+        Ok(if agent == "claude" {
+            format!("claude --resume {id}")
+        } else {
+            format!("codex resume {id}")
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
 #[tauri::command]
 pub async fn agent_sessions(
     cwd: String,

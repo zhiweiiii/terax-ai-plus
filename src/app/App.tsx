@@ -1,5 +1,6 @@
 import { useGroupDeleteGuard } from "@/app/hooks/useGroupDeleteGuard";
 import { useLaunchFiles } from "@/app/hooks/useLaunchFiles";
+import { useProjectAgentRestore } from "@/app/hooks/useProjectAgentRestore";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -27,6 +28,7 @@ import {
 } from "@/modules/editor";
 import { bridgeNativeFileEvents } from "@/modules/events";
 import { FileExplorer, type FileExplorerHandle } from "@/modules/explorer";
+import { explorerFileState } from "@/modules/explorer/lib/openFileState";
 import { FileHistoryDialog } from "@/modules/git-history";
 import type { GitHistoryPaneHandle } from "@/modules/git-history/GitHistoryPane";
 import { Header, SessionHistoryMenu } from "@/modules/header";
@@ -64,7 +66,6 @@ import {
 import { StatusBar } from "@/modules/statusbar";
 import { WindowBar } from "@/modules/statusbar/WindowBar";
 import { canEvictWindow } from "@/modules/statusbar/lib/windowTabs";
-import { WorkspaceEnvSelector } from "@/modules/statusbar/WorkspaceEnvSelector";
 import {
   TabSwitcherHud,
   useTabSwitcher,
@@ -243,19 +244,14 @@ export default function App() {
 
   const workspaceEnv = useWorkspaceEnvStore((s) => s.env);
   const setWorkspaceEnv = useWorkspaceEnvStore((s) => s.setEnv);
-  const {
-    home,
-    launchCwd,
-    launchCwdResolved,
-    switchWorkspace,
-    adoptWorkspaceEnv,
-  } = useWorkspaceSwitcher({
-    tabsRef,
-    workspaceEnv,
-    setWorkspaceEnv,
-    resetWorkspace,
-    clearWorkspaceState,
-  });
+  const { home, launchCwd, launchCwdResolved, adoptWorkspaceEnv } =
+    useWorkspaceSwitcher({
+      tabsRef,
+      workspaceEnv,
+      setWorkspaceEnv,
+      resetWorkspace,
+      clearWorkspaceState,
+    });
 
   const activeSpaceId = useSpaces((s) => s.activeId);
   const spacesHydrated = useSpaces((s) => s.hydrated);
@@ -266,16 +262,6 @@ export default function App() {
     activeSpaceIdRef.current = activeSpaceId;
   }, [tabs, activeId, activeSpaceId]);
   const sourceControlSpaceId = activeSpaceId ?? DEFAULT_SPACE_ID;
-
-  const handleWorkspaceChange = useCallback(
-    async (env: WorkspaceEnv) => {
-      const switched = await switchWorkspace(env);
-      if (switched && activeSpaceId) {
-        useSpaces.getState().setEnv(activeSpaceId, env);
-      }
-    },
-    [switchWorkspace, activeSpaceId],
-  );
 
   useSpacesBoot({
     ready: launchCwdResolved,
@@ -350,17 +336,17 @@ export default function App() {
   const runningProjects = useRunningProjects(tabs);
   const headerTabs = useMemo(
     () =>
-      spaceTabs.filter(
+      tabs.filter(
         (t): t is TerminalTab =>
           t.kind === "terminal" && runningProjects.has(t.id),
       ),
-    [spaceTabs, runningProjects],
+    [tabs, runningProjects],
   );
 
   const reorderHeaderProject = useCallback(
     (id: number, gap: number) => {
       const fullGap = projectReorderGap(tabs, headerTabs, id, gap);
-      if (fullGap !== null) reorderTabByGap(id, fullGap);
+      if (fullGap !== null) reorderTabByGap(id, fullGap, "all");
     },
     [tabs, headerTabs, reorderTabByGap],
   );
@@ -414,6 +400,7 @@ export default function App() {
   );
 
   const activeTab = tabs.find((t) => t.id === activeId);
+  useProjectAgentRestore(tabs, booted);
   const isTerminalTab = activeTab?.kind === "terminal";
   const isBlockTab = activeTerminalTab?.blocks === true;
 
@@ -784,14 +771,11 @@ export default function App() {
 
   const handleOpenFile = useCallback(
     (path: string, pin?: boolean) => {
-      // Markdown opens in its rendered view by default; a per-tab toggle flips
-      // it to the raw editor. Other files default to preview (pin=false);
-      // explicit actions like context-menu "Open" pass pin=true to persist.
-      // Files always belong to the current command line.
+      // Explorer clicks keep separate windows; capacity eviction is handled by WindowBar.
       if (isMarkdownPath(path))
         newMarkdownTab(path, currentOwnerTabId ?? undefined);
       else
-        openFileTab(path, pin ?? false, {
+        openFileTab(path, pin ?? true, {
           ownerTabId: currentOwnerTabId ?? undefined,
         });
     },
@@ -873,41 +857,18 @@ export default function App() {
         null)
       : null;
 
-  const explorerActiveFilePath = (() => {
-    if (activeTab?.kind === "editor" || activeTab?.kind === "markdown")
-      return activeTab.path;
-    if (activeTab?.kind === "git-diff") {
-      if (/^([A-Za-z]:|\/|\\)/.test(activeTab.path)) return activeTab.path;
-      const root = activeTab.repoRoot.replace(/[\\/]+$/, "");
-      const rel = activeTab.path.replace(/^[\\/]+/, "");
-      return `${root}/${rel}`;
-    }
-    if (activeTab?.kind === "git-commit-file") {
-      const root = activeTab.repoRoot.replace(/[\\/]+$/, "");
-      const rel = activeTab.path.replace(/^[\\/]+/, "");
-      return `${root}/${rel}`;
-    }
-    return null;
-  })();
-  // Marks every open file in the tree, across spaces, not just this space's.
-  const explorerOpenFilePaths = useMemo(
+  const {
+    activePath: explorerActiveFilePath,
+    openPaths: explorerOpenFilePaths,
+  } = useMemo(
     () =>
-      tabs
-        .filter(
-          (t) =>
-            t.kind === "editor" ||
-            t.kind === "markdown" ||
-            t.kind === "git-diff" ||
-            t.kind === "git-commit-file",
-        )
-        .map((t) =>
-          t.kind === "git-diff" || t.kind === "git-commit-file"
-            ? /^([A-Za-z]:|\/|\\)/.test(t.path)
-              ? t.path
-              : `${t.repoRoot.replace(/[\\/]+$/, "")}/${t.path.replace(/^[\\/]+/, "")}`
-            : t.path,
-        ),
-    [tabs],
+      explorerFileState(
+        tabs,
+        sourceControlSpaceId,
+        currentOwnerTabId,
+        activeId,
+      ),
+    [tabs, sourceControlSpaceId, currentOwnerTabId, activeId],
   );
   const isRepositoryContextCurrent = useCallback(
     (spaceId: string, workspaceKey: string) => {
@@ -1410,13 +1371,9 @@ export default function App() {
     }, 0);
   }, []);
 
-  const handleSwitchGroup = useCallback(
-    (id: string) => {
-      useSpaces.getState().setActive(id);
-      focusMainView();
-    },
-    [focusMainView],
-  );
+  const handleSwitchGroup = useCallback((id: string) => {
+    useSpaces.getState().setActive(id);
+  }, []);
 
   const handleSelectProject = useCallback(
     (project: TerminalTab) => {
@@ -1579,7 +1536,10 @@ export default function App() {
               tabs={headerTabs}
               activeId={activeId}
               activeOwnerTabId={currentOwnerTabId}
-              onSelect={setActiveId}
+              onSelect={(id) => {
+                const project = tabsRef.current.find((tab) => tab.id === id);
+                if (project?.kind === "terminal") handleSelectProject(project);
+              }}
               onNew={openNewTab}
               onNewBlock={openNewBlockTab}
               onNewPrivate={openNewPrivateTab}
@@ -1598,23 +1558,20 @@ export default function App() {
                 />
               }
               groupSwitcher={
-                <>
-                  <GroupSwitcher
-                    spaces={spacesList}
-                    projects={allTerminalTabs}
-                    activeProjectId={currentOwnerTabId ?? activeId}
-                    runningProjectIds={runningProjects}
-                    onSelectProject={handleSelectProject}
-                    onRenameProject={handleRenameTab}
-                    onCloseProject={handleClose}
-                    activeId={activeSpaceId}
-                    onSwitch={handleSwitchGroup}
-                    onCreate={handleCreateGroup}
-                    onRename={handleRenameGroup}
-                    onDelete={(id) => void requestGroupDelete(id)}
-                  />
-                  <WorkspaceEnvSelector onSelect={handleWorkspaceChange} />
-                </>
+                <GroupSwitcher
+                  spaces={spacesList}
+                  projects={allTerminalTabs}
+                  activeProjectId={currentOwnerTabId ?? activeId}
+                  runningProjectIds={runningProjects}
+                  onSelectProject={handleSelectProject}
+                  onRenameProject={handleRenameTab}
+                  onCloseProject={handleClose}
+                  activeId={activeSpaceId}
+                  onSwitch={handleSwitchGroup}
+                  onCreate={handleCreateGroup}
+                  onRename={handleRenameGroup}
+                  onDelete={(id) => void requestGroupDelete(id)}
+                />
               }
               headerTabs={
                 <HeaderTabs
@@ -1800,6 +1757,15 @@ export default function App() {
                   project={currentOwnerTab}
                   activeId={activeId}
                   onSelect={(id) => {
+                    const scope = windowScopeRef.current;
+                    const target = tabsRef.current.find((tab) => tab.id === id);
+                    if (!target || target.spaceId !== scope.spaceId) return;
+                    if (
+                      target.kind === "terminal"
+                        ? target.id !== scope.ownerId
+                        : (target.ownerTabId ?? null) !== scope.ownerId
+                    )
+                      return;
                     setActiveId(id);
                     focusMainView();
                   }}

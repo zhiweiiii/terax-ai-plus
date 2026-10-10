@@ -277,6 +277,8 @@ pub fn run() {
         .manage(LaunchCommand(Mutex::new(launch_command)))
         .invoke_handler(tauri::generate_handler![
             pty::pty_open,
+            pty::pty_agent_session,
+            sessions::agent_resume_command,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kick,

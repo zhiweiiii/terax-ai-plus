@@ -10,6 +10,10 @@ import type {
   Tab,
   TerminalTab,
 } from "@/modules/tabs/lib/useTabs";
+import {
+  type AgentResume,
+  isAgentResume,
+} from "@/modules/spaces/lib/projectRestore";
 
 export type SerializedNode =
   | { kind: "leaf"; cwd?: string; active?: boolean }
@@ -21,6 +25,8 @@ export type SerializedTab =
       tree: SerializedNode;
       blocks?: boolean;
       customTitle?: string;
+      lastUsedAt?: number;
+      lastAgentSession?: AgentResume;
     }
   | { kind: "editor"; path: string; ownerTab?: number }
   | { kind: "preview"; url: string; ownerTab?: number }
@@ -53,6 +59,12 @@ export function isSerializedTabs(value: unknown): value is SerializedTab[] {
     if (item.kind === "terminal") {
       return (
         validNode(item.tree, 0) &&
+        (item.lastUsedAt === undefined ||
+          (typeof item.lastUsedAt === "number" &&
+            Number.isFinite(item.lastUsedAt) &&
+            item.lastUsedAt >= 0)) &&
+        (item.lastAgentSession === undefined ||
+          isAgentResume(item.lastAgentSession)) &&
         (item.blocks === undefined || typeof item.blocks === "boolean") &&
         (item.customTitle === undefined || typeof item.customTitle === "string")
       );
@@ -122,6 +134,8 @@ function serializeTab(tab: Tab): SerializedTab | null {
       return {
         kind: "terminal",
         tree: serializeNode(tab.paneTree, tab.activeLeafId),
+        ...(tab.lastUsedAt !== undefined && { lastUsedAt: tab.lastUsedAt }),
+        ...(tab.lastAgentSession && { lastAgentSession: tab.lastAgentSession }),
         ...(tab.blocks && { blocks: true }),
         ...(tab.customTitle !== undefined && { customTitle: tab.customTitle }),
       };
@@ -226,6 +240,8 @@ function hydrateTab(
         spaceId,
         cold: true,
         title,
+        ...(s.lastUsedAt !== undefined && { lastUsedAt: s.lastUsedAt }),
+        ...(s.lastAgentSession && { lastAgentSession: s.lastAgentSession }),
         cwd: firstLeafCwd,
         paneTree: tree,
         activeLeafId,

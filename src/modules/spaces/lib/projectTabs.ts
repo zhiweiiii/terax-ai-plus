@@ -42,9 +42,8 @@ export function projectReorderGap(
   const moved = visible.find((tab) => tab.id === fromId);
   if (!moved || !Number.isInteger(gap) || gap < 0 || gap > visible.length)
     return null;
-  const sameSpace = tabs.filter((tab) => tab.spaceId === moved.spaceId);
   const anchor = visible[gap] ?? visible[visible.length - 1];
-  if (!anchor || anchor.spaceId !== moved.spaceId) return null;
-  const index = sameSpace.findIndex((tab) => tab.id === anchor.id);
+  if (!anchor) return null;
+  const index = tabs.findIndex((tab) => tab.id === anchor.id);
   return index < 0 ? null : index + (gap === visible.length ? 1 : 0);
 }

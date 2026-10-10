@@ -22,6 +22,21 @@ pub(crate) use session::{valid_grid, Session, SizeOwner, WebMsg};
 /// for the grid.
 pub const PTY_RESIZED_EVENT: &str = "terax:pty-resized";
 
+#[tauri::command]
+pub async fn pty_agent_session(
+    state: tauri::State<'_, PtyState>,
+    id: u32,
+    cwd: String,
+) -> Result<Option<session::AgentResume>, String> {
+    if cwd.is_empty() || cwd.len() > 32768 || cwd.chars().any(char::is_control) {
+        return Err("Invalid session directory".into());
+    }
+    let session = state.web_get(id).ok_or("Terminal session closed")?;
+    tauri::async_runtime::spawn_blocking(move || session.agent_resume(&cwd))
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// A desktop terminal tab, synced to the web layer so the phone can list and
 /// attach to every command line, not just the ones with a live PTY.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

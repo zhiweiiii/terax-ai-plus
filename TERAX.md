@@ -93,7 +93,7 @@ Terax 会把工作区根目录下的 `TERAX.md` 作为 agent 记忆加载（类�
 - **输出是给人看的自然语言，不是 JSON**。解析只认 `Current session` / `Current week` 两个行首，宽松地抠 `N% used` 和 `resets ...`，其余一律不猜；完整原文始终保留在 `raw` 里，Claude Code 改文案时面板还能把权威答案原样显示出来。
 - 命令写成 `claude -p "/usage"`，`/usage` 必须带引号：Git Bash 会把裸的 `/usage` 当路径翻译成 `D:\program\Git\usage`，这个坑会让人误以为该功能不存在。
 - Codex 则启动一次短生命周期的本机 `codex app-server --stdio`，初始化后请求 `account/rateLimits/read`，读取它返回的短期/长期窗口、重置时间和套餐类型；不读 `~/.codex` 的凭据，也不连接或干预正在运行的 Codex TUI。它与 Claude 同步每 5 分钟更新，成功结果缓存 5 分钟。
-- 常驻信息按 Claude/Codex 两行显示 `5h 用量（重置时间）- 周用量（重置时间）`。Codex 按实际窗口时长匹配 300/10080 分钟，未知时长不冒充 5h/周；时间戳转换为本地月日时分。Claude 周用量优先 all models，识别到本地时区的日期格式时精简为月日时分，未知格式或其他时区保留原文；悬停与详情保留完整 CLI 文本。未知数据使用 `--`，不显示伪造的 0%；窄窗口底栏可换行。
+- 常驻用量无前置图标，单行并排显示 `C:5h-73%(16:30) 周-36%(10/13) O:5h-20%(16:30) 周-40%(10/13)`，百分比按 <75/75-89/≥90 分别绿/橙/红。Codex 按 300/10080 分钟匹配窗口，未知时长不冒充 5h/周；Claude 周窗口优先 all models。5h 时间仅本地时分、周时间仅月日，无法识别的格式或时区显示 `--`，悬停与详情保留原文。失败保留上次值并用 `!` 标记，未知数据灰色 `--`；窄窗口底栏可换行，C/O 始终并排。
 
 ### 会话历史（`src-tauri/src/modules/sessions.rs`）
 
@@ -151,9 +151,11 @@ PTY shell 通过注入的初始化脚本启动，细节见 `docs/architecture/pt
 - **theme/** - 自研主题引擎（不用 `next-themes`）。`ThemeProvider` + `applyTheme` 写 CSS 变量；内置预设在 `themes/`，可各自声明配套的 `editorTheme`。用户主题走 `customThemes.ts` + `validateTheme.ts`，可选背景图走 `bgImageStore.ts` + `SurfaceLayer`。
 - **updater/** - 默认检查 `zhiweiiii/terax-ai-plus` 的已发布 NSIS 版本并打开手动下载页。只有构建时启用本仓库自己的签名配置才使用 `tauri-plugin-updater`，签名端点不可用时退回手动检查。检查与安装排除重复调用，Update 句柄按挂载代次回收。签名安装分开下载和安装，下载结束后由主窗口检查未保存文件/运行中的终端并等待工作区保存；设置窗口只请求主窗口安装确认，不能绕过保护。
 - **command-palette/** - 命令面板。
-- **spaces/** - 分组由 `useSpaces` 管理，每个命令行标签是一个项目。`GroupSwitcher` 的分组下有二级项目列表，可选择、重命名及关闭，显示运行中的 agent；顶部只常驻当前分组正在运行 agent 的项目，等待输入也保留，退出后收回二级列表。拖动位置从可见项目映射回完整标签，避免隐藏文件影响排序。环境选择器移至顶部分组旁。详见 `docs/architecture/workspace-navigation.md`。
+- **spaces/** - 分组由 `useSpaces` 管理，每个命令行标签是一个项目。`GroupSwitcher` 点击分组原地向下展开项目，再点收起，可独立展开多个分组；展开激活该分组，选择项目同步切换分组。顶部常驻所有分组运行 agent 的项目，图标为所属分组首字并保留状态角标。拖动映射回全量标签，跨分组排序不改变归属。顶部 Windows 环境按钮已移除，已有环境配置保留。文件单击默认持久窗口，文件/Markdown/Git 去重与预览槽按分组和项目隔离，关闭活动文件优先同项目窗口或所属终端；文件树打开标识与底栏使用相同作用域。详见 `docs/architecture/workspace-navigation.md`。
 
 ### UI 约定
+
+项目记录最近使用时间，启动跨分组恢复最后使用的 5 个非私密终端，其余项目保持冷标签。现有空间 JSON 保存明确的 Claude/Codex 会话 UUID 与 cwd，按活动面板捕获；没有唯一身份不猜最新历史。启动检查 ID/目录并等待 PTY/提示符就绪，隐藏面板临时绑定原生渲染器，用户输入、已有命令、旧项目或超时均不提交，失败可见。旧版未记录身份的项目需升级后运行会话再恢复；WSL 不使用 Windows 历史。详见 workspace-navigation.md。
 
 GitDiffPane 的差异计算使用显式 `scanLimit: 10000` 和 `timeout: 200`，避免默认低额度把大型文件的稀疏修改合为整段；两侧仍先归一化为 LF，超时保留粗略比较兜底。
 

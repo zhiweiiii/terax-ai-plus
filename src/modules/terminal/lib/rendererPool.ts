@@ -29,6 +29,7 @@ const PTY_RESIZE_DEBOUNCE_MS = 256;
 const SNAPSHOT_SCROLLBACK_CAP = 5_000;
 
 export type SlotAdapter = {
+  onUserInput(leafId: number): void;
   resolveLeaf(leafId: number): LeafBridge | null;
   evictLeaf(leafId: number): void;
   focusLeafInput(leafId: number): boolean;
@@ -420,6 +421,8 @@ function createSlot(): Slot {
   }
 
   term.attachCustomKeyEventHandler((event) => {
+    if (event.type === "keydown" && slot.currentLeafId !== null)
+      adapter?.onUserInput(slot.currentLeafId);
     // During IME composition the browser is assembling a multi-keystroke
     // character (Chinese pinyin → hanzi, Korean jamo → syllable, etc.).
     // Raw keydown events — including the Enter that commits a candidate —

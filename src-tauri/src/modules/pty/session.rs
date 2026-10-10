@@ -91,6 +91,7 @@ pub struct Session {
     /// PID of the shell process. 0 means unknown; callers must skip checks when 0.
     pub shell_pid: u32,
     pub shell_kind: shell_init::ShellQuoteKind,
+    local_history: bool,
     pub killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Mutex<SerializedMaster>,
@@ -131,6 +132,13 @@ struct AgentRun {
     session_id: Option<String>,
     started_at: std::time::SystemTime,
     file: Option<std::path::PathBuf>,
+}
+
+#[derive(serde::Serialize)]
+pub struct AgentResume {
+    agent: String,
+    id: String,
+    cwd: String,
 }
 
 impl Drop for Session {
@@ -191,6 +199,29 @@ impl Session {
     /// The coding agent running in this shell right now, if any.
     pub fn web_agent(&self) -> Option<String> {
         self.agent.lock().ok()?.as_ref().map(|run| run.name.clone())
+    }
+
+    pub fn agent_resume(&self, cwd: &str) -> Option<AgentResume> {
+        if !self.local_history {
+            return None;
+        }
+        let run = self.agent.lock().ok()?.as_ref()?.clone();
+        if !matches!(run.name.as_str(), "claude" | "codex") {
+            return None;
+        }
+        let file = self.web_transcript_file(cwd)?;
+        let id = crate::modules::sessions::session_id_for_file(&file, &run.name, cwd)?;
+        let current = self.agent.lock().ok()?;
+        current.as_ref().filter(|current| {
+            current.started_at == run.started_at
+                && current.name == run.name
+                && current.file.as_ref() == Some(&file)
+        })?;
+        Some(AgentResume {
+            agent: run.name,
+            id,
+            cwd: cwd.to_string(),
+        })
     }
 
     pub fn web_transcript(
@@ -508,6 +539,7 @@ pub fn spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
+    let local_history = !workspace.is_wsl();
     let (cmd, shell_kind) = shell_init::build_command(
         cwd.clone(),
         workspace,
@@ -546,6 +578,7 @@ pub fn spawn(
         _job: Some(job),
         shell_pid,
         shell_kind,
+        local_history,
         killer: Mutex::new(killer),
         writer: writer.clone(),
         master: Mutex::new(SerializedMaster(Some(pair.master))),

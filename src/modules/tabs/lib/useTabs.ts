@@ -1,4 +1,5 @@
 import { pathIdentity } from "@/lib/pathIdentity";
+import type { AgentResume } from "@/modules/spaces/lib/projectRestore";
 import { isMarkdownPath } from "@/lib/utils";
 import {
   findLeafCwd,
@@ -30,6 +31,9 @@ type TabBase = {
 };
 
 export type TerminalTab = TabBase & {
+  lastUsedAt?: number;
+  lastAgentSession?: AgentResume;
+  autoResume?: boolean;
   id: number;
   kind: "terminal";
   title: string;
@@ -155,6 +159,7 @@ export function planMarkdownTabOpen(
     (tab) =>
       tab.kind === "markdown" &&
       tab.spaceId === spaceId &&
+      tab.ownerTabId === ownerTabId &&
       pathIdentity(tab.path) === pathKey,
   );
   if (existing) return { tabs, tabId: existing.id };
@@ -162,6 +167,7 @@ export function planMarkdownTabOpen(
     (tab): tab is Extract<Tab, { kind: "editor" }> =>
       tab.kind === "editor" &&
       tab.spaceId === spaceId &&
+      tab.ownerTabId === ownerTabId &&
       pathIdentity(tab.path) === pathKey,
   );
   if (rawExisting) {
@@ -213,6 +219,7 @@ export function planFileTabOpen(
       (tab) =>
         tab.kind === "editor" &&
         tab.spaceId === spaceId &&
+        tab.ownerTabId === ownerTabId &&
         pathIdentity(tab.path) === pathIdentity(path),
     );
     if (existing?.kind === "editor") {
@@ -249,6 +256,7 @@ export function planFileTabOpen(
     (tab) =>
       tab.kind === "editor" &&
       tab.spaceId === spaceId &&
+      tab.ownerTabId === ownerTabId &&
       pathIdentity(tab.path) === pathIdentity(path) &&
       !tab.preview,
   );
@@ -258,6 +266,7 @@ export function planFileTabOpen(
     (tab) =>
       tab.kind === "editor" &&
       tab.spaceId === spaceId &&
+      tab.ownerTabId === ownerTabId &&
       pathIdentity(tab.path) === pathIdentity(path) &&
       tab.preview,
   );
@@ -267,6 +276,7 @@ export function planFileTabOpen(
     (tab) =>
       tab.kind === "editor" &&
       tab.spaceId === spaceId &&
+      tab.ownerTabId === ownerTabId &&
       tab.preview &&
       !tab.dirty,
   );
@@ -325,19 +335,33 @@ export function nextActiveInSpace(
   if (!closing) return null;
   const sameSpace = tabs.filter((t) => t.spaceId === closing.spaceId);
   if (sameSpace.length <= 1) return null;
+  if (closing.kind !== "terminal" && closing.ownerTabId !== undefined) {
+    const siblings = sameSpace.filter(
+      (tab) => tab.kind !== "terminal" && tab.ownerTabId === closing.ownerTabId,
+    );
+    const siblingIndex = siblings.findIndex((tab) => tab.id === closingId);
+    const neighbor = siblings[siblingIndex - 1] ?? siblings[siblingIndex + 1];
+    if (neighbor) return neighbor.id;
+    const owner = sameSpace.find(
+      (tab) => tab.kind === "terminal" && tab.id === closing.ownerTabId,
+    );
+    if (owner) return owner.id;
+  }
   const idx = sameSpace.findIndex((t) => t.id === closingId);
   return (sameSpace[idx - 1] ?? sameSpace[idx + 1]).id;
 }
 
-// Gap index is relative to the space's own strip, including the dragged tab.
+// Reordering changes position, never space ownership.
 export function reorderTabsByGap(
   tabs: Tab[],
   fromId: number,
   toGapIndex: number,
+  scope: "space" | "all" = "space",
 ): Tab[] {
   const moved = tabs.find((t) => t.id === fromId);
   if (!moved) return tabs;
-  const sameSpace = tabs.filter((t) => t.spaceId === moved.spaceId);
+  const sameSpace =
+    scope === "all" ? tabs : tabs.filter((t) => t.spaceId === moved.spaceId);
   const spaceFrom = sameSpace.findIndex((t) => t.id === fromId);
   let spaceTarget = toGapIndex > spaceFrom ? toGapIndex - 1 : toGapIndex;
   spaceTarget = Math.max(0, Math.min(spaceTarget, sameSpace.length - 1));
@@ -363,6 +387,7 @@ export function planGitDiffOpen(
   const matches = (tab: Tab): tab is GitDiffTab =>
     tab.kind === "git-diff" &&
     tab.spaceId === spaceId &&
+    tab.ownerTabId === ownerTabId &&
     pathIdentity(tab.repoRoot) === pathIdentity(input.repoRoot) &&
     pathIdentity(`${tab.repoRoot}/${tab.path}`) ===
       pathIdentity(`${input.repoRoot}/${input.path}`) &&
@@ -409,6 +434,7 @@ export function planGitDiffOpen(
     (candidate) =>
       candidate.kind === "git-diff" &&
       candidate.spaceId === spaceId &&
+      candidate.ownerTabId === ownerTabId &&
       candidate.preview,
   );
   if (previewIndex === -1) return { tabs: [...tabs, tab], targetId: id };
@@ -429,6 +455,7 @@ export function planCommitHistoryOpen(
     (tab) =>
       tab.kind === "git-history" &&
       tab.spaceId === spaceId &&
+      tab.ownerTabId === ownerTabId &&
       pathIdentity(tab.repoRoot) === pathIdentity(input.repoRoot),
   );
   const title = input.branch ? `History · ${input.branch}` : "Git History";
@@ -583,8 +610,19 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     if (!booted) return;
     setTabs((curr) => {
       const t = curr.find((x) => x.id === activeId);
-      if (!t?.cold) return curr;
-      return curr.map((x) => (x.id === activeId ? { ...x, cold: false } : x));
+      if (!t) return curr;
+      const ownerId = t.kind === "terminal" ? t.id : t.ownerTabId;
+      const now = Date.now();
+      return curr.map((x) =>
+        x.id === activeId || (x.kind === "terminal" && x.id === ownerId)
+          ? {
+              ...x,
+              ...(x.id === activeId && { cold: false }),
+              ...(x.kind === "terminal" &&
+                x.id === ownerId && { lastUsedAt: now }),
+            }
+          : x,
+      );
     });
   }, [activeId, booted, setTabs]);
 
@@ -739,9 +777,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
    * - `pin = true` (default) — opens or activates a **persistent** tab.
    *   If the path is currently in the preview slot it is promoted in-place.
    *   Use this for programmatic opens (AI diff, New File dialog, etc.).
-   * - `pin = false` — VSCode-style **preview** tab. A single shared slot is
-   *   reused: if a persistent tab for the path already exists it is activated;
-   *   otherwise the current preview slot is replaced with the new path.
+   * - `pin = false` uses this project's preview slot, never another owner's.
    */
   const openFileTab = useCallback(
     (path: string, pin = true, options: OpenFileTabOptions = {}) => {
@@ -948,6 +984,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         (t) =>
           t.kind === "git-commit-file" &&
           t.spaceId === activeSpaceIdRef.current &&
+          t.ownerTabId === activeTerminalIdRef.current &&
           pathIdentity(t.repoRoot) === pathIdentity(input.repoRoot) &&
           t.sha === input.sha &&
           t.path === input.path,
@@ -1325,8 +1362,8 @@ export function useTabs(initial?: Partial<TerminalTab>) {
   );
 
   const reorderTabByGap = useCallback(
-    (fromId: number, toGapIndex: number) => {
-      setTabs((prev) => reorderTabsByGap(prev, fromId, toGapIndex));
+    (fromId: number, toGapIndex: number, scope: "space" | "all" = "space") => {
+      setTabs((prev) => reorderTabsByGap(prev, fromId, toGapIndex, scope));
     },
     [setTabs],
   );

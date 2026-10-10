@@ -20,6 +20,7 @@ import {
 } from "@/modules/editor/lib/languageDefinitions";
 import { resolveDisplayName } from "@/modules/editor/lib/languageResolver";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
+import { useSpaces } from "@/modules/spaces/lib/useSpaces";
 import {
   leafIds,
   ptyIdForLeaf,
@@ -296,7 +297,7 @@ export function TabBar({
                         compact ? "px-1.5" : "px-2",
                       )}
                     >
-                      <TabIcon tab={t} />
+                      <TabIcon tab={t} groupInitial />
                       <TabRenameInput
                         initial={labelFor(t)}
                         onCommit={(value) => {
@@ -426,7 +427,7 @@ export function TabBar({
                             }}
                             className="inline-flex shrink-0 cursor-pointer items-center justify-center rounded-sm p-1 -m-1 transition-all hover:bg-accent hover:text-accent-foreground hover:ring-1 hover:ring-primary/30 hover:shadow-[0_0_4px_var(--color-popover-foreground)]"
                           >
-                            <TabIcon tab={t} />
+                            <TabIcon tab={t} groupInitial />
                           </span>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent
@@ -507,7 +508,7 @@ export function TabBar({
                         </DropdownMenuContent>
                       </DropdownMenu>
                     ) : (
-                      <TabIcon tab={t} />
+                      <TabIcon tab={t} groupInitial />
                     )}
                     {/* Preview tabs use italic to signal the transient state,
                         matching the visual convention from VSCode. */}
@@ -646,7 +647,15 @@ function useTabAgentStatus(tab: Extract<Tab, { kind: "terminal" }>) {
   return tabAgentStatus(phases, agents, ptyIds);
 }
 
-export function TabIcon({ tab }: { tab: Tab }) {
+export function TabIcon({
+  tab,
+  groupInitial = false,
+}: {
+  tab: Tab;
+  groupInitial?: boolean;
+}) {
+  if (tab.kind === "terminal" && groupInitial)
+    return <ProjectGroupIcon tab={tab} />;
   if (tab.kind === "editor" || tab.kind === "markdown") {
     const url =
       tab.kind === "editor" && tab.overrideLanguage
@@ -749,6 +758,40 @@ function TerminalTabIcon({ tab }: { tab: Extract<Tab, { kind: "terminal" }> }) {
       strokeWidth={2}
       className="shrink-0"
     />
+  );
+}
+
+function ProjectGroupIcon({
+  tab,
+}: {
+  tab: Extract<Tab, { kind: "terminal" }>;
+}) {
+  const name = useSpaces(
+    (state) =>
+      state.spaces.find((space) => space.id === tab.spaceId)?.name ?? "Group",
+  );
+  const status = useTabAgentStatus(tab);
+  return (
+    <span
+      title={`${name}${tab.private ? " (private)" : ""}`}
+      className="relative flex size-4 shrink-0 items-center justify-center rounded bg-foreground/10 text-[10px] font-medium"
+    >
+      {Array.from(name.trim())[0] ?? "G"}
+      {status.state && (
+        <span
+          role="img"
+          aria-label={status.state}
+          className={cn(
+            "absolute -right-0.5 -bottom-0.5 size-1.5 rounded-full ring-1 ring-card",
+            status.state === "attention"
+              ? "bg-amber-500"
+              : status.state === "finished"
+                ? "bg-emerald-500"
+                : "bg-primary",
+          )}
+        />
+      )}
+    </span>
   );
 }
 

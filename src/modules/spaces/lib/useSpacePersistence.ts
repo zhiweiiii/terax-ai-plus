@@ -4,6 +4,12 @@ import { errorToast } from "@/lib/errorToast";
 import { isSerializableTab, serializeTabs } from "./serialize";
 import { flushStore, saveActiveId, saveSpacesList, saveState } from "./store";
 import { useSpaces } from "./useSpaces";
+import { useAgentActivityStore } from "@/modules/terminal/lib/agentActivity";
+import type { AgentResume } from "@/modules/spaces/lib/projectRestore";
+import {
+  hasProjectAgent,
+  projectSessionSnapshot,
+} from "@/modules/spaces/lib/projectSessionSnapshot";
 
 const DEBOUNCE_MS = 3000;
 
@@ -23,9 +29,12 @@ export function useSpacePersistence({
   enabled,
 }: Params) {
   const last = useRef<Map<string, LastWrite>>(new Map());
+  const agents = useAgentActivityStore((state) => state.agents);
   const seeded = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latest = useRef<Snapshot>({ tabs, activeId, activeSpaceId });
+  const sessions = useRef(new Map<number, AgentResume | null>());
+  const flushQueue = useRef<Promise<void>>(Promise.resolve());
   latest.current = { tabs, activeId, activeSpaceId };
 
   // Seed each space's last-known active index from disk so the first flush
@@ -40,10 +49,15 @@ export function useSpacePersistence({
     }
   }
 
-  const flush = useCallback(async (snap: Snapshot) => {
+  const flushSnapshot = useCallback(async (snap: Snapshot) => {
+    const capturedTabs = await projectSessionSnapshot(
+      snap.tabs,
+      snap.activeId,
+      sessions.current,
+    );
     const groups = new Map<string, Tab[]>();
     for (const space of useSpaces.getState().spaces) groups.set(space.id, []);
-    for (const t of snap.tabs) {
+    for (const t of capturedTabs) {
       const arr = groups.get(t.spaceId);
       if (arr) arr.push(t);
     }
@@ -80,6 +94,43 @@ export function useSpacePersistence({
     await Promise.all(writes);
     await flushStore();
   }, []);
+
+  const flush = useCallback(
+    (snap: Snapshot) => {
+      const operation = flushQueue.current.then(() => flushSnapshot(snap));
+      flushQueue.current = operation.catch(() => {});
+      return operation;
+    },
+    [flushSnapshot],
+  );
+
+  // Capture newly started sessions without waiting for the periodic checkpoint.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Agent transitions trigger identity capture after the CLI creates its record.
+  useEffect(() => {
+    if (
+      !enabled ||
+      !hasProjectAgent(latest.current.tabs, latest.current.activeId)
+    )
+      return;
+    const checkpoint = setTimeout(() => {
+      void flush(latest.current).catch((error) =>
+        errorToast("保存会话恢复信息失败", error),
+      );
+    }, 1000);
+    return () => clearTimeout(checkpoint);
+  }, [agents, enabled, flush]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    const interval = setInterval(() => {
+      if (!hasProjectAgent(latest.current.tabs, latest.current.activeId))
+        return;
+      void flush(latest.current).catch((error) =>
+        errorToast("保存会话恢复信息失败", error),
+      );
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [enabled, flush]);
 
   useEffect(() => {
     if (!enabled) return;
