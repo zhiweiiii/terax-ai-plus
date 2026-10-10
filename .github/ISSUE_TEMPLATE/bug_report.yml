@@ -7,12 +7,12 @@ body:
       value: |
         Thanks for taking the time to report a bug. Please fill in the fields below to help triage.
 
-        For **security issues**, do NOT open an issue. See [SECURITY.md](https://github.com/zhiweiiii/terax-ai-plus/blob/main/SECURITY.md).
+        For **security issues**, do NOT open an issue. See [SECURITY.md](https://github.com/zhiweiiii/awei-work/blob/main/SECURITY.md).
 
   - type: input
     id: version
     attributes:
-      label: Terax version
+      label: awei-work version
       description: From Settings → About, or the bottom-right status bar.
       placeholder: "1.0.0"
     validations:
@@ -24,7 +24,7 @@ body:
       label: Operating system
       options:
         - Windows
-        - Mobile browser connected to Terax on Windows
+        - Mobile browser connected to awei-work on Windows
     validations:
       required: true
 
@@ -57,7 +57,7 @@ body:
       label: Steps to reproduce
       description: Numbered list of exact steps. The more specific, the faster we can help.
       placeholder: |
-        1. Open Terax
+        1. Open awei-work
         2. Click ...
         3. ...
     validations:

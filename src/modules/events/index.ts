@@ -68,7 +68,7 @@ export function emitEvent<K extends EventKey>(
     try {
       handler(payload);
     } catch (error) {
-      console.error(`[terax] ${event} listener failed:`, error);
+      console.error(`[awei-work] ${event} listener failed:`, error);
     }
   }
 }
@@ -106,7 +106,7 @@ export function bridgeNativeFileEvents(): () => void {
       else un();
     })
     .catch((error) =>
-      console.error("[terax] filesystem listener failed:", error),
+      console.error("[awei-work] filesystem listener failed:", error),
     );
   void window
     .listen<FsWrittenEvent>("fs:file-written", (e) => {
@@ -122,7 +122,7 @@ export function bridgeNativeFileEvents(): () => void {
       else un();
     })
     .catch((error) =>
-      console.error("[terax] file-write listener failed:", error),
+      console.error("[awei-work] file-write listener failed:", error),
     );
   return () => {
     alive = false;

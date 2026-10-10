@@ -476,7 +476,7 @@ function createSlot(): Slot {
           )
             pasteIntoLeaf(targetLeafId, text);
         })().catch((error) =>
-          console.error("[terax] clipboard paste failed:", error),
+          console.error("[awei-work] clipboard paste failed:", error),
         );
       }
       event.preventDefault();
@@ -660,7 +660,7 @@ function bindSlot(slot: Slot, p: AcquireParams): void {
       try {
         slot.term.write(p.snapshot);
       } catch (e) {
-        console.warn("[terax] snapshot replay failed:", e);
+        console.warn("[awei-work] snapshot replay failed:", e);
       }
     }
     if (p.altScreen) {
@@ -858,7 +858,7 @@ function serializeSlot(slot: Slot, maxChars?: number): SerializeOutput {
     }
     if (maxChars !== undefined && snapshot.length > maxChars) snapshot = null;
   } catch (e) {
-    console.warn("[terax] serialize failed:", e);
+    console.warn("[awei-work] serialize failed:", e);
   }
   return {
     snapshot,
@@ -974,7 +974,7 @@ function disposeSlot(slot: Slot): void {
   try {
     slot.term.dispose();
   } catch (e) {
-    console.warn("[terax] slot dispose failed:", e);
+    console.warn("[awei-work] slot dispose failed:", e);
   }
   slot.host.remove();
   const i = slots.indexOf(slot);
@@ -1040,7 +1040,7 @@ function attachWebgl(slot: Slot): void {
     slot.webglAddon = webgl;
     slot.webglCanvases = added;
   } catch (e) {
-    console.warn("[terax-webgl] unavailable:", e);
+    console.warn("[awei-work-webgl] unavailable:", e);
   }
 }
 
@@ -1052,7 +1052,7 @@ function disposeSlotWebgl(slot: Slot): void {
   try {
     addon.dispose();
   } catch (e) {
-    console.warn("[terax-webgl] dispose failed:", e);
+    console.warn("[awei-work-webgl] dispose failed:", e);
   }
   try {
     const r = (

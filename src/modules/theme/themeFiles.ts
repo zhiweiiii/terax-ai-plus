@@ -5,7 +5,7 @@ import { appConfigDir, join } from "@tauri-apps/api/path";
 import type { Theme } from "./types";
 import { validateTheme, type ValidationResult } from "./validateTheme";
 
-const THEME_FILE_EXT = ".terax-theme";
+const THEME_FILE_EXT = ".awei-work-theme";
 const THEME_EDIT_EVENT = "terax://theme-edit";
 
 export type ThemeEditRequest =
@@ -13,7 +13,10 @@ export type ThemeEditRequest =
   | { action: "edit"; id: string };
 
 export function isThemeFilePath(path: string): boolean {
-  return path.toLowerCase().endsWith(THEME_FILE_EXT);
+  const normalized = path.toLowerCase();
+  return (
+    normalized.endsWith(THEME_FILE_EXT) || normalized.endsWith(".terax-theme")
+  );
 }
 
 async function themesDir(): Promise<string> {
@@ -52,7 +55,7 @@ export async function deleteThemeFile(id: string): Promise<void> {
     const path = await themeFilePath(id);
     await invoke("fs_delete", { path, workspace: LOCAL_WORKSPACE });
   } catch (error) {
-    console.warn("[terax] theme file cleanup failed:", error);
+    console.warn("[awei-work] theme file cleanup failed:", error);
   }
 }
 

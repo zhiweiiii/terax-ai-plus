@@ -26,7 +26,7 @@ async function spillImage(blob: Blob): Promise<string | null> {
       headers: { "x-image-mime": blob.type || "image/png" },
     });
   } catch (error) {
-    console.error("[terax] could not save pasted image:", error);
+    console.error("[awei-work] could not save pasted image:", error);
     toast.error(
       typeof error === "string" ? error : "Could not save the pasted image",
     );
@@ -58,7 +58,7 @@ export async function clipboardAttachmentPaths(): Promise<string[] | null> {
       return filePaths;
     }
   } catch (error) {
-    console.error("[terax] could not read clipboard files:", error);
+    console.error("[awei-work] could not read clipboard files:", error);
   }
 
   if (!navigator.clipboard?.read) return null;
@@ -81,7 +81,7 @@ export async function clipboardAttachmentPaths(): Promise<string[] | null> {
       const path = await spillImage(blob);
       if (path) paths.push(path);
     } catch (error) {
-      console.error("[terax] could not read clipboard image:", error);
+      console.error("[awei-work] could not read clipboard image:", error);
     }
   }
 

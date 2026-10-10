@@ -163,7 +163,7 @@ const app = $("#app");
 app.innerHTML = `
   <div class="topbar">
     <button id="btn-list" class="icon-btn" title="切换窗口">☰</button>
-    <span id="title">Terax</span>
+    <span id="title">awei-work</span>
     <span id="status" class="status"></span>
   </div>
   <div id="agents" class="agents" hidden></div>
@@ -298,8 +298,8 @@ function render() {
   const path = session?.cwd?.split(/[\\/]/).filter(Boolean).pop();
   const label = session?.title || path;
   $("#title").textContent =
-    [name, label].filter(Boolean).join(" · ") || "Terax";
-  $("#title").title = session?.cwd ?? label ?? "Terax";
+    [name, label].filter(Boolean).join(" · ") || "awei-work";
+  $("#title").title = session?.cwd ?? label ?? "awei-work";
   const stick = pinnedToBottom;
   const anchor = readingAnchor();
   if (transcript) {

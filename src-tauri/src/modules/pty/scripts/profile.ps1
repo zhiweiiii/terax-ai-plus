@@ -7,7 +7,7 @@ if ($global:__TERAX_HOOKS_LOADED) { return }
 $global:__TERAX_HOOKS_LOADED = $true
 
 if ($env:TERAX_CLI -and (Test-Path -LiteralPath $env:TERAX_CLI -PathType Leaf)) {
-    function global:terax {
+    function global:awei-work {
         & $env:TERAX_CLI @args
     }
 }

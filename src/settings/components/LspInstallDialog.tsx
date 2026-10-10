@@ -93,7 +93,7 @@ export function LspInstallDialog({ server, onClose }: Props) {
         <DialogHeader>
           <DialogTitle>安装 {server.name} 语言服务器</DialogTitle>
           <DialogDescription>
-            Terax 在 PATH 中找不到{" "}
+            awei-work 在 PATH 中找不到{" "}
             <code className="font-mono text-foreground">{server.command}</code>
             。请先安装，然后重新检测以启用该语言服务器。
           </DialogDescription>

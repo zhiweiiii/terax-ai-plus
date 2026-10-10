@@ -56,9 +56,9 @@ const cargoArgs = [
   "--manifest-path",
   join(tauriDir, "Cargo.toml"),
   "--package",
-  "terax-cli",
+  "awei-work-cli",
   "--bin",
-  "terax-cli",
+  "awei-work-cli",
   "--target",
   target,
 ];
@@ -73,12 +73,12 @@ const source = join(
   "target",
   target,
   profile,
-  `terax-cli${extension}`,
+  `awei-work-cli${extension}`,
 );
 const destination = join(
   tauriDir,
   "binaries",
-  `terax-cli-${target}${extension}`,
+  `awei-work-cli-${target}${extension}`,
 );
 requireArtifact(source, "Built CLI artifact");
 mkdirSync(dirname(destination), { recursive: true });

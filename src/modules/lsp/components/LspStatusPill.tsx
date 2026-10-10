@@ -212,7 +212,7 @@ function InstallPill({ preset }: { preset: LspPreset }) {
           {preset.name} language server
         </div>
         <p className="mb-2 text-muted-foreground">
-          Terax found no{" "}
+          awei-work found no{" "}
           <code className="text-foreground">{preset.command}</code> on your
           PATH. Install it, then check again:
         </p>

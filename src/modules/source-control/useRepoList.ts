@@ -99,7 +99,7 @@ export function useRepoList(basePath: string | null): UseRepoListResult {
         token !== scanTokenRef.current
       )
         return;
-      console.warn("[terax] repo scan failed:", err);
+      console.warn("[awei-work] repo scan failed:", err);
       resultKeyRef.current = scanKey;
       setRepos([]);
       setActiveRepoState(null);

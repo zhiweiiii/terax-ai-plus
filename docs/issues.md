@@ -1,6 +1,6 @@
 # 限制与近期变更
 
-这里只保留仍有效的限制、待验收事项和近期重要结论。详细设计见 [文档索引](README.md)，旧修复过程与逐文件审查记录从 Git 历史查阅，版本说明以 [GitHub Releases](https://github.com/zhiweiiii/terax-ai-plus/releases) 为准。
+这里只保留仍有效的限制、待验收事项和近期重要结论。详细设计见 [文档索引](README.md)，旧修复过程与逐文件审查记录从 Git 历史查阅，版本说明以 [GitHub Releases](https://github.com/zhiweiiii/awei-work/releases) 为准。
 
 ## 当前限制
 
@@ -22,6 +22,14 @@
 
 改动相关仍需实际确认：Windows Codex/Claude 长时间输出、输入/删除/IME、标签切换与滚动；升级后的真实会话恢复；实际 WSL 附件/文件监听；iOS Safari 键盘与断线；原生覆盖安装、签名更新与真实后台 CLI 定时请求。不得将这些限制写成“已彻底证明稳定”。
 
+## 项目更名（2026-10-10）
+
+项目名统一为 awei-work：桌面/手机标题、设置和提示、辅助命令、源码包/二进制、安装包、开发脚本、文档及仓库链接同步修改。GitHub 地址为 `zhiweiiii/awei-work`，更新检查兼容更名前后的安装包名；旧版本附件与原始版权不改写。
+
+为保留现有配置，bundle id、内部存储/IPC/shell 标识及 Explorer 注册表键保持兼容。开发规则文件改为 `AWEI-WORK.md`，新主题文件使用 `.awei-work-theme`，仍识别旧主题扩展名。
+
+lint、类型、Rust fmt/clippy、资源体积、37 处文档引用、改名与兼容性隔离回归通过。辅助 CLI 实际运行可显示新名称；完整构建生成 `awei-work_1.0.5_x64-setup.exe`，程序 ProductName 和版本核对为 awei-work / 1.0.5。版本标签与下载见 [v1.0.5](https://github.com/zhiweiiii/awei-work/releases/tag/v1.0.5)，未实际执行覆盖安装和真实登录 CLI 验收。
+
 ## 1.0.4 变更（2026-10-10）
 
 - 顶部项目首字去掉状态点及不必要的阶段订阅，其他运行检测不变。
@@ -31,12 +39,12 @@
 
 代码修改已通过 lint、类型、Rust fmt/clippy、前端构建、资源体积检查及相关仓库外逻辑回归，媒体未在真实 WebView2/WSL 文件上验收。媒体 CSP 修改需重启原生开发进程或安装新包生效。
 
-完整 Windows x64 NSIS 构建成功，程序版本为 1.0.4，安装包为 `Terax_1.0.4_x64-setup.exe`。版本标签与下载见 [v1.0.4](https://github.com/zhiweiiii/terax-ai-plus/releases/tag/v1.0.4)，不包含签名自动更新。
+完整 Windows x64 NSIS 构建成功，程序版本为 1.0.4，安装包为 `Terax_1.0.4_x64-setup.exe`。版本标签与下载见 [v1.0.4](https://github.com/zhiweiiii/awei-work/releases/tag/v1.0.4)，不包含签名自动更新。
 
 文档整理后检查 37 处本地链接/图片，均有效；全仓旧路径引用已清除，保留截图字节未变。再次 lint、类型、Rust fmt/clippy 通过。删除内容可由 Git 历史恢复，旧图片额外备份在本机临时目录。
 
 ## 上一正式版本
 
-[v1.0.3](https://github.com/zhiweiiii/terax-ai-plus/releases/tag/v1.0.3) 包含跨分组活动项目、分组展开、精简用量、项目窗口归属/打开标识修复，以及最近五项目的明确会话恢复。发布标签指向 `177b8f4e8938719989730d7e2dc0c5b4251f29a0`，后续文档提交不移动标签。
+[v1.0.3](https://github.com/zhiweiiii/awei-work/releases/tag/v1.0.3) 包含跨分组活动项目、分组展开、精简用量、项目窗口归属/打开标识修复，以及最近五项目的明确会话恢复。发布标签指向 `177b8f4e8938719989730d7e2dc0c5b4251f29a0`，后续文档提交不移动标签。
 
 最终源码重新完整构建，程序版本 1.0.3；lint、类型、Rust fmt/clippy、相关逻辑回归与底栏尺寸检查通过。安装包 `Terax_1.0.3_x64-setup.exe` 为 5126037 字节，公开重新下载与本机 SHA256 一致：`97b98a25ba145adcf28a0d83e494e30a907d2cf675959d7c886f513a61f804e4`。签名更新和真实登录 CLI 恢复未被这轮构建验证。

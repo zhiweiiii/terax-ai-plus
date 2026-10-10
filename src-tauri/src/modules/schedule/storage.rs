@@ -36,7 +36,7 @@ impl Storage {
             .truncate(false)
             .share_mode(0)
             .open(directory.join(format!("{name}.lock")))
-            .map_err(|e| format!("无法锁定定时任务存储（可能已有另一个 Terax 实例）：{e}"))?;
+            .map_err(|e| format!("无法锁定定时任务存储（可能已有另一个 awei-work 实例）：{e}"))?;
         let storage = Self {
             path: directory.join(format!("{name}.json")),
             _lock: lock,

@@ -2,12 +2,12 @@
 # 用法: .\打包.ps1
 #
 # 做的事:
-#   1. 把被占用的旧产物改名挪开 (不关闭正在运行的 Terax)
+#   1. 把被占用的旧产物改名挪开 (不关闭正在运行的 awei-work)
 #   2. 类型检查
 #   3. 编译 CLI + 前端 + Rust 后端
 #   4. 生成 NSIS 安装包
 #
-# 打包过程中可以继续用正在开着的 Terax, 它跑的还是旧版本,
+# 打包过程中可以继续用正在开着的 awei-work, 它跑的还是旧版本,
 # 想用新版本自己重启一下就行.
 
 $ErrorActionPreference = "Stop"
@@ -21,7 +21,7 @@ function Step($msg) {
 
 $startTime = Get-Date
 
-$releaseExe = Join-Path $root "src-tauri\target\release\terax-prod.exe"
+$releaseExe = Join-Path $root "src-tauri\target\release\awei-work.exe"
 
 # 文件是不是被别的进程占着写不了
 function Test-FileLocked($path) {
@@ -36,7 +36,7 @@ function Test-FileLocked($path) {
 
 Step "挪开被占用的旧产物"
 # Windows 允许重命名正在运行的 exe: 把被占用的旧文件改个名让开位置,
-# 链接器就能写新文件; 已经开着的 Terax 继续用改名后的旧文件, 不受影响.
+# 链接器就能写新文件; 已经开着的 awei-work 继续用改名后的旧文件, 不受影响.
 # 改名留下的 *.locked-* 等下次打包 (那个进程退出后) 自动清掉.
 $outDirs = @(
     (Join-Path $root "src-tauri\target\release")
@@ -80,10 +80,10 @@ if ($locked) {
     Write-Host "  没有被占用的文件" -ForegroundColor Gray
 }
 
-$running = Get-Process -Name "terax-prod" -ErrorAction SilentlyContinue |
+$running = Get-Process -Name "awei-work" -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith("$root\", [StringComparison]::OrdinalIgnoreCase) }
 if ($running) {
-    Write-Host "  正式版 Terax 保持运行 ($($running.Count) 个), 跑的仍是旧版本" -ForegroundColor Gray
+    Write-Host "  正式版 awei-work 保持运行 ($($running.Count) 个), 跑的仍是旧版本" -ForegroundColor Gray
 }
 
 Step "类型检查"
@@ -102,7 +102,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $version = (Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json).version
 $exe   = $releaseExe
-$nsis  = Join-Path $root "src-tauri\target\release\bundle\nsis\Terax_${version}_x64-setup.exe"
+$nsis  = Join-Path $root "src-tauri\target\release\bundle\nsis\awei-work_${version}_x64-setup.exe"
 
 Step "产物"
 $ok = $true

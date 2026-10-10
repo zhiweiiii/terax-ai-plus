@@ -1,6 +1,6 @@
 # 开发、安全与发布
 
-开发约定以根目录 [TERAX.md](../TERAX.md) 为准，贡献流程见 [CONTRIBUTING.md](../CONTRIBUTING.md)。仅支持 Windows，本机或 WSL 工作区。
+开发约定以根目录 [AWEI-WORK.md](../AWEI-WORK.md) 为准，贡献流程见 [CONTRIBUTING.md](../CONTRIBUTING.md)。仅支持 Windows，本机或 WSL 工作区。
 
 ## 运行与检查
 
@@ -22,7 +22,7 @@ cargo clippy --all-targets --locked -- -D warnings
 
 依赖/模块入口变更额外检查 `pnpm knip --include 'files,dependencies,unlisted,unresolved'` 与生产依赖审计，不机械删除内部仍调用的 exports。默认仓库不保存测试及测试依赖；必要临时验证在仓库外进行，并明确模拟与真实设备边界。
 
-开发构建包含辅助 CLI 和手机内嵌页。主二进制 dev/release 都叫 `terax-prod`；Windows 运行中的实例会锁 exe。不要为释放构建锁无差别结束用户进程。编译缓存 `target/` 与安装包不是同一物，清理会增加下次构建时间。
+开发构建包含辅助 CLI 和手机内嵌页。主二进制 dev/release 都叫 `awei-work`；Windows 运行中的实例会锁 exe。不要为释放构建锁无差别结束用户进程。编译缓存 `target/` 与安装包不是同一物，清理会增加下次构建时间。
 
 ## 安全边界
 
@@ -50,7 +50,9 @@ Web 手机桥接是远程 shell，必须设置个人密码，并放在可信网�
 4. 上传 NSIS 到 draft，核对服务端摘要，公开发布为非预发布；再次公开下载并比对 SHA256。
 5. 在 [issues](issues.md) 简记版本、验证边界及重要变化，详细发布历史留在 GitHub Releases，不重复保存每轮进度表。
 
-更新器默认检查本仓库 `zhiweiiii/terax-ai-plus` 的正式 NSIS，并打开手动下载页。失败显示错误，不伪装已是最新。
+更新器默认检查本仓库 `zhiweiiii/awei-work` 的正式 NSIS，并打开手动下载页。失败显示错误，不伪装已是最新。
+
+项目品牌统一为 awei-work，安装包、辅助命令和源码包名同步更名。应用 bundle id、旧配置键/目录、IPC、shell 环境标识及 Explorer 注册表键保留兼容；否则已有项目、主题、定时任务和窗口记录可能无法读取。旧 `.terax-theme` 文件仍可导入，新文件使用 `.awei-work-theme`；更新检查兼容旧安装包名，不重命名已发布的历史附件。
 
 签名自动更新须同时配置 secret `TAURI_SIGNING_PRIVATE_KEY`、variable `TERAX_UPDATER_PUBLIC_KEY`，有密码时加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。工作流生成临时 overlay 并启用 `VITE_TERAX_SIGNED_UPDATES=true`；不得沿用上游公钥或 SignPath。安装前主窗口检查未保存文件/前台任务并等待工作区保存，设置窗口不能绕过。当前未完成实际签名渠道验收。
 

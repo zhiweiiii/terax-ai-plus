@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const LAST_CHECK_KEY = "terax-plus:updater:last-check";
 const CHECK_INTERVAL_MS = 30 * 60 * 1000;
-const RELEASES_URL = "https://github.com/zhiweiiii/terax-ai-plus/releases";
+const RELEASES_URL = "https://github.com/zhiweiiii/awei-work/releases";
 const SIGNED_UPDATES = import.meta.env.VITE_TERAX_SIGNED_UPDATES === "true";
 
 type ManualUpdate = {
@@ -33,7 +33,7 @@ function versionParts(value: string): number[] | null {
 
 async function checkManualUpdate(): Promise<ManualUpdate | null> {
   const response = await fetch(
-    "https://api.github.com/repos/zhiweiiii/terax-ai-plus/releases?per_page=20",
+    "https://api.github.com/repos/zhiweiiii/awei-work/releases?per_page=20",
     {
       signal: AbortSignal.timeout(15_000),
       headers: { Accept: "application/vnd.github+json" },
@@ -60,7 +60,8 @@ async function checkManualUpdate(): Promise<ManualUpdate | null> {
       !assets.some(
         (asset) =>
           typeof asset?.name === "string" &&
-          asset.name === `Terax_${parts.join(".")}_x64-setup.exe` &&
+          (asset.name === `awei-work_${parts.join(".")}_x64-setup.exe` ||
+            asset.name === `Terax_${parts.join(".")}_x64-setup.exe`) &&
           asset.state === "uploaded",
       )
     )

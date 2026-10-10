@@ -15,7 +15,7 @@ export function openExternalUrl(
 
   return openUrl(href)
     .catch((error) => {
-      console.error("[terax] failed to open external link:", error);
+      console.error("[awei-work] failed to open external link:", error);
     })
     .finally(() => onSettled?.());
 }

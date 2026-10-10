@@ -52,7 +52,7 @@ jobs:
           tauriScript: pnpm tauri
           args: ${{ steps.channel.outputs.args }}
           tagName: ${{ steps.channel.outputs.tag }}
-          releaseName: "Terax __VERSION__"
+          releaseName: "awei-work __VERSION__"
           releaseBody: "Download the Windows NSIS installer from the assets."
           releaseDraft: true
           prerelease: false

@@ -263,6 +263,69 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "awei-work"
+version = "1.0.5"
+dependencies = [
+ "argon2",
+ "awei-work-control-protocol",
+ "base64 0.22.1",
+ "chrono",
+ "dirs 6.0.0",
+ "futures-util",
+ "getrandom 0.3.4",
+ "globset",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "libc",
+ "log",
+ "notify",
+ "nucleo-matcher",
+ "portable-pty",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha1",
+ "shared_child",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-autostart",
+ "tauri-plugin-log",
+ "tauri-plugin-opener",
+ "tauri-plugin-os",
+ "tauri-plugin-process",
+ "tauri-plugin-store",
+ "tauri-plugin-updater",
+ "tauri-plugin-window-state",
+ "tempfile",
+ "tokio",
+ "which",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "awei-work-cli"
+version = "1.0.5"
+dependencies = [
+ "awei-work-control-protocol",
+ "dirs 6.0.0",
+ "libc",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "awei-work-control-protocol"
+version = "1.0.5"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5001,69 +5064,6 @@ checksum = "c4790fc369d5a530f4b544b094e31388b9b3a37c0f4652ade4505945f5660d24"
 dependencies = [
  "new_debug_unreachable",
  "utf-8",
-]
-
-[[package]]
-name = "terax"
-version = "1.0.4"
-dependencies = [
- "argon2",
- "base64 0.22.1",
- "chrono",
- "dirs 6.0.0",
- "futures-util",
- "getrandom 0.3.4",
- "globset",
- "grep-matcher",
- "grep-regex",
- "grep-searcher",
- "ignore",
- "libc",
- "log",
- "notify",
- "nucleo-matcher",
- "portable-pty",
- "reqwest",
- "rusqlite",
- "rustls",
- "serde",
- "serde_json",
- "sha1",
- "shared_child",
- "tauri",
- "tauri-build",
- "tauri-plugin-autostart",
- "tauri-plugin-log",
- "tauri-plugin-opener",
- "tauri-plugin-os",
- "tauri-plugin-process",
- "tauri-plugin-store",
- "tauri-plugin-updater",
- "tauri-plugin-window-state",
- "tempfile",
- "terax-control-protocol",
- "tokio",
- "which",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "terax-cli"
-version = "1.0.4"
-dependencies = [
- "dirs 6.0.0",
- "libc",
- "serde_json",
- "terax-control-protocol",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "terax-control-protocol"
-version = "1.0.4"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

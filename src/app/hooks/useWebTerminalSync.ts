@@ -100,7 +100,7 @@ export function useWebTerminalSync({
       if (disposed) off();
       else unlisten = off;
     })().catch((error) =>
-      console.warn("[terax] resize listener failed:", error),
+      console.warn("[awei-work] resize listener failed:", error),
     );
     return () => {
       disposed = true;
@@ -125,7 +125,7 @@ export function useWebTerminalSync({
           try {
             data = snapshotLeaf(leafId);
           } catch (err) {
-            console.warn("[terax] snapshotLeaf failed:", err);
+            console.warn("[awei-work] snapshotLeaf failed:", err);
           }
           void invoke("web_snapshot_reply", {
             requestId,
@@ -138,7 +138,7 @@ export function useWebTerminalSync({
       if (disposed) off();
       else unlisten = off;
     })().catch((error) =>
-      console.warn("[terax] snapshot listener failed:", error),
+      console.warn("[awei-work] snapshot listener failed:", error),
     );
     return () => {
       disposed = true;
@@ -161,7 +161,7 @@ export function useWebTerminalSync({
       if (disposed) off();
       else unlisten = off;
     })().catch((error) =>
-      console.warn("[terax] activation listener failed:", error),
+      console.warn("[awei-work] activation listener failed:", error),
     );
     return () => {
       disposed = true;

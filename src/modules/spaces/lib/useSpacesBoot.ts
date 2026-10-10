@@ -141,7 +141,7 @@ export function useSpacesBoot({
           activeTab.id,
         );
       } catch (e) {
-        console.error("[terax] spaces boot failed:", e);
+        console.error("[awei-work] spaces boot failed:", e);
         if (mounted.current) errorToast("加载工作区失败，原始数据已保留", e);
       } finally {
         if (mounted.current) markBooted();

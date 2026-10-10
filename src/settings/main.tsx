@@ -7,7 +7,7 @@ import ReactDOM from "react-dom/client";
 import { SettingsApp } from "./SettingsApp";
 
 if (window.top !== window.self)
-  throw new Error("Terax settings cannot run inside a frame");
+  throw new Error("awei-work settings cannot run inside a frame");
 
 if (USE_CUSTOM_WINDOW_CONTROLS) {
   document.documentElement.dataset.chrome = "borderless";

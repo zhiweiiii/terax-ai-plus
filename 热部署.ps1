@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 Set-Location $root
 
-$debugExe = Join-Path $root "src-tauri\target\debug\terax-prod.exe"
+$debugExe = Join-Path $root "src-tauri\target\debug\awei-work.exe"
 $pidFile = Join-Path $root ".terax-dev.pid"
 $logFile = Join-Path $root "dev.log"
 
@@ -54,7 +54,7 @@ function Stop-DevInstance {
     }
 
     # 兜底: 只杀 target/debug/ 下的进程, 不动正式版
-    $devProcs = Get-Process -Name "terax-prod" -ErrorAction SilentlyContinue |
+    $devProcs = Get-Process -Name "awei-work" -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -eq $debugExe }
     if ($devProcs) {
         $devProcs | Stop-Process -Force
@@ -62,7 +62,7 @@ function Stop-DevInstance {
         Write-Host "  兜底关闭 $($devProcs.Count) 个开发进程" -ForegroundColor Gray
     }
 
-    # 等旧实例把 exe 让出来。cargo 要覆盖 terax-prod.exe, 进程虽然杀了,
+    # 等旧实例把 exe 让出来。cargo 要覆盖 awei-work.exe, 进程虽然杀了,
     # 文件句柄还要一会儿才释放, 立刻编译会 "failed to remove ... 拒绝访问"
     for ($i = 0; $i -lt 20; $i++) {
         if (-not (Test-Path -LiteralPath $debugExe)) { break }
@@ -77,7 +77,7 @@ function Stop-DevInstance {
             break
         } catch {
             if ($i -eq 19) {
-                throw "等不到 terax-prod.exe 解锁，停止启动"
+                throw "等不到 awei-work.exe 解锁，停止启动"
             }
             Start-Sleep -Milliseconds 500
         }
@@ -94,7 +94,7 @@ if ($Stop) {
 
 # 上一次的 dev server 没退干净时会把端口占着, 而 vite 是 strictPort, 占用就直接
 # 报 "Port 1420 is already in use" 启动失败。而且它常常是个孤儿 node 进程,
-# 上面按 exe 路径杀 terax-prod 的逻辑碰不到它。
+# 上面按 exe 路径杀 awei-work 的逻辑碰不到它。
 #   1420   vite dev server
 #   1421   vite HMR (只有设了 TAURI_DEV_HOST 才用得上)
 #   34269  开发版手机端 Web 服务

@@ -29,7 +29,7 @@ if (args[0] !== "build") {
 
 const transaction = preparePackageVersion();
 if (transaction.changed) {
-  console.log(`Terax package version: v${transaction.version}`);
+  console.log(`awei-work package version: v${transaction.version}`);
 }
 
 const status = runTauri();

@@ -803,7 +803,7 @@ export default function App() {
       await whenSessionReady(leafId);
       if (!writeToSession(leafId, `${command}\r`)) {
         console.error(
-          "[terax] launch terminal closed before --run could start",
+          "[awei-work] launch terminal closed before --run could start",
         );
       }
     })();
@@ -1122,7 +1122,7 @@ export default function App() {
     (id: ShortcutId, e: KeyboardEvent) => {
       // A running agent binds these itself, and the global handler captures on
       // window and calls preventDefault, so they never reached it: pressing
-      // Ctrl+P inside opencode opened Terax's command palette instead. Giving
+      // Ctrl+P inside opencode opened awei-work's command palette instead. Giving
       // them up is scoped as tightly as possible - the key must be one the
       // agents actually use, the focus must be inside a terminal, and that
       // pane must have an agent running right now (OSC detection, not "is this

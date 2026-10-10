@@ -227,13 +227,13 @@ export function ThemesSection() {
               className="h-7 px-2 text-[11px]"
               onClick={onPickThemeFile}
             >
-              导入 .terax-theme
+              导入 .awei-work-theme
             </Button>
           </div>
           <input
             ref={fileInputRef}
             type="file"
-            accept=".terax-theme,.json,application/json"
+            accept=".awei-work-theme,.terax-theme,.json,application/json"
             className="hidden"
             onChange={(e) => {
               void handleThemeFiles(e.target.files);

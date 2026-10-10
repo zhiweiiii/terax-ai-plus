@@ -13,7 +13,7 @@ import { errorToast } from "@/lib/errorToast";
 // This fork. The upstream project keeps its own repo and site; pointing at
 // them here would show someone else's releases and issues as if they were
 // this build's.
-const REPO_URL = "https://github.com/zhiweiiii/terax-ai-plus";
+const REPO_URL = "https://github.com/zhiweiiii/awei-work";
 const UPSTREAM_URL = "https://github.com/crynta/terax-ai";
 
 const PLATFORM_LABEL: Record<string, string> = {
@@ -27,7 +27,7 @@ const PLATFORM_LABEL: Record<string, string> = {
 
 export function AboutSection() {
   const [version, setVersion] = useState("");
-  const [name, setName] = useState("Terax");
+  const [name, setName] = useState("awei-work");
   const [build, setBuild] = useState("");
   const { status, check, install } = useUpdater({ autoCheck: false });
   const checking = status.kind === "checking";
@@ -125,7 +125,7 @@ export function AboutSection() {
             className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
           >
             <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
-            zhiweiiii/terax-ai-plus
+            zhiweiiii/awei-work
           </button>
         </dd>
         <dt className="text-muted-foreground">上游项目</dt>

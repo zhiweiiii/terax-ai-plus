@@ -92,7 +92,7 @@ async function respond(
     response,
   });
   if (!delivered) {
-    console.warn(`[terax] control response expired: ${requestId}`);
+    console.warn(`[awei-work] control response expired: ${requestId}`);
   }
 }
 
@@ -137,7 +137,7 @@ export function useControlBridge({
               await window.setFocus();
               focused = true;
             } catch (error) {
-              console.warn("[terax] could not focus control target:", error);
+              console.warn("[awei-work] could not focus control target:", error);
             }
           }
           if (disposed) {
@@ -150,7 +150,7 @@ export function useControlBridge({
           if (tabId === null) {
             throw new RequestError(
               "open_failed",
-              "Terax could not create an editor tab",
+              "awei-work could not create an editor tab",
             );
           }
           await respond(request.id, {
@@ -177,7 +177,7 @@ export function useControlBridge({
             : { code: "frontend_error", message: String(error) };
         await respond(request.id, { ok: false, error: responseError }).catch(
           (responseError) => {
-            console.error("[terax] control response failed:", responseError);
+            console.error("[awei-work] control response failed:", responseError);
           },
         );
       }
@@ -195,14 +195,14 @@ export function useControlBridge({
         return setFrontendReady(true);
       })
       .catch((error) => {
-        console.error("[terax] control bridge setup failed:", error);
+        console.error("[awei-work] control bridge setup failed:", error);
       });
 
     return () => {
       disposed = true;
       unlisten?.();
       void setFrontendReady(false).catch((error) => {
-        console.error("[terax] control bridge cleanup failed:", error);
+        console.error("[awei-work] control bridge cleanup failed:", error);
       });
     };
   }, [ready, tabsRef, activeTabIdRef, activeSpaceIdRef, onOpen]);

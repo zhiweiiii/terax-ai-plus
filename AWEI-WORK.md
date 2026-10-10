@@ -1,12 +1,12 @@
-# TERAX.md
+# AWEI-WORK.md
 
-Terax 会把本文件作为工作区 agent 记忆加载。它规定项目边界与开发规则，详细设计见 [docs/README.md](docs/README.md)。
+awei-work 会把本文件作为工作区 agent 记忆加载。它规定项目边界与开发规则，详细设计见 [docs/README.md](docs/README.md)。
 
 ## 项目与方向
 
-Terax AI Plus 是面向 Claude Code / Codex 的轻量、终端优先开发工作区，基于 crynta/terax-ai，保留 Apache 2.0 许可和出处。仅支持 Windows，含本机及 WSL 工作区；不构建 macOS/Linux，不重新实现 AI agent 或传统 IDE。
+awei-work 是面向 Claude Code / Codex 的轻量、终端优先开发工作区，基于 crynta/terax-ai，保留 Apache 2.0 许可和出处。仅支持 Windows，含本机及 WSL 工作区；不构建 macOS/Linux，不重新实现 AI agent 或传统 IDE。
 
-技术栈：Tauri 2 / Rust、React 19 / TypeScript、xterm.js、CodeMirror 6。主二进制 dev/release 均为 terax-prod，bundle id 为 app.crynta.terax。包管理器只用 pnpm，绝不 npm/npx/yarn。
+技术栈：Tauri 2 / Rust、React 19 / TypeScript、xterm.js、CodeMirror 6。主二进制 dev/release 均为 awei-work。为继承已安装版本的配置，bundle id 保持 app.crynta.terax，旧存储键、目录、IPC 和 shell 环境标识不作为品牌更名；不删除旧数据。包管理器只用 pnpm，绝不 npm/npx/yarn。
 
 ## 质量与约定
 

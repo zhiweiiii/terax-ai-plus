@@ -79,9 +79,9 @@ Write-Host ''
 
 # A running instance holds a lock on the exe, and a partial delete leaves a
 # target that cargo has to sort out. Say so rather than failing halfway.
-$running = Get-Process -Name 'terax-prod' -ErrorAction SilentlyContinue
+$running = Get-Process -Name 'awei-work' -ErrorAction SilentlyContinue
 if ($running) {
-  Write-Warning "terax-prod 正在运行（PID $($running.Id -join ', ')），它会锁住 target 里的 exe。"
+  Write-Warning "awei-work 正在运行（PID $($running.Id -join ', ')），它会锁住 target 里的 exe。"
   Write-Warning "先关掉它再跑本脚本，否则删除会中途失败。"
   return
 }

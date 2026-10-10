@@ -1,8 +1,8 @@
 <div align="center">
-  <img src="public/logo.png" width="96" height="96" alt="Terax" />
-  <h1>Terax AI Plus</h1>
+  <img src="public/logo.png" width="96" height="96" alt="awei-work" />
+  <h1>awei-work</h1>
   <p>面向 Claude Code / Codex 开发的轻量终端工作区</p>
-  <p><a href="https://github.com/zhiweiiii/terax-ai-plus/releases/latest">下载正式版</a> · <a href="docs/README.md">项目文档</a> · <a href="https://github.com/zhiweiiii/terax-ai-plus/issues">反馈问题</a></p>
+  <p><a href="https://github.com/zhiweiiii/awei-work/releases/latest">下载正式版</a> · <a href="docs/README.md">项目文档</a> · <a href="https://github.com/zhiweiiii/awei-work/issues">反馈问题</a></p>
 </div>
 
 把 AI 编码终端、项目文件、代码编辑、Git 和网页预览放进一个窗口。直接使用你熟悉的 Claude Code / Codex CLI，不替换它们的工作方式；离开电脑后，也能通过手机继续查看和操作同一会话。
@@ -30,7 +30,7 @@ Windows 桌面：项目文件与 Codex 终端区域。
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/zhiweiiii/terax-ai-plus/releases/latest) 下载 Windows x64 的 .exe 安装包。
+1. 从 [Releases](https://github.com/zhiweiiii/awei-work/releases/latest) 下载 Windows x64 的 .exe 安装包。
 2. 打开项目目录，在终端运行 claude 或 codex，也可以从会话菜单新建对话。
 3. 在侧栏查看文件和 Git 改动，在编辑器中检查 agent 的修改。
 4. 需要手机访问时，在设置中配置个人密码，按应用显示的地址连接；手机与电脑需网络可达。
@@ -62,4 +62,4 @@ cargo clippy --all-targets --locked -- -D warnings
 
 ## 项目来源与许可
 
-本项目基于 [crynta/terax-ai](https://github.com/crynta/terax-ai)，沿用 [Apache License 2.0](LICENSE) 并保留原始版权声明。此分支聚焦 Windows 下的 Claude Code / Codex 开发，补充手机对话视图、会话与用量、持久化定时任务、供应商网关及稳定性改进；名称与图标沿用上游基础。
+本项目基于 [crynta/terax-ai](https://github.com/crynta/terax-ai)，沿用 [Apache License 2.0](LICENSE) 并保留原始版权声明。项目名为 awei-work，聚焦 Windows 下的 Claude Code / Codex 开发，补充手机对话视图、会话与用量、持久化定时任务、供应商网关及稳定性改进；图标沿用上游基础。

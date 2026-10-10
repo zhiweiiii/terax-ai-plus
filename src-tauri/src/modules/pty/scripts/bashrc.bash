@@ -25,7 +25,7 @@ if [ -z "$__TERAX_HOOKS_LOADED" ]; then
   [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
 
   if [ -n "$TERAX_CLI" ] && [ -x "$TERAX_CLI" ]; then
-    terax() {
+    awei-work() {
       command "$TERAX_CLI" "$@"
     }
   fi

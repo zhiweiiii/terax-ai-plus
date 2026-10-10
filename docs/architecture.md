@@ -1,6 +1,6 @@
 # 架构与项目窗口
 
-Terax 是面向 Claude Code / Codex 的 Windows 终端工作区，支持本机和 WSL。Rust/Tauri 负责系统访问，React webview 负责界面；不内置另一套 AI agent 运行时。
+awei-work 是面向 Claude Code / Codex 的 Windows 终端工作区，支持本机和 WSL。Rust/Tauri 负责系统访问，React webview 负责界面；不内置另一套 AI agent 运行时。
 
 ## 代码入口
 
@@ -57,6 +57,6 @@ LSP 没有根标记就不启动，每个服务器最多 4 个会话，闲置 3 �
 
 ## 本地 CLI
 
-应用运行时，原生面板中可用 `terax open <file> [--line N] [--no-focus] [--json]`，以及 `ping`、`capabilities`、`identify`。调用优先绑定发起面板所属空间；明确面板已关闭时失败，不转到其他项目。
+应用运行时，原生面板中可用 `awei-work open <file> [--line N] [--no-focus] [--json]`，以及 `ping`、`capabilities`、`identify`。调用优先绑定发起面板所属空间；明确面板已关闭时失败，不转到其他项目。
 
 `control.rs` 使用临时回环 TCP 端口与随机令牌，用户缓存中的 `terax/control.json` 用于发现。消息上限 64 KiB，连接与待处理 UI 请求各限 32；每次转发使用独立编号，关闭释放等待者。文件必须为授权目录内普通文件，凭据不输出。辅助 CLI 随包分发，不全局安装，不能拉起未运行的应用，目前不向 WSL 注入控制凭据。

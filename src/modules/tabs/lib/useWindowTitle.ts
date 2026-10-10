@@ -3,7 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { findLeafCwd } from "@/modules/terminal/lib/panes";
 import type { Tab } from "./useTabs";
 
-const APP_NAME = "Terax";
+const APP_NAME = "awei-work";
 
 function basename(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -36,7 +36,7 @@ export function useWindowTitle(
     void getCurrentWindow()
       .setTitle(title)
       .catch((error) =>
-        console.warn("[terax] window title update failed:", error),
+        console.warn("[awei-work] window title update failed:", error),
       );
   }, [project, label]);
 }

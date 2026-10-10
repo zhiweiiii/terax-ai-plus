@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use serde_json::{json, Value};
-use tauri::{Emitter, Manager};
-use terax_control_protocol::{
+use awei_work_control_protocol::{
     ControlDescriptor, ControlRequest, ControlResponse, FrontendRequest, FrontendResponse,
     OpenParams, MAX_MESSAGE_BYTES, METHODS, METHOD_CAPABILITIES, METHOD_IDENTIFY, METHOD_OPEN,
     METHOD_PING, PROTOCOL_VERSION, SERVER_RESPONSE_ID,
 };
+use serde_json::{json, Value};
+use tauri::{Emitter, Manager};
 
 use crate::modules::{fs, workspace};
 
@@ -140,7 +140,7 @@ pub fn start(app: tauri::AppHandle, state: ControlState) -> Result<(), String> {
         match prepare_cli_launcher(&descriptor_path, cli_path) {
             Ok(dir) => Some(dir),
             Err(error) => {
-                log::warn!("could not prepare terax CLI launcher: {error}");
+                log::warn!("could not prepare awei-work CLI launcher: {error}");
                 None
             }
         }
@@ -175,7 +175,7 @@ pub fn start(app: tauri::AppHandle, state: ControlState) -> Result<(), String> {
     }
 
     if cli_path.is_none() {
-        log::warn!("bundled terax-cli executable not found; shell alias disabled");
+        log::warn!("bundled awei-work-cli executable not found; shell alias disabled");
     }
 
     let listener_state = state.clone();
@@ -491,7 +491,7 @@ fn forward_to_frontend(
         return ControlResponse::failure(
             request.id,
             "frontend_not_ready",
-            "Terax is still restoring its workspace; try again shortly",
+            "awei-work is still restoring its workspace; try again shortly",
         );
     }
 
@@ -517,7 +517,11 @@ fn forward_to_frontend(
         if state.0.shutting_down.load(Ordering::Acquire)
             || !state.0.frontend_ready.load(Ordering::Acquire)
         {
-            return ControlResponse::failure(id, "frontend_unavailable", "Terax UI is unavailable");
+            return ControlResponse::failure(
+                id,
+                "frontend_unavailable",
+                "awei-work UI is unavailable",
+            );
         }
         if pending.len() >= MAX_PENDING_REQUESTS {
             return ControlResponse::failure(
@@ -554,7 +558,7 @@ fn forward_to_frontend(
         return ControlResponse::failure(
             id,
             "frontend_unavailable",
-            format!("could not reach Terax UI: {error}"),
+            format!("could not reach awei-work UI: {error}"),
         );
     }
 
@@ -564,7 +568,7 @@ fn forward_to_frontend(
         }
         Ok(response) => {
             let error = response.error.unwrap_or_else(|| {
-                terax_control_protocol::ControlError::new(
+                awei_work_control_protocol::ControlError::new(
                     "frontend_error",
                     "frontend request failed",
                 )
@@ -578,12 +582,16 @@ fn forward_to_frontend(
                 .lock()
                 .expect("control pending poisoned")
                 .remove(&frontend_id);
-            ControlResponse::failure(id, "frontend_timeout", "Terax UI did not respond in time")
+            ControlResponse::failure(
+                id,
+                "frontend_timeout",
+                "awei-work UI did not respond in time",
+            )
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => ControlResponse::failure(
             id,
             "frontend_unavailable",
-            "Terax UI response channel closed",
+            "awei-work UI response channel closed",
         ),
     }
 }
@@ -739,9 +747,9 @@ fn descriptor_lock(path: &Path) -> Result<std::fs::File, String> {
 
 fn find_bundled_cli() -> Option<PathBuf> {
     let filename = if cfg!(windows) {
-        "terax-cli.exe"
+        "awei-work-cli.exe"
     } else {
-        "terax-cli"
+        "awei-work-cli"
     };
     if let Some(path) = std::env::current_exe()
         .ok()
@@ -755,7 +763,7 @@ fn find_bundled_cli() -> Option<PathBuf> {
         let binaries = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
         let target = option_env!("TAURI_ENV_TARGET_TRIPLE")?;
         let candidate = binaries.join(format!(
-            "terax-cli-{target}{}",
+            "awei-work-cli-{target}{}",
             std::env::consts::EXE_SUFFIX
         ));
         return is_cli_candidate(&candidate).then_some(candidate);
@@ -859,7 +867,11 @@ fn prepare_cli_launcher(descriptor: &Path, cli_path: &Path) -> Result<PathBuf, S
             .map_err(|error| format!("secure CLI bin directory: {error}"))?;
     }
 
-    let launcher = bin_dir.join(if cfg!(windows) { "terax.exe" } else { "terax" });
+    let launcher = bin_dir.join(if cfg!(windows) {
+        "awei-work.exe"
+    } else {
+        "awei-work"
+    });
     if std::fs::symlink_metadata(&launcher).is_ok() {
         std::fs::remove_file(&launcher)
             .map_err(|error| format!("replace stale CLI launcher: {error}"))?;
@@ -878,7 +890,11 @@ fn prepare_cli_launcher(descriptor: &Path, cli_path: &Path) -> Result<PathBuf, S
 }
 
 fn remove_launcher_dir(bin_dir: &Path) {
-    let launcher = bin_dir.join(if cfg!(windows) { "terax.exe" } else { "terax" });
+    let launcher = bin_dir.join(if cfg!(windows) {
+        "awei-work.exe"
+    } else {
+        "awei-work"
+    });
     let _ = std::fs::remove_file(launcher);
     let _ = std::fs::remove_dir(bin_dir);
     if let Some(run_dir) = bin_dir.parent() {

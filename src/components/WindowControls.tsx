@@ -34,7 +34,7 @@ export function WindowControls({ closeOnly = false }: Props) {
           if (alive && current === request) setMaximized(value);
         })
         .catch((error) =>
-          console.error("[terax] window state query failed:", error),
+          console.error("[awei-work] window state query failed:", error),
         );
     };
     refresh();
@@ -45,7 +45,7 @@ export function WindowControls({ closeOnly = false }: Props) {
         else unlisten = un;
       })
       .catch((error) =>
-        console.error("[terax] window resize listener failed:", error),
+        console.error("[awei-work] window resize listener failed:", error),
       );
     return () => {
       alive = false;

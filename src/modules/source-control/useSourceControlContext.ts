@@ -140,7 +140,7 @@ export function useSourceControlContext({
       if (refreshActive)
         void effectiveRef.current
           .refresh({ remote: "never" })
-          .catch((error) => console.warn("[terax] Git refresh failed:", error));
+          .catch((error) => console.warn("[awei-work] Git refresh failed:", error));
       const activeRoot = effectiveRef.current.repo?.repoRoot;
       for (const root of others) {
         if (refreshActive && root === activeRoot) continue;
@@ -148,7 +148,7 @@ export function useSourceControlContext({
           void refreshRepoRef
             .current(root)
             .catch((error) =>
-              console.warn("[terax] Git refresh failed:", error),
+              console.warn("[awei-work] Git refresh failed:", error),
             );
       }
     }, 150);

@@ -271,7 +271,7 @@ const linkHover: Extension = [
 ];
 
 export function lspInteractions(opts: {
-  client: TeraxLspClient;
+  client: AweiWorkLspClient;
   documentUri: string;
   rootPath: string;
   onExternal: (uri: string, line: number) => void;
@@ -472,7 +472,7 @@ type RawRpc = {
 
 // The lib's notify/request maps omit didClose, didSave and the
 // shutdown/exit handshake; servers need all three for correct lifecycle.
-export class TeraxLspClient extends LanguageServerClient {
+export class AweiWorkLspClient extends LanguageServerClient {
   static hostPid: number | null = null;
 
   // The lib omits the publishDiagnostics capability and servers like
@@ -480,7 +480,7 @@ export class TeraxLspClient extends LanguageServerClient {
   // enables the server-side parent watchdog.
   protected override getInitializeParams() {
     const params = super.getInitializeParams();
-    params.processId = TeraxLspClient.hostPid;
+    params.processId = AweiWorkLspClient.hostPid;
     params.capabilities.textDocument = {
       ...params.capabilities.textDocument,
       publishDiagnostics: { relatedInformation: true },
@@ -504,13 +504,13 @@ export class TeraxLspClient extends LanguageServerClient {
   textDocumentDidClose(uri: string): void {
     void this.raw
       .notify("textDocument/didClose", { textDocument: { uri } })
-      .catch((error) => console.warn("[terax] LSP didClose failed", error));
+      .catch((error) => console.warn("[awei-work] LSP didClose failed", error));
   }
 
   textDocumentDidSave(uri: string): void {
     void this.raw
       .notify("textDocument/didSave", { textDocument: { uri } })
-      .catch((error) => console.warn("[terax] LSP didSave failed", error));
+      .catch((error) => console.warn("[awei-work] LSP didSave failed", error));
   }
 
   async shutdownGracefully(timeoutMs = 2000): Promise<void> {

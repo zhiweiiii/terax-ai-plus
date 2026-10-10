@@ -55,7 +55,7 @@ function BackgroundImage({ imageId }: { imageId: string | null }) {
         if (alive) setVisible(true);
       });
     })().catch((error) =>
-      console.error("[terax] background image load failed:", error),
+      console.error("[awei-work] background image load failed:", error),
     );
     return () => {
       alive = false;

@@ -108,7 +108,7 @@ pub fn detect_shell_name() -> String {
 pub struct ShellInfo {
     pub name: String,
     pub path: String,
-    /// True when Terax injects OSC 7/133 integration for this shell (cwd
+    /// True when awei-work injects OSC 7/133 integration for this shell (cwd
     /// tracking, command blocks, agent detection). Others spawn bare.
     pub integrated: bool,
 }

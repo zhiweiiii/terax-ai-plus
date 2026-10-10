@@ -79,19 +79,19 @@ export function UpdaterDialog({
                 ? "Installing update"
                 : downloading
                   ? "Downloading update…"
-                  : `Terax v${update?.version} is available`}
+                  : `awei-work v${update?.version} is available`}
           </DialogTitle>
           <DialogDescription>
             {status.kind === "error"
               ? status.message
               : ready
-                ? "正在启动安装程序，Terax 将退出。"
+                ? "正在启动安装程序，awei-work 将退出。"
                 : downloading
                   ? progress !== null
                     ? `${progress.toFixed(0)}% - ${formatBytes(status.downloaded)}`
                     : formatBytes(status.downloaded)
                   : manual
-                    ? "新版本已发布。打开下载页面安装后，重新启动 Terax。"
+                    ? "新版本已发布。打开下载页面安装后，重新启动 awei-work。"
                     : update?.body || "A new version is ready to install."}
           </DialogDescription>
         </DialogHeader>

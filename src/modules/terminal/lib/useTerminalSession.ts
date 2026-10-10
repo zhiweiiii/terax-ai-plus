@@ -263,7 +263,7 @@ function queuePendingInput(s: Session, data: string): boolean {
 
 function observePty(operation: Promise<unknown>, action: string): void {
   void operation.catch((error) =>
-    console.warn(`[terax] PTY ${action} failed:`, error),
+    console.warn(`[awei-work] PTY ${action} failed:`, error),
   );
 }
 
@@ -544,7 +544,7 @@ function confirmBlockPrompt(leafId: number): void {
         });
       } catch (e) {
         console.error(
-          "[terax] pty_has_foreground_job failed for block prompt",
+          "[awei-work] pty_has_foreground_job failed for block prompt",
           e,
         );
         return;
@@ -578,7 +578,7 @@ async function leafHasForegroundJob(leafId: number): Promise<boolean> {
   try {
     return await invoke<boolean>("pty_has_foreground_job", { id: s.pty.id });
   } catch (e) {
-    console.error("[terax] pty_has_foreground_job failed for leaf", leafId, e);
+    console.error("[awei-work] pty_has_foreground_job failed for leaf", leafId, e);
     return true;
   }
 }
@@ -691,7 +691,7 @@ configureRendererPool({
         // phones, which then re-gridded twice per rebind while a TUI ran.
         pty
           .kick(cols, rows)
-          .catch((e) => console.warn("[terax] kickPty failed:", e));
+          .catch((e) => console.warn("[awei-work] kickPty failed:", e));
       },
     };
   },
@@ -833,7 +833,7 @@ async function openPtyWithRetry(
   try {
     return await openPtyForSession(leafId, s, cwd);
   } catch (e) {
-    console.error("[terax] openPty failed, retrying once:", e);
+    console.error("[awei-work] openPty failed, retrying once:", e);
     await new Promise((r) => setTimeout(r, SPAWN_RETRY_DELAY_MS));
     if (s.disposed) throw e;
     return openPtyForSession(leafId, s, cwd);
@@ -844,7 +844,7 @@ async function openPtyWithRetry(
 // (or respawns the last one, which would loop). Show the error in the pane
 // and let Enter retry instead of leaving a dead black grid.
 function surfaceSpawnFailure(leafId: number, s: Session, e: unknown): void {
-  console.error("[terax] shell spawn failed:", e);
+  console.error("[awei-work] shell spawn failed:", e);
   s.shellExited = true;
   s.awaitingRestart = true;
   cancelPromptConfirm(s);
@@ -855,7 +855,7 @@ function surfaceSpawnFailure(leafId: number, s: Session, e: unknown): void {
   deliverPtyBytes(
     leafId,
     new TextEncoder().encode(
-      `\r\n\x1b[31m[terax] failed to start shell: ${detail}\x1b[0m\r\n\x1b[2mpress Enter to retry\x1b[0m\r\n`,
+      `\r\n\x1b[31m[awei-work] failed to start shell: ${detail}\x1b[0m\r\n\x1b[2mpress Enter to retry\x1b[0m\r\n`,
     ),
   );
 }
@@ -876,7 +876,7 @@ function surfaceAbnormalExit(leafId: number, s: Session, code: number): void {
   deliverPtyBytes(
     leafId,
     new TextEncoder().encode(
-      `\r\n\x1b[33m[terax] shell exited with code ${code}${hex}\x1b[0m\r\n\x1b[2mpress Enter to restart\x1b[0m\r\n`,
+      `\r\n\x1b[33m[awei-work] shell exited with code ${code}${hex}\x1b[0m\r\n\x1b[2mpress Enter to restart\x1b[0m\r\n`,
     ),
   );
 }
@@ -1191,7 +1191,7 @@ export async function leafHasForegroundProcess(
     return result;
   } catch (e) {
     console.error(
-      "[terax] pty_has_foreground_process failed for leaf",
+      "[awei-work] pty_has_foreground_process failed for leaf",
       leafId,
       e,
     );

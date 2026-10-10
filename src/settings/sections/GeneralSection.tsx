@@ -230,7 +230,7 @@ export function GeneralSection() {
         <Label>编码 agent</Label>
         <SettingRow
           title="快捷键交给运行中的 agent"
-          description="Claude Code、opencode 这类程序自己绑定了 Ctrl+P / Ctrl+T。开启后，当焦点在正在运行 agent 的命令行里时，这四个键（Ctrl+P、Ctrl+Shift+P、Ctrl+T、Ctrl+Shift+T）交给 agent，不再触发 Terax 的命令面板和新建标签页。关闭则始终由 Terax 处理。"
+          description="Claude Code、opencode 这类程序自己绑定了 Ctrl+P / Ctrl+T。开启后，当焦点在正在运行 agent 的命令行里时，这四个键（Ctrl+P、Ctrl+Shift+P、Ctrl+T、Ctrl+Shift+T）交给 agent，不再触发 awei-work 的命令面板和新建标签页。关闭则始终由 awei-work 处理。"
         >
           <Switch
             checked={agentKeyPassthrough}
@@ -523,7 +523,7 @@ export function GeneralSection() {
       <div className="flex flex-col gap-2">
         <Label>启动</Label>
         <div className="flex flex-col gap-2">
-          <SettingRow title="开机自启" description="登录系统时自动打开 Terax。">
+          <SettingRow title="开机自启" description="登录系统时自动打开 awei-work。">
             <Switch
               checked={autostart}
               aria-label="开机自启"

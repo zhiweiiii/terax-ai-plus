@@ -145,7 +145,7 @@ function applyFilter(
   value: boolean,
 ): void {
   set(value).catch((e) => {
-    console.error("[terax] filter preference write failed:", e);
+    console.error("[awei-work] filter preference write failed:", e);
     toast.error(`无法保存过滤设置：${typeof e === "string" ? e : String(e)}`);
   });
 }

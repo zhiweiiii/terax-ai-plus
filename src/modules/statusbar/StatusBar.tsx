@@ -25,7 +25,7 @@ export function StatusBar({ windowBar, onOpenSettings, activeLeafId }: Props) {
         if (alive) setVersion(value);
       })
       .catch((error) => {
-        if (alive) console.warn("[terax] version query failed:", error);
+        if (alive) console.warn("[awei-work] version query failed:", error);
       });
     return () => {
       alive = false;
@@ -44,7 +44,7 @@ export function StatusBar({ windowBar, onOpenSettings, activeLeafId }: Props) {
         <WebStatusBadge />
         <span
           className="select-text px-1 text-[10px] tabular-nums text-muted-foreground"
-          title="Terax 版本"
+          title="awei-work 版本"
         >
           v{version ?? "--"}
         </span>

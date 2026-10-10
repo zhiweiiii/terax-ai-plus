@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Terax",
-  "version": "1.0.4",
+  "productName": "awei-work",
+  "version": "1.0.5",
   "identifier": "app.crynta.terax",
   "build": {
     "beforeDevCommand": "pnpm build:cli:dev && pnpm dev",
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Terax",
+        "title": "awei-work",
         "width": 800,
         "height": 600,
         "minWidth": 420,
@@ -37,15 +37,15 @@
   "bundle": {
     "active": true,
     "externalBin": [
-      "binaries/terax-cli"
+      "binaries/awei-work-cli"
     ],
     "targets": [
       "nsis"
     ],
     "createUpdaterArtifacts": false,
-    "copyright": "Copyright 2026 Crynta",
+    "copyright": "Copyright 2026 zhiweiiii; based on Terax by Crynta",
     "license": "Apache-2.0",
-    "publisher": "Crynta",
+    "publisher": "zhiweiiii",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -68,10 +68,10 @@
     },
     "category": "DeveloperTool",
     "shortDescription": "AI-native terminal emulator",
-    "longDescription": "Terax, an open-source terminal workspace with multi-tab, file explorer, code editor, web preview, and coding agent integration.",
+    "longDescription": "awei-work, an open-source terminal workspace with multi-tab, file explorer, code editor, web preview, and coding agent integration.",
     "fileAssociations": [
       {
-        "name": "Terax Document",
+        "name": "awei-work Document",
         "role": "Editor",
         "mimeType": "text/plain",
         "ext": [
@@ -141,7 +141,7 @@
     "updater": {
       "pubkey": "",
       "endpoints": [
-        "https://github.com/zhiweiiii/terax-ai-plus/releases/latest/download/latest.json"
+        "https://github.com/zhiweiiii/awei-work/releases/latest/download/latest.json"
       ]
     }
   }

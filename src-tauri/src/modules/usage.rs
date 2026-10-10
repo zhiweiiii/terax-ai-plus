@@ -440,7 +440,7 @@ fn fetch_codex() -> CodexUsage {
         stderr.map(|stderr| thread::spawn(move || drain(&mut BufReader::new(stderr))));
     let result = rx.recv_timeout(TIMEOUT);
     // The app-server is only a read probe. End it immediately after the one
-    // response so it cannot outlive Terax or compete with an open Codex TUI.
+    // response so it cannot outlive awei-work or compete with an open Codex TUI.
     drop(stdin);
     process_job.terminate();
     let _ = child.kill();

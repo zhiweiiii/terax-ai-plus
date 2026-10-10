@@ -34,9 +34,9 @@ const manifestPaths = {
 };
 
 const workspacePackageNames = [
-  "terax",
-  "terax-cli",
-  "terax-control-protocol",
+  "awei-work",
+  "awei-work-cli",
+  "awei-work-control-protocol",
 ];
 
 function readText(path) {
@@ -67,7 +67,7 @@ function readVersion() {
     lockVersions.some((version) => version !== packageVersion)
   ) {
     throw new Error(
-      "Terax version must match in package.json, Cargo.toml, Cargo.lock, and tauri.conf.json.",
+      "awei-work version must match in package.json, Cargo.toml, Cargo.lock, and tauri.conf.json.",
     );
   }
   return packageVersion;
